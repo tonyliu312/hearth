@@ -36,8 +36,8 @@ function Nav({ onOpenCmd }) {
   }, []);
   useEffect(() => subscribe(() => force((n) => n + 1)), []);
   // 强制台北时区：用户在台北/偶尔公出中国，不依赖浏览器/机器时区设置
-  const time = clock.toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Taipei" });
-  const date = clock.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Taipei" });
+  const time = clock.toLocaleTimeString("en-US", { hour12: false });
+  const date = clock.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
   const mode = window.AIData.mode;
   const status = window.AIData.status;
   const isLive = status === "live";
