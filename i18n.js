@@ -92,7 +92,7 @@
       "OSS not exposed · documented": "OSS 不暴露 · 已记录",
       "healthy": "健康", "streaming": "流式传输中",
       // filters / states
-      "All": "全部", "RTX": "RTX", "DGX": "DGX", "Active": "活跃",
+      "All": "全部", "RTX": "独显", "DGX": "统一", "Active": "活跃",
       "Serving": "服务中", "Idle": "空闲", "Chat": "对话",
       "serving": "服务中", "idle": "空闲", "no-metrics": "无指标",
       "online": "在线", "stopped": "已停",
@@ -202,7 +202,7 @@
       "LiteLLM metrics": "LiteLLM 指標", "enterprise": "企業版",
       "OSS not exposed · documented": "OSS 不暴露 · 已記錄",
       "healthy": "健康", "streaming": "串流中",
-      "All": "全部", "RTX": "RTX", "DGX": "DGX", "Active": "活躍",
+      "All": "全部", "RTX": "独显", "DGX": "统一", "Active": "活躍",
       "Serving": "服務中", "Idle": "閒置", "Chat": "對話",
       "serving": "服務中", "idle": "閒置", "no-metrics": "無指標",
       "online": "在線", "stopped": "已停",

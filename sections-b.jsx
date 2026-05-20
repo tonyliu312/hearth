@@ -31,8 +31,8 @@ function NodesSection() {
           auto 居中, 卡片随网格平铺填满, 左右留白天然等距。 */}
       <div className="grid g-5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
         {_NODES.filter((n) => nfilter === "All" ? true
-              : nfilter === "RTX" ? n.id === "atlas"
-              : nfilter === "DGX" ? n.id !== "atlas"
+              : nfilter === "RTX" ? (n.kind || "discrete") === "discrete"
+              : nfilter === "DGX" ? (n.kind || "discrete") !== "discrete"
               : (_live.nodes[n.id] && _live.nodes[n.id].cpu.now > 0))
           .map((n) => <NodeCard key={n.id} node={n} onClick={() => setActive(n)} />)}
       </div>
@@ -45,7 +45,7 @@ function NodesSection() {
 function NodeCard({ node, onClick }) {
   const { t } = useLang();
   const ns = _live.nodes[node.id];
-  const isHost = node.id === "atlas";
+  const isHost = /gateway/i.test(node.role || "");
   return (
     <article className="node" onClick={onClick}>
       <div className="node-head">
@@ -137,7 +137,7 @@ function NodeDetail({ node, onClose }) {
           <DetailMetric label={t("GPU")}            value={ns.gpu.now.toFixed(0)} unit="%" bar={ns.gpu.now} />
           <DetailMetric label={t("VRAM")}           value={(node.gpu.mem * ns.vram.now / 100).toFixed(1)} unit={` / ${node.gpu.mem} GB`} bar={ns.vram.now} color="violet" />
           <DetailMetric label={t("GPU temp")}       value={ns.tempGpu.now.toFixed(0)} unit=" °C" bar={ns.tempGpu.now} color={ns.tempGpu.now > 80 ? "hot" : "ok"} />
-          <DetailMetric label={t("Power draw")}     value={ns.power.now.toFixed(0)} unit=" W"  bar={Math.min(100, ns.power.now / (node.id === "atlas" ? 4.5 : 2.5))} color="hot" />
+          <DetailMetric label={t("Power draw")}     value={ns.power.now.toFixed(0)} unit=" W"  bar={Math.min(100, ns.power.now / (/gateway/i.test(node.role || "") ? 4.5 : 2.5))} color="hot" />
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>

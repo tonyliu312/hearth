@@ -153,7 +153,7 @@
 
   // ── Mock simulator (same logic as the original v0 prototype) ────────
   const liveSeeds = {
-    "atlas":    { gpu: 62, vram: 78, cpu: 41, mem: 58, power: 312, tempGpu: 64, tempCpu: 58, fan: 47, disk: 38, netIn: 220, netOut: 180 },
+    "node-1":   { gpu: 62, vram: 78, cpu: 41, mem: 58, power: 312, tempGpu: 64, tempCpu: 58, fan: 47, disk: 38, netIn: 220, netOut: 180 },
     "spark-01": { gpu: 78, vram: 64, cpu: 36, mem: 72, power: 168, tempGpu: 62, tempCpu: 55, fan: 38, disk: 22, netIn: 540, netOut: 510 },
     "spark-02": { gpu: 84, vram: 68, cpu: 44, mem: 76, power: 175, tempGpu: 66, tempCpu: 57, fan: 41, disk: 19, netIn: 480, netOut: 460 },
     "spark-03": { gpu: 21, vram: 14, cpu: 12, mem: 22, power:  68, tempGpu: 48, tempCpu: 46, fan: 22, disk: 12, netIn:  20, netOut:  18 },
@@ -232,7 +232,7 @@
       ns.vram.now = drift(ns.vram.now, s.vram, 1.2);
       ns.cpu.now = drift(ns.cpu.now, s.cpu, 8);
       ns.mem.now = drift(ns.mem.now, s.mem, 1.0);
-      ns.power.now = driftRaw(ns.power.now, s.power * (0.5 + ns.gpu.now/100), 12, 50, n.id === "atlas" ? 480 : 240);
+      ns.power.now = driftRaw(ns.power.now, s.power * (0.5 + ns.gpu.now/100), 12, 50, /gateway/i.test(n.role) ? 480 : 240);
       ns.tempGpu.now = driftRaw(ns.tempGpu.now, 38 + ns.gpu.now * 0.45, 1.6, 32, 89);
       ns.tempCpu.now = driftRaw(ns.tempCpu.now, 36 + ns.cpu.now * 0.32, 1.4, 30, 84);
       ns.fan.now = driftRaw(ns.fan.now, Math.max(ns.tempGpu.now - 35, 10), 3, 8, 98);
@@ -346,7 +346,7 @@
       const lv = n.live || {};
       const upd = (k, v) => { if (v === undefined || v === null) return;
         ns[k].now = v; ns[k].hist.shift(); ns[k].hist.push(v); };
-      if (n.id === "atlas") upd("gpu", lv.gpu);  // RTX4090 真实 DCGM；Spark GPU 由下方加速器活跃度推导滚动驱动(GB10 DCGM 不可靠, 不灌进历史)
+      if (/gateway/i.test(n.role)) upd("gpu", lv.gpu);  // 网关节点(discrete)用真实 DCGM；Spark GPU 由下方加速器活跃度推导滚动驱动(GB10 DCGM 不可靠, 不灌进历史)
       upd("vram", lv.vram);
       upd("tempGpu", lv.tempGpu); upd("tempCpu", lv.tempCpu); upd("power", lv.power);
       upd("cpu", lv.cpu); upd("mem", lv.mem); upd("disk", lv.disk);
@@ -406,7 +406,7 @@
     //      含义="权重已驻留·预热·0 请求在途"，非真闲置；
     //    有真实推理 → 按真实 tps 升至 18~100%。discrete dGPU 节点保留真实 DCGM。
     NODES.forEach((n) => {
-      if (n.id === "atlas") return;                 // RTX4090 独显, DCGM util 可靠
+      if (/gateway/i.test(n.role)) return;             // 网关(discrete)节点 DCGM util 可靠, 不走推导
       const ns = live.nodes[n.id]; if (!ns) return;
       let act = 0;
       MODELS.forEach((m) => {
