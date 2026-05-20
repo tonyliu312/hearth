@@ -106,10 +106,10 @@ open http://localhost:8080
 ## 路線圖
 
 **v0.1.0 — 設定即資料**(進行中)
-- [ ] `config/nodes.yaml` + `config/models.yaml` 取代 `server/api/main.py` 內的硬寫常數
-- [ ] 節點類型抽象(`discrete` / `unified-arm-soc` / `apple-silicon`),取代 GB10 特殊邏輯
-- [ ] 時區改由瀏覽器自動偵測,移除硬寫 `Asia/Taipei`
-- [ ] `examples/` 拓樸預設(單 4090 / 雙 A100 / 多節點異構)
+- [x] Single `config/hearth.yaml` 取代 `server/api/main.py` 內的硬寫常數
+- [x] 節點類型抽象(`discrete` / `unified-arm-soc` / `apple-silicon`),取代 GB10 特殊邏輯
+- [x] 時區改由瀏覽器決定,移除硬寫 `Asia/Taipei`
+- [x] `examples/` 拓樸預設(單 4090 / 雙 A100 / 多節點異構)
 
 **v0.2.0 — 轉接器外掛化**
 - 可插拔的指標來源轉接器(vLLM / llama.cpp / SGLang / Ollama / 自訂 HTTP)

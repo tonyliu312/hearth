@@ -1,4 +1,4 @@
-# Hearth · Home AI Compute Monitor · FastAPI backend (dual-source)
+# Hearth · FastAPI backend
 #
 # 双源、全只读、零生产影响：
 #   - obs-prometheus (PROMETHEUS_URL)  : DCGM GPU(全 3 节点) + 2 台 Spark 的 node/hwmon
