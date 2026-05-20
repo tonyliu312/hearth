@@ -15,31 +15,31 @@
 (() => {
   // ── Static topology (matches the backend's NODES list) ──────────────
   const NODES = [
-    { id: "atlas",    name: "Atlas",    ip: "192.168.1.20",  role: "Gateway · Edge",   class: "RTX 4090 host",
+    { id: "node-1",  name: "Workstation", ip: "10.0.0.1",      role: "Gateway · Edge",   class: "GPU host",
       os: "Ubuntu 24.04 LTS", kernel: "6.8.0-49", driver: "NVIDIA 560.35", cuda: "12.6",
       gpu: { name: "GeForce RTX 4090",     mem: 24,  fp16: 165.2, fp4: 660.0 },
       cpu: { model: "Ryzen 9 7950X",       cores: 16, threads: 32 },
       ram: 128, disk: 4096, net: "10 GbE",
       services: ["litellm","vllm","ollama","comfyui","prometheus"] },
-    { id: "spark-01", name: "Spark-01", ip: "192.168.1.151", role: "Inference · A",    class: "DGX Spark",
+    { id: "node-2", name: "Inference-1", ip: "10.0.0.2",     role: "Inference",        class: "GPU node",
       os: "Ubuntu 24.04 LTS (DGX OS)", kernel: "6.8.0-49", driver: "NVIDIA 560.40", cuda: "12.6",
       gpu: { name: "GB10 Grace-Blackwell", mem: 128, fp16: 250.0, fp4: 1000.0 },
       cpu: { model: "Grace 20-core ARM",   cores: 20, threads: 20 },
       ram: 128, disk: 4096, net: "200 GbE ConnectX-7",
       services: ["vllm","node-exporter","dcgm"] },
-    { id: "spark-02", name: "Spark-02", ip: "192.168.1.156", role: "Inference · B",    class: "DGX Spark",
+    { id: "node-3", name: "Inference-2", ip: "10.0.0.3",     role: "Inference",        class: "GPU node",
       os: "Ubuntu 24.04 LTS (DGX OS)", kernel: "6.8.0-49", driver: "NVIDIA 560.40", cuda: "12.6",
       gpu: { name: "GB10 Grace-Blackwell", mem: 128, fp16: 250.0, fp4: 1000.0 },
       cpu: { model: "Grace 20-core ARM",   cores: 20, threads: 20 },
       ram: 128, disk: 4096, net: "200 GbE ConnectX-7",
       services: ["vllm","sglang","node-exporter","dcgm"] },
-    { id: "spark-03", name: "Spark-03", ip: "192.168.1.188", role: "Inference · C",    class: "DGX Spark",
+    { id: "node-4", name: "Inference-3", ip: "10.0.0.4",     role: "Inference",        class: "GPU node",
       os: "Ubuntu 24.04 LTS (DGX OS)", kernel: "6.8.0-49", driver: "NVIDIA 560.40", cuda: "12.6",
       gpu: { name: "GB10 Grace-Blackwell", mem: 128, fp16: 250.0, fp4: 1000.0 },
       cpu: { model: "Grace 20-core ARM",   cores: 20, threads: 20 },
       ram: 128, disk: 4096, net: "200 GbE ConnectX-7",
       services: ["vllm","node-exporter","dcgm"] },
-    { id: "spark-04", name: "Spark-04", ip: "192.168.1.189", role: "Inference · D",    class: "DGX Spark",
+    { id: "node-5", name: "Inference-4", ip: "10.0.0.5",     role: "Inference",        class: "GPU node",
       os: "Ubuntu 24.04 LTS (DGX OS)", kernel: "6.8.0-49", driver: "NVIDIA 560.40", cuda: "12.6",
       gpu: { name: "GB10 Grace-Blackwell", mem: 128, fp16: 250.0, fp4: 1000.0 },
       cpu: { model: "Grace 20-core ARM",   cores: 20, threads: 20 },
@@ -187,8 +187,8 @@
     live.cluster.tokTotal = 18_400_000;
     live.cluster.uptimeSec = 86_400 * 12 + 4 * 3600 + 1820;
     live.alerts = [
-      { sev: "warn", msg: "Spark-02 GPU thermal margin reduced", sub: "85°C peak under deepseek-v3.1 load · throttling soft cap", when: "2m ago" },
-      { sev: "ok",   msg: "Atlas · LiteLLM gateway rotated TLS cert", sub: "letsencrypt · expires 2026-08-12", when: "14m ago" },
+      { sev: "warn", msg: "Node-2 GPU thermal margin reduced", sub: "85°C peak under load · soft thermal cap", when: "2m ago" },
+      { sev: "ok",   msg: "Gateway · LiteLLM rotated TLS cert", sub: "letsencrypt · expires 2026-08-12", when: "14m ago" },
       { sev: "hot",  msg: "qwen3-235b-a22b approaching KV-cache pressure", sub: "71% across spark-01/02 · consider evicting cold prefixes", when: "26m ago" },
       { sev: "warn", msg: "spark-03 idle > 4h", sub: "candidate for power-save autopilot", when: "1h ago" },
       { sev: "ok",   msg: "Cluster heartbeat green", sub: "5/5 nodes · Prometheus 15s scrape · 0 drops", when: "1h ago" },
@@ -404,7 +404,7 @@
     //    GB10 无可靠算力计数器，DCGM_GPU_UTIL/功率滞后失真(实测)。语义改为:
     //    后端真实 resident 探针(vLLM 可达且模型已加载) → 12% 基线
     //      含义="权重已驻留·预热·0 请求在途"，非真闲置；
-    //    有真实推理 → 按真实 tps 升至 18~100%。Atlas 独显保留真实 DCGM。
+    //    有真实推理 → 按真实 tps 升至 18~100%。discrete dGPU 节点保留真实 DCGM。
     NODES.forEach((n) => {
       if (n.id === "atlas") return;                 // RTX4090 独显, DCGM util 可靠
       const ns = live.nodes[n.id]; if (!ns) return;

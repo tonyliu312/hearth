@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────
-# LiteLLM config — add this snippet to your existing config.yaml on Atlas.
+# LiteLLM config — add this snippet to your existing LiteLLM config.yaml.
 # Enables the Prometheus middleware so /metrics serves Prometheus scrape data:
 #   litellm_total_tokens_metric{model="…",status="200"}
 #   litellm_total_requests_metric{model="…",status="…"}
@@ -7,7 +7,7 @@
 #   litellm_request_latency_bucket{model="…",le="…"}
 #
 # After updating: `systemctl restart litellm`  (or however you run it)
-# Then verify: `curl http://192.168.1.20:4000/metrics | head`
+ head`| head`
 # ─────────────────────────────────────────────────────────────────────
 
 model_list:

@@ -2,8 +2,8 @@
 #
 # 双源、全只读、零生产影响：
 #   - obs-prometheus (PROMETHEUS_URL)  : DCGM GPU(全 3 节点) + 2 台 Spark 的 node/hwmon
-#   - 宿主 node-exporter (NODE_EXPORTER_URL) : Atlas 自身 node_* + 全部 hwmon 温度
-#     （obs 既有缺陷：bridge 容器抓不到 Atlas 本机 :9100，rtx4090-pc node job down）
+#   - 宿主 node-exporter (NODE_EXPORTER_URL) : host 自身 node_* + 全部 hwmon 温度
+#     (if your obs Prometheus has no scrape job for this host, Hearth directly hits :9100/:9400)
 #
 # 不依赖任何 recording rule —— 聚合在本服务内用原始 PromQL 计算，
 # 因此无需改 obs 的 prometheus.yml（严格不越界）。
@@ -179,7 +179,7 @@ def _by(rs, label):
     return {i["metric"].get(label, "?"): i["value"] for i in rs}
 
 
-# ── 宿主 node-exporter 直采 (Atlas; obs 抓不到本机) ──────────────────
+# ── Host node-exporter direct scrape (when obs Prometheus has no job for this host) ──
 _PROM_LINE = re.compile(r'^([a-zA-Z_:][\w:]*)\{([^}]*)\}\s+([-\d.eE+]+)\s*$')
 _PROM_BARE = re.compile(r'^([a-zA-Z_:][\w:]*)\s+([-\d.eE+]+)\s*$')
 
@@ -257,7 +257,7 @@ def _atlas_temps(scrape: dict) -> list[dict]:
     return sorted(temps, key=lambda t: (-t["celsius"]))
 
 
-# Atlas CPU% / 网络速率需要两次采样求差
+# CPU% / network rates need two-sample diff
 async def _atlas_node_live() -> dict:
     s1 = await _scrape_node_exporter()
     if not s1:
@@ -356,7 +356,7 @@ async def _obs_node_live() -> dict[str, dict]:
             "celsius": round(it["value"], 1)})
 
     # 节点键集 = 所有指标并集（GPU_UTIL 此 DCGM 配置可能整体为空，
-    # 且 Atlas 无 obs node job；仅靠 g/cp 会丢掉只有 temp/power 的节点）
+    # (and a host with no obs node job; relying only on g/cp would drop nodes with only temp/power) 
     universe = set()
     for mp in (g, fu, ff, gt, mt, pw, cp, me, dk, ni, no):
         universe |= set(mp)

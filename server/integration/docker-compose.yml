@@ -12,7 +12,7 @@
 #   docker compose -p ai-monitor -f server/integration/docker-compose.yml down
 # ─────────────────────────────────────────────────────────────────────
 
-name: ai-monitor
+name: hearth
 
 services:
   web:

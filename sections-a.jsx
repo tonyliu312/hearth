@@ -116,14 +116,14 @@ function Hero() {
     <section className="hero" id="overview">
       <div className="hero-eyebrow reveal in">
         <span className="live"><span className="dot" />LIVE · 1.2 s</span>
-        <span>{t("Home AI Compute Center")} · 192.168.1.0/24</span>
+        <span>{t("Home AI Compute Center")}</span>
       </div>
       <h1 className="hero-title reveal in">
         {t("Home")}<br />
         <em>{t("Compute Center")}</em>
       </h1>
       <p className="hero-sub reveal in">
-        {t("A unified telemetry surface for the home AI fabric — RTX 4090 edge + four DGX Spark inference nodes, served behind a single LiteLLM gateway. Every TFLOP, every token, every watt — in real time.")}
+        {t("A unified telemetry surface for your home AI compute cluster — auto-discovers models, surfaces real metrics from vLLM / llama.cpp / LiteLLM, honestly labels what backends don't expose. Every token, every watt — in real time.")}
       </p>
       <div className="hero-meta reveal in">
         <span>{t("UPTIME")} <b>{fmtDuration(cluster.uptimeSec)}</b></span>
@@ -323,7 +323,7 @@ function Cluster() {
       </div>
 
       <div className="grid g-3" style={{ marginTop: 16 }}>
-        <SmallStat label="Peak GPU temp"     value={cluster_peak()} unit="°C" sub="Spark-02 · deepseek load" color="var(--hot)" />
+        <SmallStat label="Peak GPU temp"     value={cluster_peak()} unit="°C" sub="hot node under load" color="var(--hot)" />
         <SmallStat label="Avg power / token" value={(live.cluster.powNow / Math.max(1, live.cluster.tpsNow)).toFixed(2)} unit=" J/tok" sub="lower is better · target ≤ 1.4" color="var(--accent)" />
         <SmallStat label="P95 latency (chat)" value={Math.round(weightedP95())} unit=" ms" sub="weighted across serving models" color="var(--violet)" />
       </div>

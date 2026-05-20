@@ -89,7 +89,7 @@ nodes:
   # ── More nodes example (uncomment / duplicate) ─────────────────────
   # - id: node-2
   #   name: "Inference-1"
-  #   ip: 192.168.1.20
+  #   ip: 192.168.1.11
   #   role: inference
   #   kind: discrete
   #   hw:
@@ -98,8 +98,8 @@ nodes:
   #     cpu_cores: 8
   #     ram_gb: 64
   #   sources:
-  #     node_exporter: "192.168.1.20:9100"
-  #     dcgm: "192.168.1.20:9400"
+  #     node_exporter: "192.168.1.11:9100"
+  #     dcgm: "192.168.1.11:9400"
   #     obs_node_label: "inference-1"
 
 

@@ -15,7 +15,7 @@ function NodesSection() {
         <div>
           <h2 style={{ margin: 0 }}>{t("Five machines. ")}<em>{t("Each a citizen.")}</em></h2>
           <p className="lede" style={{ margin: "14px 0 0" }}>
-            {t("Atlas — the RTX 4090 host — runs the LiteLLM gateway and edge-class workloads. Four DGX Spark boxes carry the heavy inference. Click a node for the full forensic view.")}
+            {t("Each host runs the LiteLLM gateway, an inference engine, or both. Click a node for the full forensic view.")}
           </p>
         </div>
         <div className="btn-seg" role="tablist">
@@ -255,7 +255,7 @@ function ModelsSection() {
         <div>
           <h2 style={{ margin: 0 }}>{t("One endpoint. ")}<em>{t("Every model.")}</em></h2>
           <p className="lede" style={{ margin: "14px 0 0" }}>
-            {t("All inference is routed through LiteLLM on ")}<span className="num" style={{ color: "var(--accent)" }}>192.168.1.20:4000</span>{t(" — OpenAI-compatible API, smart routing, fallbacks, cost & token accounting. Cold models spin up on demand to fit the VRAM budget.")}
+            {t("All inference is routed through LiteLLM on ")}<span className="num" style={{ color: "var(--accent)" }}>{(_live.cluster && _live.cluster.gatewayHost) || "127.0.0.1:4000"}</span>{t(" — OpenAI-compatible API, smart routing, fallbacks, cost & token accounting. Cold models spin up on demand to fit the VRAM budget.")}
           </p>
         </div>
         <div className="btn-seg">
@@ -275,7 +275,7 @@ function ModelsSection() {
               <span className="chip ok"><span className="dot" />{t("healthy")}</span>
             </div>
             <div className="num" style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
-              litellm 1.83.10 · Atlas · 192.168.1.20:4000 · OpenAI-compatible /v1/*
+              litellm · {_live.gatewayHost || "127.0.0.1:4000"} · OpenAI-compatible /v1/*
             </div>
           </div>
           <GatewayStat label={t("Catalog models")} value={_MODELS.length} sub={`${_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp").length} ${t("with live metrics")}`} />
@@ -509,10 +509,13 @@ function FabricSection() {
   const { t } = useLang();
   const [ref, { w }] = useElementSize();
   const H = 360;
-  const ATL = { x: w * 0.5, y: 70, id: "atlas", label: "Atlas · gateway" };
-  const sparkXs = [0.18, 0.38, 0.62, 0.82].map((p) => w * p);
-  const sparks = _NODES.filter((n) => n.id !== "atlas").map((n, i) => ({
-    x: sparkXs[i], y: H - 70, id: n.id, label: n.name,
+  // 网关节点(default 第一个 role=gateway 或第一个节点) + 推理节点们
+  const GW = _NODES.find((n) => /gateway/i.test(n.role || "")) || _NODES[0];
+  const ATL = { x: w * 0.5, y: 70, id: GW.id, label: (GW.name + " · gateway") };
+  const peers = _NODES.filter((n) => n.id !== GW.id);
+  const peerXs = peers.map((_, i) => w * (peers.length === 1 ? 0.5 : 0.18 + i * (0.64 / Math.max(1, peers.length - 1))));
+  const sparks = peers.map((n, i) => ({
+    x: peerXs[i], y: H - 70, id: n.id, label: n.name,
   }));
 
   // Throughput on each link (atlas → spark)
@@ -533,7 +536,7 @@ function FabricSection() {
         <div>
           <h2 style={{ margin: 0 }}>{t("The wires ")}<em>{t("between everything.")}</em></h2>
           <p className="lede" style={{ margin: "14px 0 0" }}>
-            {t("Atlas peers with every Spark over 10 GbE — North-South link intensity & pulse are driven by real node-exporter throughput. The 200 GbE ConnectX-7 Spark-to-Spark mesh is physical topology only (RDMA throughput not instrumented).")}
+            {t("The gateway host peers with every inference node — link intensity & pulse are driven by real node-exporter throughput. Inter-node fabric (RDMA/InfiniBand) is physical topology only (throughput not instrumented by default).")}
           </p>
         </div>
       </div>
@@ -579,7 +582,7 @@ function FabricSection() {
                   );
                 })}
                 {/* atlas node */}
-                <NodeBlob x={ATL.x} y={ATL.y} label="ATLAS · RTX 4090" sub="192.168.1.20" color="var(--accent)" util={_live.nodes["atlas"].gpu.now} />
+                <NodeBlob x={ATL.x} y={ATL.y} label={GATEWAY_NODE.name.toUpperCase() + " · " + GATEWAY_NODE.gpu.name.split(" ").slice(-2).join(" ")} sub={GATEWAY_NODE.ip} color="var(--accent)" util={(_live.nodes[GATEWAY_NODE.id]||{}).gpu?.now || 0} />
                 {sparks.map((s) => (
                   <NodeBlob key={s.id} x={s.x} y={s.y}
                             label={s.label.toUpperCase() + " · DGX SPARK"}
