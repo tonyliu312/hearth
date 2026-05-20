@@ -70,15 +70,23 @@ For multi-node configuration, see [`docs/topology.md`](docs/topology.md) (coming
 
 ## What it monitors (out of the box)
 
-| Backend type | Detection | Metrics |
-|---|---|---|
-| **vLLM** | Probes `/metrics` for `vllm:*` counters | tps, TTFT, TPOT, KV%, p50/p95/p99 (e2e), running, waiting, resident |
-| **llama.cpp** | Probes `/metrics` for `llamacpp:*` counters | tps, TPOT, running, waiting (TTFT/KV/p* not exposed by upstream — shown as `—`) |
-| **Gateway-healthy, no `/metrics`** | Falls back to `/v1/models` reachability | "online" state, no detail metrics |
-| **Node OS** | Prometheus + node_exporter + DCGM | CPU, RAM, GPU util, VRAM, network, disk, temperatures, power |
-| **Gateway logs** | LiteLLM OSS Postgres `LiteLLM_SpendLogs` | Recent requests, status, latency, model |
+| Backend / source | Today | Metrics | OSS user fit |
+|---|---|---|---|
+| **vLLM** `/metrics` | ✅ Full | tps · TTFT · TPOT · KV% · p50/p95/p99 · running · waiting · resident | 🟢 Drop-in |
+| **llama.cpp** `/metrics` | ✅ Partial (upstream limit) | tps · TPOT · running · waiting (TTFT / KV / p* not exposed by upstream — shown as `—`) | 🟢 Drop-in |
+| **LiteLLM gateway** `/health` + `/model/info` | ✅ Auto-discovery | Model list, up/down, route → backend | 🟢 Drop-in |
+| **LiteLLM gateway** `LiteLLM_SpendLogs` Postgres | ✅ Read-only SELECT | Per-request log: model, status, latency, tokens | 🟢 Drop-in |
+| **Gateway-healthy, no `/metrics`** | ✅ Honest "online" | State only, no fake numbers | 🟢 Drop-in |
+| **node_exporter + dcgm-exporter** (Prometheus) | ✅ Via your obs stack | CPU · RAM · GPU util · VRAM · network · disk · temps · power | 🟢 Drop-in |
+| **SGLang** `sglang:*` | 🟡 Shows as "online" | No detail metrics yet | 🟡 v0.2.0 adapter |
+| **Ollama** native | 🟡 OS-level only | Per-model metrics absent (Ollama doesn't ship `/metrics`) | 🟡 v0.2.0 adapter OR put Ollama behind LiteLLM |
+| **Alert push** (Telegram / LINE / ntfy / Slack…) | 🔴 Not yet | Alert rules fire to UI, no push channel | 🔴 v0.2.0 |
 
-Adding a new backend type = one adapter file. See [`docs/adapters.md`](docs/adapters.md) (coming).
+> **alpha reality check**: best fit today is *LiteLLM gateway + vLLM and/or llama.cpp + node_exporter + dcgm-exporter*. That's how Hearth was developed and tested. Other configurations work but with the caveats above.
+
+**New here?** Read [`docs/getting-started.md`](docs/getting-started.md) — 5-min walkthrough from `git clone` to a running dashboard, including common gotchas.
+
+Adding a new backend type = one adapter file. See [`docs/adapters.md`](docs/adapters.md) (stub; full guide in v0.2.0).
 
 ## Screenshots
 

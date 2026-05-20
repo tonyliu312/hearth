@@ -70,15 +70,23 @@ open http://localhost:8080
 
 ## 监控范围(开箱即用)
 
-| 后端类型 | 探测方式 | 指标 |
-|---|---|---|
-| **vLLM** | 探 `/metrics` 找 `vllm:*` 计数器 | tps、TTFT、TPOT、KV%、p50/p95/p99(e2e)、运行中请求数、等待数、驻留状态 |
-| **llama.cpp** | 探 `/metrics` 找 `llamacpp:*` 计数器 | tps、TPOT、运行中、等待数(TTFT/KV/p* 上游不暴露——显示为 `—`) |
-| **网关健康但无 `/metrics`** | 退到 `/v1/models` 探活 | "online" 状态,无详细指标 |
-| **节点 OS** | Prometheus + node_exporter + DCGM | CPU、内存、GPU 利用率、显存、网络、磁盘、温度、功率 |
-| **网关日志** | LiteLLM 开源 Postgres `LiteLLM_SpendLogs` | 最近请求、状态、延迟、模型 |
+| 后端 / 来源 | 当前状态 | 指标 | 用户友好度 |
+|---|---|---|---|
+| **vLLM** `/metrics` | ✅ 完整 | tps · TTFT · TPOT · KV% · p50/p95/p99 · 运行/等待 · 驻留 | 🟢 开箱即用 |
+| **llama.cpp** `/metrics` | ✅ 部分(上游限制) | tps · TPOT · 运行/等待(TTFT/KV/p* 上游不暴露 — 显 `—`) | 🟢 开箱即用 |
+| **LiteLLM 网关** `/health` + `/model/info` | ✅ 自动发现 | 模型列表、up/down、route → backend | 🟢 开箱即用 |
+| **LiteLLM 网关** `LiteLLM_SpendLogs` Postgres | ✅ 只读 SELECT | 每请求日志:模型、状态、延迟、token | 🟢 开箱即用 |
+| **网关健康但无 `/metrics`** | ✅ 诚实 "online" | 仅状态,绝不偽造数字 | 🟢 开箱即用 |
+| **node_exporter + dcgm-exporter** (Prometheus) | ✅ 走你的 obs 栈 | CPU · 内存 · GPU 利用率 · 显存 · 网络 · 磁盘 · 温度 · 功率 | 🟢 开箱即用 |
+| **SGLang** `sglang:*` | 🟡 显示为 "online" | 尚无详细指标 | 🟡 v0.2.0 适配器 |
+| **Ollama** 原生 | 🟡 仅 OS 层 | 模型级指标缺失(Ollama 默认不暴露 `/metrics`) | 🟡 v0.2.0 适配器或把 Ollama 挂在 LiteLLM 后面 |
+| **告警推送**(Telegram / LINE / ntfy / Slack…) | 🔴 尚未 | 告警规则触发到 UI,无推送渠道 | 🔴 v0.2.0 |
 
-加新后端类型 = 加一个适配器文件即可。见 [`docs/adapters.md`](docs/adapters.md)(规划中)。
+> **alpha 现实期望值**:今天最佳组合是 *LiteLLM 网关 + vLLM 与/或 llama.cpp + node_exporter + dcgm-exporter*。Hearth 就是在这套组合上开发和测过的。其他配置能用,但有上面注的 caveat。
+
+**第一次用?** 看 [`docs/getting-started.md`](docs/getting-started.md) — 5 分钟从 `git clone` 跑到仪表盘的完整教程,含常见踩坑。
+
+加新后端类型 = 加一个适配器文件即可。见 [`docs/adapters.md`](docs/adapters.md)(stub,完整指南 v0.2.0)。
 
 ## 截图
 
