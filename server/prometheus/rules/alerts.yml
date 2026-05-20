@@ -1,0 +1,94 @@
+# AI-MONITOR · alert rules
+# Conservative thresholds for a home cluster. Tune in alertmanager
+# routing if you don't want to see informational fires.
+
+groups:
+- name: nodes
+  interval: 30s
+  rules:
+    - alert: NodeDown
+      expr: up{job="node"} == 0
+      for: 2m
+      labels: { severity: critical }
+      annotations:
+        summary: "Node {{ $labels.node }} is down"
+        description: "node-exporter on {{ $labels.node }} ({{ $labels.instance }}) has been unreachable for 2 minutes."
+
+    - alert: NodeHighCPU
+      expr: 100 - (avg by (node) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+      for: 10m
+      labels: { severity: warning }
+      annotations:
+        summary: "{{ $labels.node }} CPU above 90% for 10m"
+
+    - alert: NodeLowDisk
+      expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 10
+      for: 15m
+      labels: { severity: warning }
+      annotations:
+        summary: "{{ $labels.node }} root filesystem below 10% free"
+
+    - alert: NodeMemoryPressure
+      expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 92
+      for: 10m
+      labels: { severity: warning }
+      annotations:
+        summary: "{{ $labels.node }} memory above 92% used"
+
+- name: gpus
+  interval: 30s
+  rules:
+    - alert: GpuHotShutdown
+      expr: DCGM_FI_DEV_GPU_TEMP > 90
+      for: 1m
+      labels: { severity: critical }
+      annotations:
+        summary: "GPU on {{ $labels.node }} above 90 °C — thermal cliff"
+
+    - alert: GpuThermalWarn
+      expr: DCGM_FI_DEV_GPU_TEMP > 83
+      for: 5m
+      labels: { severity: warning }
+      annotations:
+        summary: "GPU on {{ $labels.node }} sustained above 83 °C"
+
+    - alert: VramPressure
+      expr: (DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE)) * 100 > 92
+      for: 5m
+      labels: { severity: warning }
+      annotations:
+        summary: "{{ $labels.node }} VRAM > 92% — risk of OOM evictions"
+
+    - alert: PowerCap
+      expr: DCGM_FI_DEV_POWER_USAGE > 0.95 * DCGM_FI_DEV_POWER_MGMT_LIMIT
+      for: 3m
+      labels: { severity: info }
+      annotations:
+        summary: "{{ $labels.node }} GPU drawing within 5% of power cap"
+
+- name: inference
+  interval: 30s
+  rules:
+    - alert: KvCachePressure
+      expr: vllm:gpu_cache_usage_perc > 0.85
+      for: 5m
+      labels: { severity: warning }
+      annotations:
+        summary: "{{ $labels.model }} KV-cache above 85% — degraded throughput"
+
+    - alert: HighRequestErrors
+      expr: |
+        sum by (model) (rate(litellm_total_requests_metric{status=~"5.."}[5m]))
+          /
+        sum by (model) (rate(litellm_total_requests_metric[5m])) > 0.02
+      for: 5m
+      labels: { severity: warning }
+      annotations:
+        summary: "{{ $labels.model }} error rate > 2% over last 5m"
+
+    - alert: LatencyP95Regression
+      expr: histogram_quantile(0.95, sum by (le, model) (rate(litellm_request_latency_bucket[5m]))) > 8
+      for: 10m
+      labels: { severity: warning }
+      annotations:
+        summary: "{{ $labels.model }} P95 latency > 8s"

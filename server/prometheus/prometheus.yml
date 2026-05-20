@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────────────────────────────
+# Hearth · Prometheus scrape config
+#
+# This file is an EXAMPLE topology. Replace targets with your own
+# node IPs / hostnames. The dashboard auto-discovers models from the
+# LiteLLM gateway; this file feeds node-level OS + GPU metrics.
+#
+# 🛣  Roadmap (v0.1.0): this static config will be generated from a
+#     declarative `config/nodes.yaml` so you only edit one file.
+# ─────────────────────────────────────────────────────────────────────
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: home-ai
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: [alertmanager:9093]
+
+# ─────────────────────────────────────────────────────────────────────
+scrape_configs:
+
+  # ── Prometheus self ──────────────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
+
+  # ── Node-level OS metrics (CPU, RAM, disk, network) ──────────────
+  # Single-host default — extend with one target block per node.
+  - job_name: node
+    static_configs:
+      - targets: [host.docker.internal:9100]
+        labels: { node: node-1, role: gateway }
+      # - targets: [10.0.0.11:9100]
+      #   labels: { node: node-2, role: inference }
+
+  # ── GPU metrics via DCGM (NVIDIA) ────────────────────────────────
+  # Install dcgm-exporter on each GPU host; reach it on :9400.
+  - job_name: dcgm
+    static_configs:
+      - targets: [host.docker.internal:9400]
+        labels: { node: node-1 }
+      # - targets: [10.0.0.11:9400]
+      #   labels: { node: node-2 }
+
+  # ── LiteLLM gateway (request count, token count, latency) ────────
+  # Requires `success_callback: ["prometheus"]` in your LiteLLM config
+  # AND a LiteLLM build that exposes the prometheus callback (note: this
+  # endpoint is enterprise-gated in some recent OSS builds — the Hearth
+  # API reads SpendLogs from Postgres directly as a fallback).
+  - job_name: litellm
+    metrics_path: /metrics
+    static_configs:
+      - targets: [host.docker.internal:4000]
+        labels: { service: litellm }
+
+  # ── vLLM / SGLang / llama.cpp per-model engines ──────────────────
+  # vLLM exposes /metrics with TTFT, TPOT, KV-cache. llama.cpp exposes
+  # llamacpp:* counters. SGLang exposes sglang:* counters. Add one
+  # target per model server you run.
+  - job_name: vllm
+    metrics_path: /metrics
+    static_configs:
+      - targets: [host.docker.internal:8000]
+        labels: { engine: vllm, model: example-model }
+      # - targets: [10.0.0.11:8001]
+      #   labels: { engine: vllm, model: another-model }
+
+  # ── Alertmanager self ────────────────────────────────────────────
+  - job_name: alertmanager
+    static_configs:
+      - targets: [alertmanager:9093]

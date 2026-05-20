@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-lint:
+    name: Python · syntax + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax check
+        run: python -m py_compile server/api/main.py
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint (non-blocking, alpha)
+        run: ruff check server/ || true
+
+  js-syntax:
+    name: JS / JSX · syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Node syntax check (plain JS only)
+        run: |
+          for f in data.js i18n.js; do
+            echo "::group::$f"
+            node --check "$f"
+            echo "::endgroup::"
+          done
+      - name: JSX files are present (no build step yet)
+        run: ls -la *.jsx
+
+  docs:
+    name: Docs · required files present
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check standard OSS files
+        run: |
+          for f in LICENSE README.md SECURITY.md CONTRIBUTING.md CODE_OF_CONDUCT.md CHANGELOG.md; do
+            test -f "$f" || { echo "::error::Missing $f"; exit 1; }
+          done

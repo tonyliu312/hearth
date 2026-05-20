@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="regular" data-motion="1">
+<head>
+<meta charset="utf-8" />
+<title>Hearth · Home AI Compute Monitor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="styles.css?v=20260520u" />
+<style>
+  /* font-display tweak for tweaks panel injected light backdrop */
+  body { background: var(--bg); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- pre-React init: pin the EDITMODE defaults so Tweaks can rewrite them -->
+<script>
+  const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+    "theme": "dark",
+    "accent": "#0a84ff",
+    "density": "regular",
+    "tickMs": 1200,
+    "motion": true,
+    "dataSource": "auto"
+  }/*EDITMODE-END*/;
+</script>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<!-- ?v= cache-bust: 旧 nginx.conf 曾把 .js/.jsx 设 immutable 7d，
+     浏览器硬刷新都不重取；index.html 是 no-cache 必重验证，借此换 URL 强制拉新 -->
+<script src="data.js?v=20260520u"></script>
+<script src="i18n.js?v=20260520u"></script>
+<script type="text/babel" data-presets="react" src="charts.jsx?v=20260520u"></script>
+<script type="text/babel" data-presets="react" src="tweaks-panel.jsx?v=20260520u"></script>
+<script type="text/babel" data-presets="react" src="sections-a.jsx?v=20260520u"></script>
+<script type="text/babel" data-presets="react" src="sections-b.jsx?v=20260520u"></script>
+<script type="text/babel" data-presets="react" src="app.jsx?v=20260520u"></script>
+</body>
+</html>
