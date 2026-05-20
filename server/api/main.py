@@ -1084,8 +1084,10 @@ async def topology():
     return {
         "nodes": [{"id": n["id"], "ip": n["ip"], "name": n["name"],
                    "class": n["class"]} for n in NODES],
-        "links": [{"a": "atlas", "b": n["id"], "kind": "ns", "speed": "10G"}
-                  for n in NODES if n["id"] != "atlas"],
+        gw = next((x["id"] for x in NODES if "gateway" in (x.get("role","").lower())), NODES[0]["id"] if NODES else "node-1")
+        return {"nodes": [{"id": n["id"], "name": n["name"]} for n in NODES],
+                "links": [{"a": gw, "b": n["id"], "kind": "ns", "speed": "10G"}
+                  for n in NODES if n["id"] != gw],
     }
 
 
