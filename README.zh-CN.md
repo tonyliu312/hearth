@@ -106,10 +106,10 @@ open http://localhost:8080
 ## 路线图
 
 **v0.1.0 — 配置即数据**(进行中)
-- [ ] `config/nodes.yaml` + `config/models.yaml` 取代 `server/api/main.py` 里的硬编码常量
-- [ ] 节点类型抽象(`discrete` / `unified-arm-soc` / `apple-silicon`),取代 GB10 特殊逻辑
-- [ ] 时区自动探测浏览器,移除硬编码 `Asia/Taipei`
-- [ ] `examples/` 拓扑预设(单 4090 / 双 A100 / 多节点异构)
+- [x] Single `config/hearth.yaml` 取代 `server/api/main.py` 里的硬编码常量
+- [x] 节点类型抽象(`discrete` / `unified-arm-soc` / `apple-silicon`),取代 GB10 特殊逻辑
+- [x] 时区改由浏览器决定,移除硬编码 `Asia/Taipei`
+- [x] `examples/` 拓扑预设(单 4090 / 双 A100 / 多节点异构)
 
 **v0.2.0 — 适配器插件化**
 - 可插拔的指标源适配器(vLLM / llama.cpp / SGLang / Ollama / 自定义 HTTP)

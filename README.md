@@ -106,10 +106,10 @@ Adding a new backend type = one adapter file. See [`docs/adapters.md`](docs/adap
 ## Roadmap
 
 **v0.1.0 — Configuration as data** *(in progress)*
-- [ ] `config/nodes.yaml` + `config/models.yaml` replace hard-coded constants in `server/api/main.py`
-- [ ] Node-type abstraction (`discrete` / `unified-arm-soc` / `apple-silicon`) instead of GB10 specials
-- [ ] Timezone auto-detect from browser instead of hard-coded
-- [ ] `examples/` topology presets (single-4090, dual-A100, multi-node-heterogeneous)
+- [x] Single `config/hearth.yaml` replace hard-coded constants in `server/api/main.py`
+- [x] Node-type abstraction (`discrete` / `unified-arm-soc` / `apple-silicon`) instead of GB10 specials
+- [x] Timezone — browser-local from browser instead of hard-coded
+- [x] `examples/` topology presets (single-4090, dual-A100, multi-node-heterogeneous)
 
 **v0.2.0 — Adapter plugins**
 - Pluggable metrics-source adapters (vLLM / llama.cpp / SGLang / Ollama / custom HTTP)

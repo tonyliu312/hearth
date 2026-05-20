@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────
-# Tony 的家庭智算中心监控系统 · 非破坏性集成 overlay (host-API 变体)
+# Hearth · integration overlay (host-API variant — non-destructive)
 #
 # 换攻击面记录：此大陆网络下 docker buildkit/容器出网 DNS(1.1.1.1/8.8.8.8)
 # 被墙，apt/pip 在容器内必失败 → 弃 docker build。API 改宿主 venv 直跑
