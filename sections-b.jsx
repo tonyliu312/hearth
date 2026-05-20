@@ -465,7 +465,7 @@ function TelemetrySection() {
                 const cls = stat === "200" ? "ok" : stat === "4xx" ? "warn" : "bad";
                 return (
                   <div className={"log-row " + cls} key={e.t.getTime() + "-" + i}>
-                    <span className="t">{e.t.toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Taipei" })}</span>
+                    <span className="t">{e.t.toLocaleTimeString("en-US", { hour12: false })}</span>
                     <span className="meth">{stat}</span>
                     <span className="log-meta"><span className="log-path">{e.meth.split(" ")[1]} <span style={{ color: "var(--ink-4)" }}>→</span> </span><b style={{ color: "var(--ink)", fontWeight: 500 }}>{e.model}</b></span>
                     <span className="lat">{typeof e.lat === "number" ? e.lat + " ms" : "—"}</span>

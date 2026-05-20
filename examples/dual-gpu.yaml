@@ -1,0 +1,45 @@
+# =====================================================================
+# Hearth · example topology: dual GPU on one host
+# =====================================================================
+# One physical host with 2× RTX 3090, running vLLM with tensor-parallel=2
+# behind a LiteLLM gateway on the same host. Hearth still treats this as
+# ONE node — the two GPUs are visible through DCGM under the same host.
+# =====================================================================
+
+display:
+  cluster_name: "Dual-3090 Box"
+
+gateway:
+  type: litellm
+  enabled: true
+  base_url: "http://127.0.0.1:4000"
+  master_key_env: "LITELLM_MASTER_KEY"
+
+nodes:
+  - id: gpu-host
+    name: "GPU Host"
+    ip: 192.168.1.50
+    role_label: "Gateway · Inference (TP=2)"
+    kind: discrete
+    class: "Dual RTX 3090"
+    hw:
+      gpu: "2× GeForce RTX 3090"
+      vram_gb: 48                         # 2 × 24
+      cpu_model: "Threadripper PRO 5965WX"
+      cpu_cores: 24
+      cpu_threads: 48
+      ram_gb: 256
+      disk_gb: 8192
+      net: "10 GbE"
+    sources:
+      node_exporter: "192.168.1.50:9100"
+      dcgm: "192.168.1.50:9400"
+      obs_node_label: "gpu-host"
+    services: [litellm, vllm]
+
+model_meta:
+  llama-3.1-70b-tp2:
+    display: "Llama 3.1 70B · TP=2"
+    vendor: "Meta"
+    kind: chat
+    tags: [reasoning, TP=2]

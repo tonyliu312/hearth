@@ -1,0 +1,130 @@
+# =====================================================================
+# Hearth · example topology: heterogeneous multi-node cluster
+# =====================================================================
+# A common "ambitious home lab" shape: a single x86 box with a discrete
+# GPU acting as gateway + light workloads, and N ARM SoC nodes (DGX
+# Spark / Jetson AGX Orin) carrying the heavy LLM inference via
+# tensor-parallel.
+#
+# The `kind` field tells Hearth how to interpret VRAM% — discrete uses
+# DCGM FB_USED, unified-arm-soc uses node_exporter MemAvailable since
+# the GPU shares system memory.
+# =====================================================================
+
+display:
+  cluster_name: "Mixed Cluster"
+
+gateway:
+  type: litellm
+  enabled: true
+  base_url: "http://10.0.0.1:4000"
+  master_key_env: "LITELLM_MASTER_KEY"
+
+nodes:
+  # ── Gateway / edge: discrete dGPU host ──────────────────────────────
+  - id: gateway
+    name: "Workstation"
+    ip: 10.0.0.1
+    role_label: "Gateway · Edge"
+    kind: discrete
+    class: "RTX 4090 host"
+    hw:
+      gpu: "GeForce RTX 4090"
+      vram_gb: 24
+      cpu_model: "Ryzen 9 7950X"
+      cpu_cores: 16
+      cpu_threads: 32
+      ram_gb: 128
+      disk_gb: 4096
+      net: "10 GbE"
+    sources:
+      node_exporter: "10.0.0.1:9100"
+      dcgm: "10.0.0.1:9400"
+      obs_node_label: "workstation"
+    services: [litellm, comfyui]
+
+  # ── 4× ARM SoC inference nodes (DGX Spark / similar) ────────────────
+  - id: infer-1
+    name: "Inference-1"
+    ip: 10.0.0.2
+    role_label: "Inference · ray-head"
+    kind: unified-arm-soc                 # GPU shares system memory
+    class: "ARM SoC inference"
+    hw:
+      gpu: "GB10 Grace-Blackwell"
+      vram_gb: 128                        # actually shared system memory
+      cpu_model: "Grace 20-core ARM"
+      cpu_cores: 20
+      cpu_threads: 20
+      ram_gb: 128
+      disk_gb: 4096
+      net: "200 GbE ConnectX-7"
+    sources:
+      node_exporter: "10.0.0.2:9100"
+      dcgm: "10.0.0.2:9400"
+      obs_node_label: "infer-1"
+    services: [vllm, ray-head]
+
+  - id: infer-2
+    name: "Inference-2"
+    ip: 10.0.0.3
+    role_label: "Inference · ray-worker"
+    kind: unified-arm-soc
+    class: "ARM SoC inference"
+    hw:
+      gpu: "GB10 Grace-Blackwell"
+      vram_gb: 128
+      cpu_model: "Grace 20-core ARM"
+      cpu_cores: 20
+      ram_gb: 128
+    sources:
+      node_exporter: "10.0.0.3:9100"
+      dcgm: "10.0.0.3:9400"
+      obs_node_label: "infer-2"
+    services: [vllm, ray-worker]
+
+  - id: infer-3
+    name: "Inference-3"
+    ip: 10.0.0.4
+    role_label: "Inference · ray-worker"
+    kind: unified-arm-soc
+    class: "ARM SoC inference"
+    hw:
+      gpu: "GB10 Grace-Blackwell"
+      vram_gb: 128
+      cpu_cores: 20
+      ram_gb: 128
+    sources:
+      node_exporter: "10.0.0.4:9100"
+      dcgm: "10.0.0.4:9400"
+      obs_node_label: "infer-3"
+    services: [vllm, ray-worker]
+
+  - id: infer-4
+    name: "Inference-4"
+    ip: 10.0.0.5
+    role_label: "Inference · ray-worker"
+    kind: unified-arm-soc
+    class: "ARM SoC inference"
+    hw:
+      gpu: "GB10 Grace-Blackwell"
+      vram_gb: 128
+      cpu_cores: 20
+      ram_gb: 128
+    sources:
+      node_exporter: "10.0.0.5:9100"
+      dcgm: "10.0.0.5:9400"
+      obs_node_label: "infer-4"
+    services: [vllm, ray-worker]
+
+# Apple Silicon variant (if you have a Mac in the cluster instead of
+# DGX Spark, use `kind: apple-silicon` — Hearth treats it the same way
+# as unified-arm-soc for VRAM%):
+#
+#   - id: mac-1
+#     name: "Mac Studio"
+#     ip: 10.0.0.6
+#     kind: apple-silicon
+#     hw: { gpu: "Apple M2 Ultra", vram_gb: 192, ... }
+#     sources: { node_exporter: "10.0.0.6:9100" }    # no DCGM on Apple
+#     services: [mlx, ollama]

@@ -13,9 +13,11 @@
 
 import os
 import re
+import sys
 import time
 import json
 import asyncio
+from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 
@@ -33,54 +35,106 @@ LITELLM_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 CORS        = os.environ.get("CORS_ORIGINS",      "*").split(",")
 TICK_SEC    = float(os.environ.get("TICK_SEC",    "1.5"))
 
-# 静态拓扑 —— `obs_node` 是该节点在 obs-prometheus 里的真实 `node` 标签值
-# （已 curl 验证）；`source` 决定 node_*/hwmon 走 obs 还是宿主直采。
-# spark-03/04 当前未被 obs 纳管 → obs_node=None，诚实显示无数据。
-# ─────────────────────────────────────────────────────────────────
-# TODO(P1): replace hardcoded NODES with `config/nodes.yaml`.
-# This is an EXAMPLE topology from the upstream personal seed —
-# replace IPs / hostnames / obs_node tags to match your cluster.
-# A node `kind` field (discrete | unified-arm-soc | apple-silicon)
-# will replace the GB10 unified-memory specials in v0.1.0.
-# ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# Topology loaded from YAML (`$HEARTH_CONFIG`, default /etc/hearth/config.yaml).
+# Schema docs: docs/topology.md  ·  example: config/hearth.example.yaml
+#
+# Each node carries a `kind` field that replaces the legacy GB10-special:
+#   - discrete       : dedicated VRAM GPU (use DCGM FB_USED/FB_FREE for VRAM%)
+#   - unified-arm-soc: GPU shares system memory (GB10 / Jetson) — use
+#                      node_exporter MemAvailable for VRAM%
+#   - apple-silicon  : same unified-memory treatment as ARM SoC (mlx, Ollama on Metal)
+#
+# `node_source`: "obs"   → metrics via the obs Prometheus we scrape from
+#                "direct"→ Hearth API scrapes the host's :9100/:9400 itself
+#                          (used when this host isn't in the obs Prometheus job)
+# Single-host default activates if the YAML is absent — single localhost node.
+# ─────────────────────────────────────────────────────────────────────
 
-NODES = [
-    {"id": "atlas", "name": "Atlas", "ip": "192.168.1.20", "class": "RTX 4090 host",
-     "role": "Gateway · Edge", "obs_node": "rtx4090-pc", "node_source": "direct",
-     "gpu": {"name": "GeForce RTX 4090", "mem": 24, "fp16": 165.2, "fp4": 660.0},
-     "cpu": {"model": "Ryzen 9 7950X", "cores": 16, "threads": 32},
-     "ram": 128, "disk": 4096, "net": "10 GbE",
-     "services": ["litellm", "open-webui", "obs-stack"]},
-    {"id": "spark-01", "name": "Spark-01", "ip": "192.168.1.151", "class": "DGX Spark",
-     "role": "Inference · ray-head", "obs_node": "spark-34d3", "node_source": "obs",
-     "gpu": {"name": "GB10 Grace-Blackwell", "mem": 128, "fp16": 250.0, "fp4": 1000.0},
-     "cpu": {"model": "Grace 20-core ARM", "cores": 20, "threads": 20},
-     "ram": 128, "disk": 4096, "net": "200 GbE ConnectX-7",
-     "services": ["vllm", "node-exporter", "dcgm"]},
-    {"id": "spark-02", "name": "Spark-02", "ip": "192.168.1.156", "class": "DGX Spark",
-     "role": "Inference · ray-worker", "obs_node": "spark-5135", "node_source": "obs",
-     "gpu": {"name": "GB10 Grace-Blackwell", "mem": 128, "fp16": 250.0, "fp4": 1000.0},
-     "cpu": {"model": "Grace 20-core ARM", "cores": 20, "threads": 20},
-     "ram": 128, "disk": 4096, "net": "200 GbE ConnectX-7",
-     "services": ["vllm", "node-exporter", "dcgm"]},
-    {"id": "spark-03", "name": "Spark-03", "ip": "192.168.1.188", "class": "DGX Spark",
-     "role": "Inference · ray-worker", "obs_node": "spark-1475", "node_source": "obs",
-     "gpu": {"name": "GB10 Grace-Blackwell", "mem": 128, "fp16": 250.0, "fp4": 1000.0},
-     "cpu": {"model": "Grace 20-core ARM", "cores": 20, "threads": 20},
-     "ram": 128, "disk": 4096, "net": "200 GbE ConnectX-7",
-     "services": ["vllm"]},
-    {"id": "spark-04", "name": "Spark-04", "ip": "192.168.1.189", "class": "DGX Spark",
-     "role": "Inference · ray-worker", "obs_node": "spark-25c1", "node_source": "obs",
-     "gpu": {"name": "GB10 Grace-Blackwell", "mem": 128, "fp16": 250.0, "fp4": 1000.0},
-     "cpu": {"model": "Grace 20-core ARM", "cores": 20, "threads": 20},
-     "ram": 128, "disk": 4096, "net": "200 GbE ConnectX-7",
-     "services": ["vllm"]},
+
+def _default_config() -> dict:
+    """Single-host localhost default — first `docker compose up` works with no YAML."""
+    return {
+        "display": {"cluster_name": "Home Cluster"},
+        "gateway": {"type": "litellm", "enabled": True,
+                    "base_url": os.environ.get("LITELLM_URL", "http://host.docker.internal:4000"),
+                    "master_key_env": "LITELLM_MASTER_KEY"},
+        "nodes": [{
+            "id": "node-1", "name": "localhost", "ip": "127.0.0.1",
+            "role_label": "node", "kind": "discrete",
+            "class": "GPU host",
+            "hw": {"gpu": "—", "vram_gb": 0, "cpu_cores": 0, "cpu_threads": 0, "ram_gb": 0},
+            "sources": {"node_exporter": "host.docker.internal:9100",
+                        "dcgm": "host.docker.internal:9400"},
+        }],
+        "model_meta": {},
+    }
+
+
+def _load_config(path: str) -> dict:
+    """Load Hearth YAML config; fall back to single-host default if absent/invalid."""
+    try:
+        import yaml                        # noqa: WPS433 — optional dep, fail soft
+    except ImportError:
+        print("[hearth] pyyaml not installed; using single-host default", file=sys.stderr)
+        return _default_config()
+    p = Path(path) if path else None
+    if p and p.exists():
+        try:
+            data = yaml.safe_load(p.read_text()) or {}
+            if isinstance(data, dict) and data.get("nodes"):
+                return data
+            print(f"[hearth] config {path} loaded but has no nodes; using default", file=sys.stderr)
+        except Exception as e:
+            print(f"[hearth] failed to parse {path}: {e}; using default", file=sys.stderr)
+    return _default_config()
+
+
+def _node_from_yaml(y: dict) -> dict:
+    """YAML node entry → internal flat dict (preserves legacy NODES shape so
+    the rest of main.py is untouched)."""
+    hw = y.get("hw") or {}
+    src = y.get("sources") or {}
+    obs_label = src.get("obs_node_label")
+    return {
+        "id": y["id"],
+        "name": y.get("name", y["id"]),
+        "ip": y.get("ip", ""),
+        "class": y.get("class", "GPU host"),
+        "role": y.get("role_label", y.get("role", "node")),
+        "kind": y.get("kind", "discrete"),
+        "obs_node": obs_label,
+        "node_source": "obs" if obs_label else "direct",
+        "gpu": {"name": hw.get("gpu", "—"),
+                "mem":  hw.get("vram_gb", 0),
+                "fp16": hw.get("fp16_tflops", 0),
+                "fp4":  hw.get("fp4_tflops", 0)},
+        "cpu": {"model":   hw.get("cpu_model", "—"),
+                "cores":   hw.get("cpu_cores", 0),
+                "threads": hw.get("cpu_threads", hw.get("cpu_cores", 0))},
+        "ram":  hw.get("ram_gb", 0),
+        "disk": hw.get("disk_gb", 0),
+        "net":  hw.get("net", ""),
+        "services": y.get("services", []),
+    }
+
+
+HEARTH_CONFIG_PATH = os.environ.get("HEARTH_CONFIG", "/etc/hearth/config.yaml")
+HEARTH_CFG = _load_config(HEARTH_CONFIG_PATH)
+NODES = [_node_from_yaml(n) for n in HEARTH_CFG.get("nodes", [])] or [
+    _node_from_yaml(n) for n in _default_config()["nodes"]
 ]
+
 NODE_BY_ID  = {n["id"]: n for n in NODES}
 OBS_TO_ID   = {n["obs_node"]: n["id"] for n in NODES if n["obs_node"]}
-IP_TO_ID    = {n["ip"]: n["id"] for n in NODES}   # api_base host → 节点 id（模型自动发现用）
+IP_TO_ID    = {n["ip"]: n["id"] for n in NODES}
+# kind lookup by obs_node label — replaces the legacy `obs_node != "rtx4090-pc"`
+KIND_BY_OBS = {n["obs_node"]: n.get("kind", "discrete") for n in NODES if n["obs_node"]}
+# First discrete-kind node's obs label, for cluster-level "the discrete GPU" lookups
+DISCRETE_OBS = next((n["obs_node"] for n in NODES
+                     if n.get("kind") == "discrete" and n.get("obs_node")), None)
 
-app = FastAPI(title="Tony 的家庭智算中心监控系统 API", version="1.0.0")
+app = FastAPI(title="Hearth API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=CORS, allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 client = httpx.AsyncClient(timeout=8.0)
@@ -312,10 +366,12 @@ async def _obs_node_live() -> dict[str, dict]:
         vt = (fu.get(obs_node, 0) + ff.get(obs_node, 0)) or 1
         temps = sorted(per_node_temps.get(obs_node, []), key=lambda t: -t["celsius"])
         cpu_t = next((t["celsius"] for t in temps if t["module"] == "CPU"), 0)
-        # GB10 Spark = 统一内存，无独立显存（DCGM FB 在 GB10 上为空）→
-        # "显存"应取统一内存占用（模型实际驻留处）。仅 RTX4090(rtx4090-pc)
-        # 是独显，用 DCGM FB。
-        is_unified = obs_node != "rtx4090-pc"
+        # Node kind drives VRAM% interpretation:
+        #   discrete       → DCGM FB_USED/FB_TOTAL (dedicated VRAM)
+        #   unified-arm-soc / apple-silicon → node_exporter MemAvailable (shared)
+        # The choice is by `kind` field on each node (config-driven), not by
+        # any hard-coded host name.
+        is_unified = KIND_BY_OBS.get(obs_node, "discrete") != "discrete"
         vram_pct = me.get(obs_node, 0) if is_unified else (fu.get(obs_node, 0) / vt * 100)
         out[obs_node] = {
             "gpu": round(g.get(obs_node, 0), 1),
@@ -338,29 +394,33 @@ async def _obs_node_live() -> dict[str, dict]:
 
 
 async def _node_payload() -> list[dict]:
-    obs_live, atlas = await asyncio.gather(_obs_node_live(), _atlas_node_live())
-    # Atlas 的 GPU 走 obs DCGM（obs_node=rtx4090-pc），node/hwmon 走直采
-    atlas_gpu = obs_live.get("rtx4090-pc", {})
+    obs_live, direct = await asyncio.gather(_obs_node_live(), _atlas_node_live())
+    # `direct` is the host that runs the Hearth api itself (scraped via the
+    # api container's own /proc + /sys, not via obs Prometheus). The legacy
+    # name "_atlas_node_live" is preserved for now to minimize diff.
+    # GPU metrics for that host still go via obs DCGM (if it has one) —
+    # pulled out by its discrete-node obs label, set from config.
+    discrete_gpu = obs_live.get(DISCRETE_OBS or "", {})
     out = []
     for n in NODES:
         live = {"gpu": 0, "vram": 0, "vramKind": "discrete", "tempGpu": 0,
                 "tempMem": 0, "tempCpu": 0, "power": 0, "cpu": 0, "mem": 0,
                 "disk": 0, "netIn": 0, "netOut": 0, "rdmaIn": 0,
                 "rdmaOut": 0, "temps": []}
-        if n["id"] == "atlas":
-            live.update({k: atlas_gpu.get(k, 0)
+        if n.get("node_source") == "direct":
+            live.update({k: discrete_gpu.get(k, 0)
                          for k in ("gpu", "vram", "tempGpu", "tempMem", "power")})
-            live["vramKind"] = atlas_gpu.get("vramKind", "discrete")
-            if atlas:
-                live.update({k: atlas[k] for k in ("cpu", "mem", "disk", "netIn",
-                                                   "netOut", "tempCpu", "temps")
-                             if k in atlas})
-            up = bool(atlas) or bool(atlas_gpu)
+            live["vramKind"] = discrete_gpu.get("vramKind", "discrete")
+            if direct:
+                live.update({k: direct[k] for k in ("cpu", "mem", "disk", "netIn",
+                                                    "netOut", "tempCpu", "temps")
+                             if k in direct})
+            up = bool(direct) or bool(discrete_gpu)
         elif n["obs_node"] and n["obs_node"] in obs_live:
             live.update(obs_live[n["obs_node"]])
             up = True
         else:
-            up = False   # spark-03/04 未纳管：诚实显示无数据
+            up = False   # node not in obs Prometheus job → honestly mark no-data
         out.append({**{k: v for k, v in n.items() if k != "node_source"},
                     "live": live, "up": up})
     return out
@@ -960,10 +1020,12 @@ async def _litellm_request_log(limit: int = 40) -> list[dict]:
         return _LOG_CACHE["data"][:limit]
     sql = (
         "SELECT concat_ws(E'\\t',"
-        # startTime 存的是 naive UTC → 转 Asia/Taipei 并带 +08:00 偏移，
-        # 前端任何浏览器时区都能解析出正确 instant（用户在台北/偶尔公出中国）。
-        "to_char(\"startTime\" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Taipei',"
-        "'YYYY-MM-DD\"T\"HH24:MI:SS\"+08:00\"'),"
+        # startTime is stored naive UTC in LiteLLM_SpendLogs. Emit ISO-8601
+        # with a trailing "Z" so JS `new Date()` parses correctly regardless
+        # of the user's browser locale; the frontend then formats it with
+        # `toLocaleTimeString()` in the browser's own timezone — no Hearth
+        # locale lock-in.
+        "to_char(\"startTime\",'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),"
         "COALESCE(NULLIF(model_group,''),model,'?'),"
         "COALESCE(total_tokens,0),"
         "COALESCE(request_duration_ms,0),"

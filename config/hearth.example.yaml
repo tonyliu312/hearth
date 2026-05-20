@@ -1,0 +1,128 @@
+# =====================================================================
+# Hearth · main configuration
+# =====================================================================
+# Copy this file to `config/hearth.yaml` and edit to match your cluster.
+# Hearth loads the file at `${HEARTH_CONFIG:-/etc/hearth/config.yaml}`
+# at server start.  If no config is provided, Hearth falls back to a
+# single-host localhost default (useful for first-time docker-compose up).
+#
+# Schema is plain YAML — three top sections:
+#   display:     UI labels, locale, theme (no-op for now)
+#   gateway:     where to reach the LiteLLM gateway, if you run one
+#   nodes:       one entry per physical host you want to monitor
+#   model_meta:  optional overlay for nicer model display (auto-discovery
+#                still works without this; this just adds vendor/tags/kind
+#                for the routes you know about)
+# =====================================================================
+
+
+display:
+  # Shown in the navbar and browser tab title.
+  cluster_name: "Home Cluster"
+
+  # Browser-local timezone is used for UI clocks by default.  Override
+  # here only if you want all dashboard users to see the same TZ
+  # regardless of where they open the dashboard.
+  # Examples: "Asia/Taipei", "America/Los_Angeles", "Europe/London"
+  # timezone: "auto"
+
+
+gateway:
+  # Currently only "litellm" is supported.  If you don't run LiteLLM,
+  # set `enabled: false` and Hearth will discover models purely by
+  # direct backend probing.
+  type: litellm
+  enabled: true
+  base_url: "http://127.0.0.1:4000"
+
+  # The master-key value comes from the environment variable named here
+  # (NEVER put the actual key in this file — it's committed to git).
+  # Set the value in your `.env` or systemd drop-in:  LITELLM_MASTER_KEY=sk-...
+  master_key_env: "LITELLM_MASTER_KEY"
+
+
+# ---------------------------------------------------------------------
+# Nodes — your physical hosts.  Add one entry per machine you want
+# Hearth to display.  Field reference:
+#
+#   id            short stable identifier (also used internally)
+#   name          display name in the UI
+#   ip            primary IPv4 address (also what api_base hosts use)
+#   role          one of: gateway | inference | mixed | edge
+#   kind          one of: discrete | unified-arm-soc | apple-silicon
+#                   - discrete: traditional dGPU with dedicated VRAM
+#                     (RTX 4090, A100, H100, MI300X, etc.)  Hearth uses
+#                     DCGM FB_USED/FB_FREE for the VRAM percentage.
+#                   - unified-arm-soc: ARM SoC where GPU shares system
+#                     memory (DGX Spark / GB10, Jetson AGX Orin).
+#                     Hearth uses node_exporter MemAvailable for the
+#                     VRAM ring instead (DCGM FB unreliable on these).
+#                   - apple-silicon: M-series Macs (mlx, Ollama on Metal).
+#                     Same unified-memory treatment as ARM SoC.
+#   hw            static hardware info (display only)
+#   sources       where Hearth scrapes this node's metrics
+#     node_exporter   <host>:<port>  ← node_exporter URL (optional)
+#     dcgm            <host>:<port>  ← dcgm-exporter URL (optional)
+#     obs_node_label  the `node` label value this host reports to
+#                     Prometheus (must match your prometheus.yml
+#                     labels.node).  Leave empty to probe :9100 / :9400
+#                     directly from the api container instead of via
+#                     Prometheus.
+# ---------------------------------------------------------------------
+nodes:
+  - id: node-1
+    name: "Workstation"
+    ip: 192.168.1.10
+    role: gateway
+    kind: discrete
+    hw:
+      gpu: "GeForce RTX 4090"
+      vram_gb: 24
+      cpu_cores: 16
+      cpu_threads: 32
+      ram_gb: 128
+    sources:
+      node_exporter: "192.168.1.10:9100"
+      dcgm: "192.168.1.10:9400"
+      obs_node_label: "workstation"
+
+  # ── More nodes example (uncomment / duplicate) ─────────────────────
+  # - id: node-2
+  #   name: "Inference-1"
+  #   ip: 192.168.1.20
+  #   role: inference
+  #   kind: discrete
+  #   hw:
+  #     gpu: "RTX 3090"
+  #     vram_gb: 24
+  #     cpu_cores: 8
+  #     ram_gb: 64
+  #   sources:
+  #     node_exporter: "192.168.1.20:9100"
+  #     dcgm: "192.168.1.20:9400"
+  #     obs_node_label: "inference-1"
+
+
+# ---------------------------------------------------------------------
+# Model metadata overlay — OPTIONAL.
+#
+# Hearth auto-discovers your models from the gateway / direct backend
+# probes.  This section just adds nicer display info (vendor, kind,
+# tags) for routes you know about; routes that aren't listed here get
+# a sensible derived display.
+#
+# Key = the gateway route name (i.e. LiteLLM `model_name`).
+# ---------------------------------------------------------------------
+model_meta:
+  # Example entries — replace with your own routes.
+  # qwen3-coder-next:
+  #   display: "Qwen3-Coder-Next"
+  #   vendor: "Alibaba"
+  #   kind: chat
+  #   tags: [coding]
+  #
+  # deepseek-v3:
+  #   display: "DeepSeek-V3"
+  #   vendor: "DeepSeek"
+  #   kind: chat
+  #   tags: [reasoning, long-ctx]

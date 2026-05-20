@@ -1,0 +1,52 @@
+# =====================================================================
+# Hearth · example topology: single host
+# =====================================================================
+# One machine with a discrete GPU running Ollama / vLLM / LiteLLM locally.
+# Probably the most common home-lab shape. Copy to `config/hearth.yaml`
+# and edit the IP / GPU details to match your box.
+# =====================================================================
+
+display:
+  cluster_name: "Home GPU"
+
+gateway:
+  type: litellm
+  enabled: true
+  base_url: "http://127.0.0.1:4000"      # LiteLLM running on the same box
+  master_key_env: "LITELLM_MASTER_KEY"
+
+nodes:
+  - id: gpu-1
+    name: "Workstation"
+    ip: 127.0.0.1
+    role_label: "Gateway · Inference"
+    kind: discrete                        # dedicated VRAM
+    class: "RTX 4090 host"
+    hw:
+      gpu: "GeForce RTX 4090"
+      vram_gb: 24
+      cpu_model: "Ryzen 9 7950X"
+      cpu_cores: 16
+      cpu_threads: 32
+      ram_gb: 128
+      disk_gb: 4096
+      net: "10 GbE"
+    sources:
+      node_exporter: "host.docker.internal:9100"
+      dcgm: "host.docker.internal:9400"
+      obs_node_label: "workstation"       # must match labels.node in prometheus.yml
+    services: [litellm, ollama, vllm, comfyui]
+
+# Optional: nicer display for your gateway models. Auto-discovery still
+# works without this; this just adds vendor/tags to known routes.
+model_meta:
+  llama-3.3-70b:
+    display: "Llama 3.3 70B"
+    vendor: "Meta"
+    kind: chat
+    tags: [reasoning]
+  qwen2.5-coder-32b:
+    display: "Qwen2.5-Coder 32B"
+    vendor: "Alibaba"
+    kind: chat
+    tags: [coding]
