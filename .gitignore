@@ -1,0 +1,45 @@
+# --- secrets / local config ---
+.env
+.env.local
+*.pem
+*.key
+config.local.yaml
+secrets/
+
+# --- runtime / state ---
+server/runtime/
+server/backups/
+*.log
+*.pid
+*.sqlite
+*.db
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node / JS (in case we ever add a build step) ---
+node_modules/
+dist/
+build/
+.npm
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- AI assistant scratch (not for OSS repo) ---
+CLAUDE.md
+HANDOFF.md
+BASELINES.md
+.specify/

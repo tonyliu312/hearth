@@ -1,0 +1,123 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI-MONITOR · production stack
+# Hearth · server stack. Brings up Prometheus, Alertmanager,
+# the FastAPI backend, and an nginx that serves the frontend + proxies /api.
+#
+#   docker compose up -d
+#
+# The Spark nodes only need node-exporter + dcgm-exporter installed
+# (see deploy/install-spark.sh). LiteLLM keeps running where it already is —
+# we just scrape its /metrics endpoint.
+# ─────────────────────────────────────────────────────────────────────
+
+name: ai-monitor
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    <<: [*restart, *logging]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROM_RETENTION:-7d}
+      - --web.enable-lifecycle
+      - --web.enable-admin-api
+      - --web.external-url=http://${ATLAS_HOST:-atlas.local}:9090
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prom-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [monitor]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    <<: [*restart, *logging]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - am-data:/alertmanager
+    ports:
+      - "9093:9093"
+    networks: [monitor]
+
+  # ── Local exporters for Atlas itself ──────────────────────────────
+  # (Sparks run these natively as systemd units — see deploy/install-spark.sh)
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    <<: [*restart, *logging]
+    command:
+      - --path.rootfs=/host
+      - --collector.systemd
+      - --collector.processes
+    network_mode: host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    # Atlas's node-exporter is bound to :9100 by the image default
+
+  dcgm-exporter:
+    # NVIDIA's GPU metrics exporter — RTX 4090 will be visible.
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.7-3.4.2-ubuntu22.04
+    <<: [*restart, *logging]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - DCGM_EXPORTER_LISTEN=:9400
+      - DCGM_EXPORTER_COLLECTORS=/etc/dcgm-exporter/dcp-metrics-included.csv
+    cap_add: [SYS_ADMIN]
+    ports:
+      - "9400:9400"
+    networks: [monitor]
+
+  # ── Application layer ────────────────────────────────────────────
+
+  api:
+    build: ./api
+    <<: [*restart, *logging]
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+      - ALERTMANAGER_URL=http://alertmanager:9093
+      - LITELLM_URL=${LITELLM_URL:-http://host.docker.internal:4000}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-1234}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
+    networks: [monitor]
+    depends_on: [prometheus]
+
+  web:
+    build: ./nginx
+    <<: [*restart, *logging]
+    volumes:
+      # Bind-mount the frontend so iterating on UI doesn't require a rebuild.
+      - ../:/usr/share/nginx/html:ro
+    ports:
+      - "80:80"
+    networks: [monitor]
+    depends_on: [api]
+
+volumes:
+  prom-data:
+  am-data:
+
+networks:
+  monitor:
+    driver: bridge

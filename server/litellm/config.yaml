@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────
+# LiteLLM config — add this snippet to your existing config.yaml on Atlas.
+# Enables the Prometheus middleware so /metrics serves Prometheus scrape data:
+#   litellm_total_tokens_metric{model="…",status="200"}
+#   litellm_total_requests_metric{model="…",status="…"}
+#   litellm_ttft_bucket{model="…",le="…"}
+#   litellm_request_latency_bucket{model="…",le="…"}
+#
+# After updating: `systemctl restart litellm`  (or however you run it)
+# Then verify: `curl http://192.168.1.20:4000/metrics | head`
+# ─────────────────────────────────────────────────────────────────────
+
+model_list:
+  # ... your existing model_list ...
+
+litellm_settings:
+  # Required for /metrics to expose Prometheus data
+  callbacks: ["prometheus"]
+  success_callback: ["prometheus"]
+  failure_callback: ["prometheus"]
+
+  # Make sure each model_list entry carries a stable `model_name` —
+  # that's what becomes the `model` label in Prometheus.
+  drop_params: true
+  set_verbose: false
+
+general_settings:
+  master_key: ${LITELLM_MASTER_KEY}
+  database_url: ${DATABASE_URL}        # optional, for /spend/logs
+  store_model_in_db: true
+  proxy_batch_write_at: 60             # batch token-count writes
+
+# Optional: scrape proxy itself
+# Make sure the host firewall allows :4000 from the monitor host.

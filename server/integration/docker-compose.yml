@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────
+# Tony 的家庭智算中心监控系统 · 非破坏性集成 overlay (host-API 变体)
+#
+# 换攻击面记录：此大陆网络下 docker buildkit/容器出网 DNS(1.1.1.1/8.8.8.8)
+# 被墙，apt/pip 在容器内必失败 → 弃 docker build。API 改宿主 venv 直跑
+# 127.0.0.1:8088（宿主连 tuna 正常）；这里只留 nginx：
+#   - network_mode host：直连宿主 127.0.0.1:8088，且无需联网重建镜像
+#   - 仅 bind-mount（前端 + conf），用已缓存 nginx:1.27-alpine
+#
+# 仍是独立 compose project 'ai-monitor'，零触碰 obs-*/litellm/daemon。
+#   docker compose -p ai-monitor -f server/integration/docker-compose.yml up -d
+#   docker compose -p ai-monitor -f server/integration/docker-compose.yml down
+# ─────────────────────────────────────────────────────────────────────
+
+name: ai-monitor
+
+services:
+  web:
+    image: nginx:1.27-alpine        # 已缓存（ai-monitor-web 构建时拉过），不联网
+    container_name: ai-monitor-web
+    restart: unless-stopped
+    network_mode: host              # 直连宿主 API 127.0.0.1:8088，绑宿主 :80
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../../:/usr/share/nginx/html:ro
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

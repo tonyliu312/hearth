@@ -1,0 +1,51 @@
+name: 🐛 Bug report
+description: Something is broken or behaves unexpectedly
+labels: ["bug", "triage"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you see instead? Screenshots help if it's a UI bug.
+      placeholder: |
+        Expected: the GPU ring on spark-3 lights up when DeepSeek is serving.
+        Actual: ring stays at 0% even while requests flow.
+    validations:
+      required: true
+  - type: textarea
+    id: topology
+    attributes:
+      label: Your topology
+      description: How many nodes? What GPUs? Which backends (vLLM / llama.cpp / SGLang / Ollama)? Is there a LiteLLM gateway?
+      placeholder: |
+        3 nodes — 1× RTX 4090 (Ollama + ComfyUI), 2× RTX 3090 (vLLM TP=2).
+        LiteLLM gateway on the 4090 host at :4000.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Hearth version
+      description: Tag or commit SHA
+      placeholder: "v0.0.1 or abc1234"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. `docker compose up`
+        2. Open dashboard
+        3. Send a request via the gateway
+        4. ...
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / `/api/models` output
+      description: Output of `curl http://localhost:8088/api/models` and `docker compose logs api` if relevant
+      render: shell
+    validations:
+      required: false
