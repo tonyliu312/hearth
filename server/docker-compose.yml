@@ -10,7 +10,7 @@
 # we just scrape its /metrics endpoint.
 # ─────────────────────────────────────────────────────────────────────
 
-name: ai-monitor
+name: hearth
 
 x-restart: &restart
   restart: unless-stopped
@@ -33,7 +33,7 @@ services:
       - --storage.tsdb.retention.time=${PROM_RETENTION:-7d}
       - --web.enable-lifecycle
       - --web.enable-admin-api
-      - --web.external-url=http://${ATLAS_HOST:-atlas.local}:9090
+      - --web.external-url=http://${EXTERNAL_HOST:-localhost}:9090
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
@@ -55,7 +55,7 @@ services:
       - "9093:9093"
     networks: [monitor]
 
-  # ── Local exporters for Atlas itself ──────────────────────────────
+  # ── Local exporters for the Hearth host ──────────────────────────────
   # (Sparks run these natively as systemd units — see deploy/install-spark.sh)
 
   node-exporter:
@@ -69,7 +69,7 @@ services:
     pid: host
     volumes:
       - /:/host:ro,rslave
-    # Atlas's node-exporter is bound to :9100 by the image default
+    # host node-exporter is bound to :9100 by the image default
 
   dcgm-exporter:
     # NVIDIA's GPU metrics exporter — RTX 4090 will be visible.

@@ -18,8 +18,8 @@
       "mock data · no backend": "模拟数据 · 无后端", "LIVE": "实时", "MOCK": "模拟",
       // hero
       "Home": "家庭", "Compute Center": "智算中心",
-      "A unified telemetry surface for the home AI fabric — RTX 4090 edge + four DGX Spark inference nodes, served behind a single LiteLLM gateway. Every TFLOP, every token, every watt — in real time.":
-        "家庭 AI 集群的统一遥测面 —— RTX 4090 边缘节点 + 四台 DGX Spark 推理节点，统一经 LiteLLM 网关对外。每一次浮点、每一个 token、每一瓦特，全部实时。",
+      "A unified telemetry surface for your home AI compute cluster — auto-discovers models, surfaces real metrics from vLLM / llama.cpp / LiteLLM, honestly labels what backends don't expose. Every token, every watt — in real time.":
+        "自托管的家庭 AI 算力可观测性面板 —— 自动发现模型, 从 vLLM / llama.cpp / LiteLLM 取真实指标, 后端不暴露的诚实标空。每一个 token, 每一瓦特, 实时。",
       "UPTIME": "运行时长", "REQUESTS": "请求数", "TOKENS SERVED": "已服务 Token", "SCRAPE": "抓取",
       // section eyebrows
       "Cluster · live telemetry": "集群 · 实时遥测",
@@ -34,10 +34,10 @@
       // ledes
       "Aggregated utilization, throughput, and thermals across all five nodes — sampled at 1.2 s, retained for 7 days in Prometheus, surfaced here as a single coherent picture.":
         "五节点的利用率、吞吐与热数据聚合 —— 1.2 秒采样，Prometheus 留存 7 天，在此汇成一张连贯全景。",
-      "Atlas — the RTX 4090 host — runs the LiteLLM gateway and edge-class workloads. Four DGX Spark boxes carry the heavy inference. Click a node for the full forensic view.":
-        "Atlas（RTX 4090 主机）跑 LiteLLM 网关与边缘负载，四台 DGX Spark 承载重推理。点击任意节点查看完整取证视图。",
-      "Atlas peers with every Spark over 10 GbE — North-South link intensity & pulse are driven by real node-exporter throughput. The 200 GbE ConnectX-7 Spark-to-Spark mesh is physical topology only (RDMA throughput not instrumented).":
-        "Atlas 与各 Spark 经 10 GbE 互联 —— 南北向链路强度/脉冲由真实 node-exporter 网络吞吐驱动；Spark 间 200 GbE ConnectX-7 为物理拓扑（RDMA 吞吐未插桩，仅示意）。",
+      "Each host runs the LiteLLM gateway, an inference engine, or both. Click a node for the full forensic view.":
+        "每台主机跑 LiteLLM 网关、推理引擎,或两者皆有。点击任一节点查看完整取证视图。",
+      "The gateway host peers with every inference node — link intensity & pulse are driven by real node-exporter throughput. Inter-node fabric (RDMA/InfiniBand) is physical topology only (throughput not instrumented by default).":
+        "网关主机与各推理节点互联 —— 链路强度/脉冲由真实 node-exporter 吞吐驱动;节点间高速 fabric(RDMA/InfiniBand)为物理拓扑,默认不插桩吞吐。",
       // cards / labels
       "Resource pools": "资源池", "Aggregate capacity vs. live usage": "总容量 vs 实时用量",
       "Hosted models": "承载模型", "Running services": "运行服务", "System": "系统",
@@ -139,8 +139,8 @@
       "5/5 nodes online": "5/5 節點在線", "reconnecting…": "重連中…",
       "mock data · no backend": "模擬資料 · 無後端", "LIVE": "即時", "MOCK": "模擬",
       "Home": "家庭", "Compute Center": "智算中心",
-      "A unified telemetry surface for the home AI fabric — RTX 4090 edge + four DGX Spark inference nodes, served behind a single LiteLLM gateway. Every TFLOP, every token, every watt — in real time.":
-        "家庭 AI 叢集的統一遙測面 —— RTX 4090 邊緣節點 + 四台 DGX Spark 推理節點，統一經 LiteLLM 閘道對外。每一次浮點、每一個 token、每一瓦特，全部即時。",
+      "A unified telemetry surface for your home AI compute cluster — auto-discovers models, surfaces real metrics from vLLM / llama.cpp / LiteLLM, honestly labels what backends don't expose. Every token, every watt — in real time.":
+        "自架的家庭 AI 算力可觀測性面板 —— 自動發現模型, 從 vLLM / llama.cpp / LiteLLM 取真實指標, 後端不暴露的誠實標空。每一個 token, 每一瓦特, 即時。",
       "UPTIME": "運行時長", "REQUESTS": "請求數", "TOKENS SERVED": "已服務 Token", "SCRAPE": "擷取",
       "Cluster · live telemetry": "叢集 · 即時遙測",
       "Models · LiteLLM gateway": "模型 · LiteLLM 閘道",
@@ -152,10 +152,10 @@
       "The wires ": "萬物 · ", "between everything.": "互聯之線",
       "Aggregated utilization, throughput, and thermals across all five nodes — sampled at 1.2 s, retained for 7 days in Prometheus, surfaced here as a single coherent picture.":
         "五節點的利用率、吞吐與熱數據聚合 —— 1.2 秒取樣，Prometheus 留存 7 天，在此匯成一張連貫全景。",
-      "Atlas — the RTX 4090 host — runs the LiteLLM gateway and edge-class workloads. Four DGX Spark boxes carry the heavy inference. Click a node for the full forensic view.":
-        "Atlas（RTX 4090 主機）跑 LiteLLM 閘道與邊緣負載，四台 DGX Spark 承載重推理。點擊任一節點查看完整取證視圖。",
-      "Atlas peers with every Spark over 10 GbE — North-South link intensity & pulse are driven by real node-exporter throughput. The 200 GbE ConnectX-7 Spark-to-Spark mesh is physical topology only (RDMA throughput not instrumented).":
-        "Atlas 與各 Spark 經 10 GbE 互聯 —— 南北向鏈路強度/脈衝由真實 node-exporter 網路吞吐驅動；Spark 間 200 GbE ConnectX-7 為實體拓撲（RDMA 吞吐未插樁，僅示意）。",
+      "Each host runs the LiteLLM gateway, an inference engine, or both. Click a node for the full forensic view.":
+        "每台主機跑 LiteLLM 閘道、推論引擎,或兩者皆有。點擊任一節點查看完整取證視圖。",
+      "The gateway host peers with every inference node — link intensity & pulse are driven by real node-exporter throughput. Inter-node fabric (RDMA/InfiniBand) is physical topology only (throughput not instrumented by default).":
+        "閘道主機與各推論節點互聯 —— 鏈路強度/脈衝由真實 node-exporter 吞吐驅動;節點間高速 fabric(RDMA/InfiniBand)為實體拓撲,預設不插樁吞吐。",
       "Resource pools": "資源池", "Aggregate capacity vs. live usage": "總容量 vs 即時用量",
       "Hosted models": "承載模型", "Running services": "執行服務", "System": "系統",
       "Quick actions": "快捷操作", "LiteLLM Gateway": "LiteLLM 閘道",
