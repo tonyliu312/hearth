@@ -12,7 +12,17 @@ vLLM、llama.cpp、SGLang、Ollama、LiteLLM 网关——**自动发现、真实
 
 [English](README.md) · **简体中文** · [繁體中文](README.zh-TW.md)
 
+<br>
+
+![Hearth 仪表盘 — Apple Pro Display 风格](docs/screenshots/01-desktop-overview.png)
+
 </div>
+
+## 为什么是 Hearth
+
+大多数家庭实验室监控**要么**通用(Grafana / Netdata 擅长主机指标但对 LLM 服务无感),**要么**专做 LLM 但以云为主(Phoenix、LangSmith)。Hearth 处在交集上:**一个仪表盘同时懂你的主机和你的模型**,为在自家 GPU 上跑 DeepSeek / Qwen / Gemma 的人设计。
+
+视觉语言刻意做成 **Apple Pro Display 控制台**风格:深黑底、等宽数字、环形仪表、细边框。不是为了赶时髦,而是因为「密度 + 克制」是你每天扫五十次的遥测数据应有的语法。
 
 ---
 
@@ -69,6 +79,29 @@ open http://localhost:8080
 | **网关日志** | LiteLLM 开源 Postgres `LiteLLM_SpendLogs` | 最近请求、状态、延迟、模型 |
 
 加新后端类型 = 加一个适配器文件即可。见 [`docs/adapters.md`](docs/adapters.md)(规划中)。
+
+## 截图
+
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/03-desktop-nodes.png"><img src="docs/screenshots/03-desktop-nodes.png" alt="节点视图"/></a><p align="center"><b>节点</b> — GPU / 显存 / CPU 环, 硬件指纹, 每台主机的实时温度和功率</p></td>
+<td width="50%"><a href="docs/screenshots/04-desktop-models.png"><img src="docs/screenshots/04-desktop-models.png" alt="模型视图"/></a><p align="center"><b>模型</b> — LiteLLM 自动发现, 从 vLLM + llama.cpp <code>/metrics</code> 取真实 tps / TTFT / TPOT / KV</p></td>
+</tr>
+<tr>
+<td><a href="docs/screenshots/02-desktop-cluster.png"><img src="docs/screenshots/02-desktop-cluster.png" alt="集群总览"/></a><p align="center"><b>集群</b> — Token 吞吐、集群功率、KV-cache 压力 — 脉冲图</p></td>
+<td><a href="docs/screenshots/05-desktop-telemetry.png"><img src="docs/screenshots/05-desktop-telemetry.png" alt="遥测"/></a><p align="center"><b>遥测</b> — LiteLLM <code>SpendLogs</code> 请求流 + 告警引擎, "信号而非噪音"</p></td>
+</tr>
+<tr>
+<td colspan="2" align="center">
+<a href="docs/screenshots/06-mobile-overview.png"><img src="docs/screenshots/06-mobile-overview.png" alt="移动端总览" width="280"/></a>
+<a href="docs/screenshots/07-mobile-cluster.png"><img src="docs/screenshots/07-mobile-cluster.png" alt="移动端集群" width="280"/></a>
+<a href="docs/screenshots/08-mobile-models.png"><img src="docs/screenshots/08-mobile-models.png" alt="移动端模型" width="280"/></a>
+<p align="center"><b>移动端</b> — 响应式布局, 汉堡菜单, 日志行省略号截断, 状态一眼可见</p>
+</td>
+</tr>
+</table>
+
+> 截图都来自一个真实运行的集群, 拓扑 / 主机名 / IP 已替换为通用占位符 (`Workstation`、`Inference-1..4`、`10.0.0.0/24`)。替换过程可复现 — 见 [`docs/screenshots/_capture.py`](docs/screenshots/_capture.py)。
 
 ## 路线图
 

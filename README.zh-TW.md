@@ -12,7 +12,17 @@ vLLM、llama.cpp、SGLang、Ollama、LiteLLM 閘道——**自動發現、真實
 
 [English](README.md) · [简体中文](README.zh-CN.md) · **繁體中文**
 
+<br>
+
+![Hearth 儀表板 — Apple Pro Display 風格](docs/screenshots/01-desktop-overview.png)
+
 </div>
+
+## 為什麼是 Hearth
+
+大多數家庭實驗室監控**要嘛**通用(Grafana / Netdata 擅長主機指標但對 LLM 服務無感),**要嘛**專做 LLM 但雲端優先(Phoenix、LangSmith)。Hearth 處在交集上:**一個儀表板同時懂你的主機和你的模型**,為在自家 GPU 上跑 DeepSeek / Qwen / Gemma 的人而設計。
+
+視覺語言刻意做成 **Apple Pro Display 控制台**風格:深黑底、等寬數字、環形儀表、細邊框。不是趕流行,而是「密度 + 克制」才是你每天瞄五十次的遙測資料應有的文法。
 
 ---
 
@@ -69,6 +79,29 @@ open http://localhost:8080
 | **閘道日誌** | LiteLLM 開源 Postgres `LiteLLM_SpendLogs` | 近期請求、狀態、延遲、模型 |
 
 加新後端類型 = 加一個轉接器檔案即可。詳見 [`docs/adapters.md`](docs/adapters.md)(規劃中)。
+
+## 截圖
+
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/03-desktop-nodes.png"><img src="docs/screenshots/03-desktop-nodes.png" alt="節點檢視"/></a><p align="center"><b>節點</b> — GPU / 顯記憶體 / CPU 環、硬體指紋、每台主機的即時溫度與功率</p></td>
+<td width="50%"><a href="docs/screenshots/04-desktop-models.png"><img src="docs/screenshots/04-desktop-models.png" alt="模型檢視"/></a><p align="center"><b>模型</b> — LiteLLM 自動發現, 從 vLLM + llama.cpp <code>/metrics</code> 取真實 tps / TTFT / TPOT / KV</p></td>
+</tr>
+<tr>
+<td><a href="docs/screenshots/02-desktop-cluster.png"><img src="docs/screenshots/02-desktop-cluster.png" alt="叢集總覽"/></a><p align="center"><b>叢集</b> — Token 吞吐、叢集功率、KV-cache 壓力 — 脈衝圖</p></td>
+<td><a href="docs/screenshots/05-desktop-telemetry.png"><img src="docs/screenshots/05-desktop-telemetry.png" alt="遙測"/></a><p align="center"><b>遙測</b> — LiteLLM <code>SpendLogs</code> 請求流 + 告警引擎, 「訊號而非雜訊」</p></td>
+</tr>
+<tr>
+<td colspan="2" align="center">
+<a href="docs/screenshots/06-mobile-overview.png"><img src="docs/screenshots/06-mobile-overview.png" alt="行動端總覽" width="280"/></a>
+<a href="docs/screenshots/07-mobile-cluster.png"><img src="docs/screenshots/07-mobile-cluster.png" alt="行動端叢集" width="280"/></a>
+<a href="docs/screenshots/08-mobile-models.png"><img src="docs/screenshots/08-mobile-models.png" alt="行動端模型" width="280"/></a>
+<p align="center"><b>行動端</b> — 響應式佈局、漢堡選單、日誌列省略號截斷、狀態一眼可見</p>
+</td>
+</tr>
+</table>
+
+> 截圖都來自一個實際運行的叢集, 拓樸 / 主機名 / IP 已替換為通用佔位符(`Workstation`、`Inference-1..4`、`10.0.0.0/24`)。替換過程可重現 — 見 [`docs/screenshots/_capture.py`](docs/screenshots/_capture.py)。
 
 ## 路線圖
 

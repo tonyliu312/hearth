@@ -12,7 +12,17 @@ vLLM, llama.cpp, SGLang, Ollama, LiteLLM gateway — auto-discovered, real metri
 
 **English** · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md)
 
+<br>
+
+![Hearth dashboard — Apple-Pro-Display-style overview](docs/screenshots/01-desktop-overview.png)
+
 </div>
+
+## Why Hearth
+
+Most home-lab monitoring is **either** generic (Grafana / Netdata — great at host metrics, blind to LLM serving) **or** LLM-specific but cloud-first (Phoenix, LangSmith). Hearth sits at the intersection: **one dashboard that knows both your hosts and your models**, designed for the kind of person who runs DeepSeek / Qwen / Gemma on their own GPUs at home.
+
+The visual language is deliberately **Apple Pro Display console**: deep black, tabular numerals, ring gauges, subtle borders. Not because it's trendy, but because density + restraint is the right grammar for telemetry you'll glance at fifty times a day.
 
 ---
 
@@ -69,6 +79,29 @@ For multi-node configuration, see [`docs/topology.md`](docs/topology.md) (coming
 | **Gateway logs** | LiteLLM OSS Postgres `LiteLLM_SpendLogs` | Recent requests, status, latency, model |
 
 Adding a new backend type = one adapter file. See [`docs/adapters.md`](docs/adapters.md) (coming).
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/03-desktop-nodes.png"><img src="docs/screenshots/03-desktop-nodes.png" alt="Per-node view"/></a><p align="center"><b>Nodes</b> — GPU / VRAM / CPU rings, hardware fingerprint, live temps & power per host</p></td>
+<td width="50%"><a href="docs/screenshots/04-desktop-models.png"><img src="docs/screenshots/04-desktop-models.png" alt="Models view"/></a><p align="center"><b>Models</b> — auto-discovered from LiteLLM, real tps / TTFT / TPOT / KV from vLLM + llama.cpp <code>/metrics</code></p></td>
+</tr>
+<tr>
+<td><a href="docs/screenshots/02-desktop-cluster.png"><img src="docs/screenshots/02-desktop-cluster.png" alt="Cluster overview"/></a><p align="center"><b>Cluster</b> — token throughput, cluster power draw, KV-cache pressure — pulse charts</p></td>
+<td><a href="docs/screenshots/05-desktop-telemetry.png"><img src="docs/screenshots/05-desktop-telemetry.png" alt="Telemetry"/></a><p align="center"><b>Telemetry</b> — request stream from LiteLLM <code>SpendLogs</code>, alerts engine, signal-not-noise</p></td>
+</tr>
+<tr>
+<td colspan="2" align="center">
+<a href="docs/screenshots/06-mobile-overview.png"><img src="docs/screenshots/06-mobile-overview.png" alt="Mobile overview" width="280"/></a>
+<a href="docs/screenshots/07-mobile-cluster.png"><img src="docs/screenshots/07-mobile-cluster.png" alt="Mobile cluster" width="280"/></a>
+<a href="docs/screenshots/08-mobile-models.png"><img src="docs/screenshots/08-mobile-models.png" alt="Mobile models" width="280"/></a>
+<p align="center"><b>Mobile</b> — responsive layout, hamburger nav, log rows ellipsize cleanly, status visible in one glance</p>
+</td>
+</tr>
+</table>
+
+> All screenshots are from a running cluster with topology / host names / IPs redacted to generic placeholders (`Workstation`, `Inference-1..4`, `10.0.0.0/24`).  The redaction pass is reproducible — see [`docs/screenshots/_capture.py`](docs/screenshots/_capture.py).
 
 ## Roadmap
 
