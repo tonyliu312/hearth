@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.1-alpha] — 2026-05-20
+
+**Documentation + usability polish on top of v0.1.0-alpha.** No code change to the API or UI; this release is about lowering the on-ramp.
+
+### Added
+
+- **`docs/getting-started.md`** — A 5-minute walkthrough from `git clone` to a running dashboard, including:
+  - The exact `node_exporter` / `dcgm-exporter` install commands
+  - A multi-node extension example
+  - An "Ollama-only" section that honestly says what works and what doesn't
+  - Five common-gotcha entries with concrete fixes
+
+### Changed
+
+- **README "What it monitors" table redesigned** (en / zh-CN / zh-TW). Now a 4-column matrix: backend · today's status · metrics · OSS-user fit. Each row tagged 🟢 drop-in / 🟡 partial-or-workaround / 🔴 not-yet. Honest framing replaces the previous best-case-only table.
+- Added "alpha reality check" callout: best fit today is *LiteLLM gateway + vLLM and/or llama.cpp + node_exporter + dcgm-exporter*. Other configurations work with caveats.
+- Quick-start link to `docs/getting-started.md` surfaced from each README so new visitors land in the tutorial within one click.
+
+### Why this is a separate release
+
+The post-public audit surfaced that v0.1.0-alpha was *technically* shippable but *practically* under-documented for the long-tail audience (Ollama-only home labs, SGLang, alert-push users). Rather than letting them bounce, this release tells them up front what works and what's planned. The roadmap to fix the underlying gaps (Ollama adapter, SGLang adapter, alert channels) is still v0.2.0.
+
 ## [v0.1.0-alpha] — 2026-05-20
 
 First alpha after P1 (configuration as data). End-to-end re-verified against
