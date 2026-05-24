@@ -516,7 +516,7 @@ section.page > .lede {
 /* ── Node card ────────────────────────────────────────────────────────── */
 .node {
   position: relative;
-  padding: 22px;
+  padding: 18px;
   background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-2) 100%);
   border: 0.5px solid var(--line);
   border-radius: var(--r-md);
@@ -565,7 +565,7 @@ section.page > .lede {
 }
 .node-rings {
   display: flex;
-  gap: 14px;
+  gap: 10px;
   margin: 18px 0 14px;
 }
 .node-rings > div {
