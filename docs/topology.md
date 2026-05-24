@@ -51,6 +51,9 @@ nodes:
                                      # set, this node is read FROM the obs
                                      # Prometheus; if omitted, the Hearth API
                                      # scrapes :9100/:9400 directly.
+      node_metrics: obs | direct     # optional override. Force CPU/mem/disk/net
+                                     # from :9100 even with obs_node_label set
+                                     # (GPU still via obs DCGM). See note below.
     services: [<string>, ...]        # display-only chips
 
 model_meta:                          # OPTIONAL display overlay for routes
@@ -82,6 +85,12 @@ Hearth supports two routes for node-level OS metrics:
 2. **Direct scrape** (single-host or hosts not in your Prometheus job) — leave `obs_node_label` empty. The api container hits `:9100` / `:9400` on the IPs you list.
 
 Both routes can coexist in the same cluster.
+
+### `node_metrics: direct` — the obs-host hairpin case
+
+There's one host where route 1 silently breaks: **the machine running your obs Prometheus stack itself**. A Prometheus container on a Docker bridge network frequently can't scrape its own host's `node_exporter` (hairpin NAT on the bridge), so `node={label}` returns nothing for CPU/mem even though the GPU (DCGM, scraped over the same bridge) works fine — leaving that node's CPU/mem rings flat at 0.
+
+Set `node_metrics: direct` on that node to keep its GPU coming from obs DCGM (via `obs_node_label`) while CPU/mem/disk/net are scraped straight from `:9100`. This is a per-node override; everything else stays on the obs route.
 
 ## Adding a new node
 
