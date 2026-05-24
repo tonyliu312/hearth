@@ -78,7 +78,7 @@ open http://localhost:8080
 | **LiteLLM 閘道** `LiteLLM_SpendLogs` Postgres | ✅ 唯讀 SELECT | 每請求日誌:模型、狀態、延遲、token | 🟢 開箱即用 |
 | **閘道健康但無 `/metrics`** | ✅ 誠實 "online" | 僅狀態,絕不偽造數字 | 🟢 開箱即用 |
 | **node_exporter + dcgm-exporter** (Prometheus) | ✅ 走你的 obs 棧 | CPU · 記憶體 · GPU 使用率 · 顯記憶體 · 網路 · 磁碟 · 溫度 · 功率 | 🟢 開箱即用 |
-| **SGLang** `sglang:*` | 🟡 顯示為 "online" | 尚無詳細指標 | 🟡 v0.2.0 轉接器 |
+| **SGLang** `sglang:*` | ✅ 完整 *(未對 live 實測)* | tps · TTFT · TPOT · KV% · p50/p95/p99 · 運行/等待 | 🟢 開箱即用 — 指標名不符請反饋 |
 | **Ollama** 原生 | 🟡 僅 OS 層 | 模型層指標缺失(Ollama 預設不暴露 `/metrics`) | 🟡 v0.2.0 轉接器或把 Ollama 掛在 LiteLLM 後面 |
 | **告警推送**(Telegram / LINE / ntfy / Slack…) | 🔴 尚未 | 告警規則觸發到 UI,無推送通道 | 🔴 v0.2.0 |
 

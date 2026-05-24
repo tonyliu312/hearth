@@ -623,7 +623,7 @@ async def _discover() -> list[dict]:
             "tags": list(meta["tags"]), "params": "—", "quant": "—",
             "framework": "—", "vram": 0, "ctx": 0,
             "_nodes": set(), "_aliases": set(), "_bases": [],
-            "up": False, "vllm_bases": [], "llamacpp_bases": []})
+            "up": False, "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": []})
         mm["_bases"].append(b)
         host = _host_of(b)
         if host in IP_TO_ID:
@@ -646,6 +646,10 @@ async def _discover() -> list[dict]:
             if sc2:                              # 有 llamacpp:* 行
                 mm["llamacpp_bases"].append(b); mm["up"] = True
                 continue
+            sc3 = await _scrape_sglang(b)
+            if any(str(k).startswith("sglang:") for k in sc3) or sc3.get("__e2e_buckets"):
+                mm["sglang_bases"].append(b); mm["up"] = True
+                continue
             try:                                 # 无指标但 /v1/models 通 → 在线
                 r = await client.get(f"{b}/v1/models", timeout=3.0)
                 if r.status_code == 200:
@@ -660,6 +664,9 @@ async def _discover() -> list[dict]:
         elif mm["llamacpp_bases"]:
             mm["framework"] = "llama.cpp"
             mm["ctx"] = await _ctx_of(mm["llamacpp_bases"][0])
+        elif mm["sglang_bases"]:
+            mm["framework"] = "SGLang"
+            mm["ctx"] = await _ctx_of(mm["sglang_bases"][0])
         if mm["_aliases"]:
             mm["tags"] = mm["tags"] + ["alias:" + ",".join(sorted(mm["_aliases"]))]
         mm["nodes"] = sorted(mm.pop("_nodes"))
@@ -771,6 +778,52 @@ async def _scrape_llamacpp(base: str) -> dict:
     return out
 
 
+_SGLANG_SCALARS = {
+    "sglang:num_running_reqs", "sglang:num_queue_reqs",
+    "sglang:gen_throughput",
+    "sglang:prompt_tokens_total", "sglang:generation_tokens_total",
+    "sglang:time_to_first_token_seconds_sum", "sglang:time_to_first_token_seconds_count",
+    "sglang:inter_token_latency_seconds_sum", "sglang:inter_token_latency_seconds_count",
+    "sglang:token_usage",
+    "sglang:e2e_request_latency_seconds_sum", "sglang:e2e_request_latency_seconds_count",
+}
+
+
+async def _scrape_sglang(base: str) -> dict:
+    """直采 SGLang 原生 /metrics（需启动加 --enable-metrics；前缀 sglang:）。
+    指标比 llama.cpp 丰富，含 TTFT / inter-token / e2e 直方图，接近 vLLM。
+
+    ⚠️ 注意：基于 SGLang 官方文档的指标名实现，**尚未对 live SGLang 实例
+    端到端验证**（开发集群无 SGLang 后端）。若你的 SGLang 版本指标名不同
+    导致显示异常，请开 issue 反馈实际 `sglang:*` 名称，我们快速适配。"""
+    out: dict[str, float] = {}
+    e2e_b: dict[str, float] = {}
+    try:
+        r = await client.get(f"{base}/metrics", timeout=4.0)
+        r.raise_for_status()
+        for line in r.text.splitlines():
+            if not line or line[0] == "#":
+                continue
+            sp = line.rsplit(" ", 1)
+            if len(sp) != 2:
+                continue
+            head, name = sp[0], sp[0].split("{")[0]
+            try:
+                v = float(sp[1])
+            except ValueError:
+                continue
+            if name == "sglang:e2e_request_latency_seconds_bucket":
+                mle = re.search(r'le="([^"]+)"', head)
+                if mle:
+                    e2e_b[mle.group(1)] = e2e_b.get(mle.group(1), 0.0) + v
+            elif name in _SGLANG_SCALARS:
+                out[name] = out.get(name, 0.0) + v
+    except Exception:
+        return {}
+    out["__e2e_buckets"] = e2e_b
+    return out
+
+
 async def _scrape_vllm(base: str) -> dict:
     """直采 vLLM 原生 /metrics（prom 文本）。含 V1 改名指标 + e2e 直方图桶。"""
     out: dict[str, float] = {}
@@ -820,15 +873,19 @@ async def models_list():
     # 所有"在线且有 vLLM 指标"的后端 → 两次采样算 counter→rate（含多副本）
     vbases = sorted({b for m in disco for b in m.get("vllm_bases", [])})
     lbases = sorted({b for m in disco for b in m.get("llamacpp_bases", [])})
+    gbases = sorted({b for m in disco for b in m.get("sglang_bases", [])})
     s1 = {b: await _scrape_vllm(b) for b in vbases}
     l1 = {b: await _scrape_llamacpp(b) for b in lbases}
+    g1 = {b: await _scrape_sglang(b) for b in gbases}
     await asyncio.sleep(0.5)
     s2 = {b: await _scrape_vllm(b) for b in vbases}
     l2 = {b: await _scrape_llamacpp(b) for b in lbases}
+    g2 = {b: await _scrape_sglang(b) for b in gbases}
     out = []
     for m in disco:
         vb = m.get("vllm_bases") or []
         lb = m.get("llamacpp_bases") or []
+        gb = m.get("sglang_bases") or []
         base_keys = ("id", "display", "vendor", "kind", "params", "quant",
                      "ctx", "framework", "nodes", "vram", "route", "tags")
         card = {k: m[k] for k in base_keys}
@@ -884,6 +941,31 @@ async def models_list():
                     "waiting": int(waiting), "metrics": "llamacpp",
                     "resident": True,
                     "p50": 0, "p95": 0, "p99": 0}
+        elif gb:                                # SGLang 真实指标(含 TTFT/e2e, 接近 vLLM)
+            a = _merge_scrape([g1.get(b) or {} for b in gb])
+            b = _merge_scrape([g2.get(b) or {} for b in gb])
+            dt = 0.5
+            tps = max(0.0, (b.get("sglang:generation_tokens_total", 0)
+                            - a.get("sglang:generation_tokens_total", 0)) / dt)
+            tcnt = b.get("sglang:time_to_first_token_seconds_count", 0)
+            tsum = b.get("sglang:time_to_first_token_seconds_sum", 0)
+            ttft = (tsum / tcnt * 1000) if tcnt else 0
+            icnt = b.get("sglang:inter_token_latency_seconds_count", 0)
+            isum = b.get("sglang:inter_token_latency_seconds_sum", 0)
+            tpot = (isum / icnt * 1000) if icnt else 0
+            kv = b.get("sglang:token_usage", 0) * 100 / max(1, len(gb))
+            e2e_b = b.get("__e2e_buckets") or {}
+            running = b.get("sglang:num_running_reqs", 0)
+            waiting = b.get("sglang:num_queue_reqs", 0)
+            state = "serving" if running > 0 or tps > 0 else "idle"
+            live = {"tps": round(tps, 1), "rps": 0,
+                    "ttft": round(ttft, 1), "tpot": round(tpot, 1),
+                    "kv": round(kv, 1), "running": int(running),
+                    "waiting": int(waiting), "metrics": "sglang",
+                    "resident": True,
+                    "p50": round(_hquant(e2e_b, 0.50) * 1000, 0),
+                    "p95": round(_hquant(e2e_b, 0.95) * 1000, 0),
+                    "p99": round(_hquant(e2e_b, 0.99) * 1000, 0)}
         elif m.get("up"):                       # 网关健康但无可识别 /metrics
             state = "online"                    # 在线·服务中，无详细指标（不伪造）
             live = {"metrics": "none", "resident": True}

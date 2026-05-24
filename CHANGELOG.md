@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SGLang adapter** (`_scrape_sglang`, `sglang:*` metrics) — tps / TTFT / TPOT / KV% / p50-99 / running / waiting, the full rich set (SGLang exposes e2e + TTFT histograms like vLLM). Frontend renders SGLang models exactly like vLLM. ⚠️ Implemented from SGLang's documented metric names but **not yet verified against a live SGLang instance** (dev cluster runs vLLM + llama.cpp only) — please open an issue if metric names differ in your version.
 - **Alert push channels** — node-down / GPU-overheat / memory / disk / gateway-error alerts now push to ntfy, Telegram, Discord, Slack, or a generic webhook. Fires on state *transition* (healthy→firing, firing→resolved) only — no per-tick spam. State persists across restart. Configure via `alerts:` in `config/hearth.yaml`; secrets via env vars. End-to-end tested through ntfy.sh. Docs: [`docs/alerts.md`](docs/alerts.md).
 - Alert rule engine messages translated to English with stable `key`s (node:rule) for transition detection.
 

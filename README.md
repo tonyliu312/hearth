@@ -78,7 +78,7 @@ For multi-node configuration, see [`docs/topology.md`](docs/topology.md) (coming
 | **LiteLLM gateway** `LiteLLM_SpendLogs` Postgres | ✅ Read-only SELECT | Per-request log: model, status, latency, tokens | 🟢 Drop-in |
 | **Gateway-healthy, no `/metrics`** | ✅ Honest "online" | State only, no fake numbers | 🟢 Drop-in |
 | **node_exporter + dcgm-exporter** (Prometheus) | ✅ Via your obs stack | CPU · RAM · GPU util · VRAM · network · disk · temps · power | 🟢 Drop-in |
-| **SGLang** `sglang:*` | 🟡 Shows as "online" | No detail metrics yet | 🟡 v0.2.0 adapter |
+| **SGLang** `sglang:*` | ✅ Full *(untested-live)* | tps · TTFT · TPOT · KV% · p50/p95/p99 · running · waiting | 🟢 Drop-in — report if metric names differ in your version |
 | **Ollama** native | 🟡 OS-level only | Per-model metrics absent (Ollama doesn't ship `/metrics`) | 🟡 v0.2.0 adapter OR put Ollama behind LiteLLM |
 | **Alert push** (ntfy / Telegram / Discord / Slack / webhook) | ✅ fire + resolve | node-down / overheat / mem / disk / gateway-errors → your phone, transition-only (no spam) | 🟢 Drop-in · see [`docs/alerts.md`](docs/alerts.md) |
 

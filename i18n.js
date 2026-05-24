@@ -77,7 +77,7 @@
       "TTFT / TPOT": "TTFT / TPOT", "KV-cache": "KV 缓存",
       "P50 / P95 / P99": "P50 / P95 / P99", "Placement · framework": "部署 · 框架",
       "no live metrics source": "无实时指标源", "vLLM not exposed": "vLLM 未暴露",
-      "vLLM + llama.cpp /metrics": "vLLM + llama.cpp /metrics", "Live throughput": "实时吞吐",
+      "vLLM + llama.cpp + SGLang /metrics": "vLLM + llama.cpp + SGLang /metrics", "Live throughput": "实时吞吐",
       "llama.cpp /metrics does not expose TTFT / KV% / e2e histograms · shown as — honestly":
         "llama.cpp /metrics 未暴露 TTFT / KV% / e2e 直方图 · 诚实显—，不伪造",
       "TPOT / KV-cache / error-rate: this vLLM build does not expose them → honestly left blank, not faked.":
@@ -189,7 +189,7 @@
       "TTFT / TPOT": "TTFT / TPOT", "KV-cache": "KV 快取",
       "P50 / P95 / P99": "P50 / P95 / P99", "Placement · framework": "部署 · 框架",
       "no live metrics source": "無即時指標來源", "vLLM not exposed": "vLLM 未暴露",
-      "vLLM + llama.cpp /metrics": "vLLM + llama.cpp /metrics", "Live throughput": "即時吞吐",
+      "vLLM + llama.cpp + SGLang /metrics": "vLLM + llama.cpp + SGLang /metrics", "Live throughput": "即時吞吐",
       "llama.cpp /metrics does not expose TTFT / KV% / e2e histograms · shown as — honestly":
         "llama.cpp /metrics 未暴露 TTFT / KV% / e2e 直方圖 · 誠實顯—,不偽造",
       "TPOT / KV-cache / error-rate: this vLLM build does not expose them → honestly left blank, not faked.":
