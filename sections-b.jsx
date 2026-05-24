@@ -46,8 +46,10 @@ function NodeCard({ node, onClick }) {
   const { t } = useLang();
   const ns = _live.nodes[node.id];
   const isHost = /gateway/i.test(node.role || "");
+  const offline = ns.up === false;       // 后端权威: 真实离线状态(不再写死 ONLINE)
   return (
-    <article className="node" onClick={onClick}>
+    <article className="node" data-offline={offline ? "1" : "0"} onClick={onClick}
+             style={offline ? { opacity: 0.55 } : undefined}>
       <div className="node-head">
         <div>
           <div className="node-class">{node.class}</div>
@@ -55,9 +57,11 @@ function NodeCard({ node, onClick }) {
           <div className="node-ip">{node.ip}</div>
         </div>
         <div style={{ textAlign: "right" }}>
-          <div className="node-status"><span className="dot" />{t("ONLINE")}</div>
+          <div className="node-status" style={offline ? { color: "var(--ink-3)" } : undefined}>
+            <span className={"dot" + (offline ? " bad" : "")} />{offline ? t("OFFLINE") : t("ONLINE")}
+          </div>
           <div style={{ marginTop: 6 }}>
-            <span className={"chip " + (isHost ? "accent" : "violet")} style={{ fontSize: 9.5 }}>
+            <span className={"chip " + (offline ? "ghost" : isHost ? "accent" : "violet")} style={{ fontSize: 9.5 }}>
               {isHost ? "GATEWAY" : node.role.split(" ")[2] || "NODE"}
             </span>
           </div>

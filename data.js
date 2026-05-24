@@ -92,6 +92,7 @@
   function makeNodeMetrics() {
     const empty = () => ({ now: 0, hist: Array(HIST).fill(0) });
     return {
+      up: true,                          // 真实在线状态(live 模式由后端 up 覆盖; mock 默认在线)
       gpu: empty(), vram: empty(), cpu: empty(), mem: empty(),
       power: empty(), tempGpu: empty(), tempCpu: empty(),
       fan: empty(), disk: empty(), netIn: empty(), netOut: empty(),
@@ -344,6 +345,7 @@
     (p.nodes || []).forEach((n) => {
       const ns = live.nodes[n.id]; if (!ns) return;
       const lv = n.live || {};
+      ns.up = n.up !== false;            // 后端权威 up 状态 → 前端诚实显示在线/离线
       const upd = (k, v) => { if (v === undefined || v === null) return;
         ns[k].now = v; ns[k].hist.shift(); ns[k].hist.push(v); };
       if (/gateway/i.test(n.role)) upd("gpu", lv.gpu);  // 网关节点(discrete)用真实 DCGM；Spark GPU 由下方加速器活跃度推导滚动驱动(GB10 DCGM 不可靠, 不灌进历史)

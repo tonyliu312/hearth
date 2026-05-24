@@ -80,7 +80,7 @@ For multi-node configuration, see [`docs/topology.md`](docs/topology.md) (coming
 | **node_exporter + dcgm-exporter** (Prometheus) | ✅ Via your obs stack | CPU · RAM · GPU util · VRAM · network · disk · temps · power | 🟢 Drop-in |
 | **SGLang** `sglang:*` | 🟡 Shows as "online" | No detail metrics yet | 🟡 v0.2.0 adapter |
 | **Ollama** native | 🟡 OS-level only | Per-model metrics absent (Ollama doesn't ship `/metrics`) | 🟡 v0.2.0 adapter OR put Ollama behind LiteLLM |
-| **Alert push** (Telegram / LINE / ntfy / Slack…) | 🔴 Not yet | Alert rules fire to UI, no push channel | 🔴 v0.2.0 |
+| **Alert push** (ntfy / Telegram / Discord / Slack / webhook) | ✅ fire + resolve | node-down / overheat / mem / disk / gateway-errors → your phone, transition-only (no spam) | 🟢 Drop-in · see [`docs/alerts.md`](docs/alerts.md) |
 
 > **alpha reality check**: best fit today is *LiteLLM gateway + vLLM and/or llama.cpp + node_exporter + dcgm-exporter*. That's how Hearth was developed and tested. Other configurations work but with the caveats above.
 

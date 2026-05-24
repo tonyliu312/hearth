@@ -14,7 +14,7 @@
       // nav
       "Overview": "总览", "Cluster": "集群", "Nodes": "节点", "Models": "模型",
       "Telemetry": "遥测", "Fabric": "网络", "Search": "搜索",
-      "5/5 nodes online": "5/5 节点在线", "reconnecting…": "重连中…",
+      "nodes online": "节点在线", "OFFLINE": "离线", "reconnecting…": "重连中…",
       "mock data · no backend": "模拟数据 · 无后端", "LIVE": "实时", "MOCK": "模拟",
       // hero
       "Home": "家庭", "Compute Center": "智算中心",
@@ -119,7 +119,7 @@
       "Placement": "部署", "Open Playground": "打开 Playground",
       "Restart": "重启", "Logs": "日志", "Close": "关闭",
       "— No models pinned to this node —": "— 无模型固定到此节点 —",
-      "ONLINE": "在线", "Power": "功率", "maint. pending": "待维护纳管",
+      "ONLINE": "在线", "OFFLINE": "离线", "Power": "功率", "maint. pending": "待维护纳管",
       "LiteLLM request log · OSS Postgres": "LiteLLM 请求日志 · OSS Postgres",
       "East-West · 200 GbE ConnectX-7 RDMA (live)": "东西向 · 200 GbE ConnectX-7 RDMA（真实）",
       "Per-node": "各节点", "heatmap": "热力图",
@@ -136,7 +136,7 @@
     "zh-TW": {
       "Overview": "總覽", "Cluster": "叢集", "Nodes": "節點", "Models": "模型",
       "Telemetry": "遙測", "Fabric": "網路", "Search": "搜尋",
-      "5/5 nodes online": "5/5 節點在線", "reconnecting…": "重連中…",
+      "nodes online": "節點在線", "OFFLINE": "離線", "reconnecting…": "重連中…",
       "mock data · no backend": "模擬資料 · 無後端", "LIVE": "即時", "MOCK": "模擬",
       "Home": "家庭", "Compute Center": "智算中心",
       "A unified telemetry surface for your home AI compute cluster — auto-discovers models, surfaces real metrics from vLLM / llama.cpp / LiteLLM, honestly labels what backends don't expose. Every token, every watt — in real time.":
@@ -227,7 +227,7 @@
       "Placement": "部署", "Open Playground": "開啟 Playground",
       "Restart": "重啟", "Logs": "日誌", "Close": "關閉",
       "— No models pinned to this node —": "— 無模型固定到此節點 —",
-      "ONLINE": "在線", "Power": "功率", "maint. pending": "待維護納管",
+      "ONLINE": "在線", "OFFLINE": "離線", "Power": "功率", "maint. pending": "待維護納管",
       "LiteLLM request log · OSS Postgres": "LiteLLM 請求日誌 · OSS Postgres",
       "East-West · 200 GbE ConnectX-7 RDMA (live)": "東西向 · 200 GbE ConnectX-7 RDMA（真實）",
       "Per-node": "各節點", "heatmap": "熱力圖",
