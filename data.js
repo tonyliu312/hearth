@@ -52,22 +52,22 @@
   const MODELS_CATALOG = [
     { id: "qwen3-coder", display: "Qwen3-Coder-Next", vendor: "Alibaba", kind: "chat",
       params: "Coder-Next", quant: "FP8", ctx: 262144, framework: "vLLM", port: 8888,
-      route: "litellm/qwen3-coder-next", nodes: ["spark-03","spark-04"], vram: 0,
+      route: "litellm/qwen3-coder-next", nodes: ["node-4","node-5"], vram: 0,
       metricsSource: "vllm", state: "idle", tps: 0, ttft: 0, tpot: 0, rps: 0, kv: 0,
       p50: 0, p95: 0, p99: 0, err: 0, tags: ["coding","2xSpark","resident"] },
     { id: "deepseek-v4-flash", display: "DeepSeek-V4-Flash", vendor: "DeepSeek", kind: "chat",
       params: "—", quant: "—", ctx: 262144, framework: "vLLM", port: 8000,
-      route: "litellm/deepseek-v4-flash", nodes: ["spark-02"], vram: 0,
+      route: "litellm/deepseek-v4-flash", nodes: ["node-3"], vram: 0,
       metricsSource: "vllm", state: "no-metrics", tps: 0, ttft: 0, tpot: 0, rps: 0, kv: 0,
       p50: 0, p95: 0, p99: 0, err: 0, tags: ["reasoning","stopped"] },
     { id: "gemma-4-31b-abliterated", display: "Gemma-4-31B-abliterated", vendor: "Google", kind: "vision",
       params: "31B", quant: "Q8 GGUF", ctx: 32768, framework: "llama.cpp", port: 8001,
-      route: "litellm/gemma-4-31b-abliterated", nodes: ["spark-02"], vram: 0,
+      route: "litellm/gemma-4-31b-abliterated", nodes: ["node-3"], vram: 0,
       metricsSource: "none", state: "no-metrics", tps: 0, ttft: 0, tpot: 0, rps: 0, kv: 0,
       p50: 0, p95: 0, p99: 0, err: 0, tags: ["vision","abliterated"] },
     { id: "qwen3-vl-abliterated", display: "Qwen3-VL-8B-abliterated", vendor: "Alibaba", kind: "vision",
       params: "8B", quant: "Q8 GGUF", ctx: 32768, framework: "llama.cpp", port: 8002,
-      route: "litellm/qwen3-vl-abliterated", nodes: ["spark-02"], vram: 0,
+      route: "litellm/qwen3-vl-abliterated", nodes: ["node-3"], vram: 0,
       metricsSource: "none", state: "no-metrics", tps: 0, ttft: 0, tpot: 0, rps: 0, kv: 0,
       p50: 0, p95: 0, p99: 0, err: 0, tags: ["vision","scoring"] },
   ];
@@ -155,16 +155,17 @@
   // ── Mock simulator (same logic as the original v0 prototype) ────────
   const liveSeeds = {
     "node-1":   { gpu: 62, vram: 78, cpu: 41, mem: 58, power: 312, tempGpu: 64, tempCpu: 58, fan: 47, disk: 38, netIn: 220, netOut: 180 },
-    "spark-01": { gpu: 78, vram: 64, cpu: 36, mem: 72, power: 168, tempGpu: 62, tempCpu: 55, fan: 38, disk: 22, netIn: 540, netOut: 510 },
-    "spark-02": { gpu: 84, vram: 68, cpu: 44, mem: 76, power: 175, tempGpu: 66, tempCpu: 57, fan: 41, disk: 19, netIn: 480, netOut: 460 },
-    "spark-03": { gpu: 21, vram: 14, cpu: 12, mem: 22, power:  68, tempGpu: 48, tempCpu: 46, fan: 22, disk: 12, netIn:  20, netOut:  18 },
-    "spark-04": { gpu: 55, vram: 42, cpu: 28, mem: 48, power: 132, tempGpu: 58, tempCpu: 52, fan: 32, disk: 14, netIn: 220, netOut: 190 },
+    "node-2":   { gpu: 78, vram: 64, cpu: 36, mem: 72, power: 168, tempGpu: 62, tempCpu: 55, fan: 38, disk: 22, netIn: 540, netOut: 510 },
+    "node-3":   { gpu: 84, vram: 68, cpu: 44, mem: 76, power: 175, tempGpu: 66, tempCpu: 57, fan: 41, disk: 19, netIn: 480, netOut: 460 },
+    "node-4":   { gpu: 21, vram: 14, cpu: 12, mem: 22, power:  68, tempGpu: 48, tempCpu: 46, fan: 22, disk: 12, netIn:  20, netOut:  18 },
+    "node-5":   { gpu: 55, vram: 42, cpu: 28, mem: 48, power: 132, tempGpu: 58, tempCpu: 52, fan: 32, disk: 14, netIn: 220, netOut: 190 },
   };
 
   function seedMock() {
     resetLive();
     NODES.forEach((n) => {
       const s = liveSeeds[n.id];
+      if (!s) return;          // 防御: 节点无 seed 时跳过, 不崩
       const ns = live.nodes[n.id];
       const seed = (k, v) => { ns[k].now = v; ns[k].hist = Array.from({ length: HIST }, () => v + (Math.random() - 0.5) * 6); };
       seed("gpu", s.gpu); seed("vram", s.vram); seed("cpu", s.cpu); seed("mem", s.mem);
@@ -190,8 +191,8 @@
     live.alerts = [
       { sev: "warn", msg: "Node-2 GPU thermal margin reduced", sub: "85°C peak under load · soft thermal cap", when: "2m ago" },
       { sev: "ok",   msg: "Gateway · LiteLLM rotated TLS cert", sub: "letsencrypt · expires 2026-08-12", when: "14m ago" },
-      { sev: "hot",  msg: "qwen3-235b-a22b approaching KV-cache pressure", sub: "71% across spark-01/02 · consider evicting cold prefixes", when: "26m ago" },
-      { sev: "warn", msg: "spark-03 idle > 4h", sub: "candidate for power-save autopilot", when: "1h ago" },
+      { sev: "hot",  msg: "a model approaching KV-cache pressure", sub: "71% across inference nodes · consider evicting cold prefixes", when: "26m ago" },
+      { sev: "warn", msg: "a node idle > 4h", sub: "candidate for power-save autopilot", when: "1h ago" },
       { sev: "ok",   msg: "Cluster heartbeat green", sub: "5/5 nodes · Prometheus 15s scrape · 0 drops", when: "1h ago" },
     ];
     seedLog();
@@ -225,6 +226,7 @@
   function mockTick() {
     NODES.forEach((n) => {
       const s = liveSeeds[n.id];
+      if (!s) return;          // 防御: 节点无 seed 时跳过, 不崩
       const ns = live.nodes[n.id];
       const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
       const drift = (cur, target, amp) => clamp(cur + (target - cur) * 0.06 + (Math.random() - 0.5) * amp, 0, 100);

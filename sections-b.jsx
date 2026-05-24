@@ -586,7 +586,7 @@ function FabricSection() {
                   );
                 })}
                 {/* atlas node */}
-                <NodeBlob x={ATL.x} y={ATL.y} label={GATEWAY_NODE.name.toUpperCase() + " · " + GATEWAY_NODE.gpu.name.split(" ").slice(-2).join(" ")} sub={GATEWAY_NODE.ip} color="var(--accent)" util={(_live.nodes[GATEWAY_NODE.id]||{}).gpu?.now || 0} />
+                <NodeBlob x={ATL.x} y={ATL.y} label={GW.name.toUpperCase() + " · " + (GW.gpu && GW.gpu.name ? GW.gpu.name.split(" ").slice(-2).join(" ") : "")} sub={GW.ip} color="var(--accent)" util={(_live.nodes[GW.id]||{}).gpu?.now || 0} />
                 {sparks.map((s) => (
                   <NodeBlob key={s.id} x={s.x} y={s.y}
                             label={s.label.toUpperCase() + " · DGX SPARK"}
