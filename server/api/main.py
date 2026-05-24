@@ -904,46 +904,169 @@ async def model_detail(model_id: str):
 
 # ── Alerts / Logs (优雅降级) ───────────────────────────────────────
 async def _alerts(nodes=None, log=None):
-    """规则引擎：从已采集的真实指标算告警（Alertmanager 未部署，零新基建）。
-    nodes/log 可由上游传入复用（SSE 快照），避免重复跑 _node_payload(贵)。"""
+    """Rule engine — derives alerts from already-collected metrics (no
+    Alertmanager dependency). nodes/log can be passed in to reuse the SSE
+    snapshot's data instead of recomputing _node_payload (expensive).
+    Each alert carries a stable `key` (node:rule) so the push notifier can
+    detect fire / resolve transitions without spamming on every tick."""
     if nodes is None:
         nodes = await _node_payload()
     if log is None:
         log = await _litellm_request_log(60)
     out = []
     for n in nodes:
-        L, nm = n["live"], n["name"]
+        L, nm, nid = n["live"], n["name"], n["id"]
         if not n.get("up"):
-            out.append({"sev": "bad", "msg": f"{nm} 节点离线",
-                        "sub": f"{n['ip']} · 监控无法采集", "when": "实时"})
+            out.append({"key": f"{nid}:offline", "sev": "bad",
+                        "msg": f"{nm} offline", "sub": f"{n['ip']} · no metrics", "when": "live"})
             continue
         gt = L.get("tempGpu", 0)
         if gt >= 90:
-            out.append({"sev": "bad", "msg": f"{nm} GPU 过热 {gt:.0f}°C",
-                        "sub": "已超临界，建议降载", "when": "实时"})
+            out.append({"key": f"{nid}:gpu_temp", "sev": "bad",
+                        "msg": f"{nm} GPU overheating {gt:.0f}°C",
+                        "sub": "past critical — shed load", "when": "live"})
         elif gt >= 85:
-            out.append({"sev": "hot", "msg": f"{nm} GPU 温度偏高 {gt:.0f}°C",
-                        "sub": "接近热节流阈值", "when": "实时"})
+            out.append({"key": f"{nid}:gpu_temp", "sev": "hot",
+                        "msg": f"{nm} GPU hot {gt:.0f}°C",
+                        "sub": "near thermal throttle", "when": "live"})
         if L.get("mem", 0) >= 95:
-            out.append({"sev": "warn", "msg": f"{nm} 内存压力 {L['mem']:.0f}%",
-                        "sub": "统一内存接近上限（GB10）", "when": "实时"})
+            out.append({"key": f"{nid}:mem", "sev": "warn",
+                        "msg": f"{nm} memory pressure {L['mem']:.0f}%",
+                        "sub": "system/unified memory near limit", "when": "live"})
         if L.get("disk", 0) >= 85:
-            out.append({"sev": "warn", "msg": f"{nm} 磁盘 {L['disk']:.0f}%",
-                        "sub": "根分区使用率偏高", "when": "实时"})
+            out.append({"key": f"{nid}:disk", "sev": "warn",
+                        "msg": f"{nm} disk {L['disk']:.0f}%",
+                        "sub": "root filesystem filling up", "when": "live"})
     err = sum(1 for e in log[:40] if e.get("status") != "200")
     if err >= 5:
-        out.append({"sev": "warn", "msg": f"网关近期错误偏多 · {err}/40",
-                    "sub": "LiteLLM 最近请求 5xx 比例升高", "when": "近 40 请求"})
+        out.append({"key": "gateway:errors", "sev": "warn",
+                    "msg": f"gateway errors · {err}/40",
+                    "sub": "LiteLLM 5xx rate elevated recently", "when": "last 40 reqs"})
     up = sum(1 for n in nodes if n.get("up"))
     if not out:
-        out.append({"sev": "ok", "msg": f"集群健康 · {up}/{len(nodes)} 节点在线",
-                    "sub": "全部指标在阈值内", "when": "实时"})
+        out.append({"key": None, "sev": "ok",
+                    "msg": f"cluster healthy · {up}/{len(nodes)} nodes online",
+                    "sub": "all metrics within thresholds", "when": "live"})
     return out[:12]
 
 
 @app.get("/api/alerts")
 async def alerts():
     return await _alerts()
+
+
+# ── Alert push notifier (pluggable channels) ──────────────────────────
+# Fires a notification on healthy→firing transition, again on resolve,
+# and (optionally) re-fires while still firing every `repeat_after_minutes`.
+# State persists to disk so a restart doesn't re-spam. Config in hearth.yaml
+# `alerts:` section. Channel secrets come from env vars (names in YAML),
+# never the YAML itself.
+_SEV_RANK = {"ok": 0, "warn": 1, "hot": 2, "bad": 3}
+_ALERT_STATE_FILE = os.environ.get("HEARTH_ALERT_STATE", "/tmp/hearth-alert-state.json")
+
+
+def _load_alert_state() -> dict:
+    try:
+        return json.loads(Path(_ALERT_STATE_FILE).read_text())
+    except Exception:
+        return {}
+
+
+def _save_alert_state(s: dict) -> None:
+    try:
+        Path(_ALERT_STATE_FILE).write_text(json.dumps(s))
+    except Exception:
+        pass
+
+
+_ALERT_STATE = _load_alert_state()
+
+
+def _ch_url(ch: dict, key: str) -> str:
+    """Resolve a channel URL/secret: prefer literal `<key>`, else env `<key>_env`."""
+    return ch.get(key) or os.environ.get(ch.get(f"{key}_env", ""), "")
+
+
+async def _push_channel(ch: dict, title: str, body: str, sev: str) -> None:
+    typ = ch.get("type", "")
+    text = f"{title}\n{body}".strip()
+    try:
+        if typ == "ntfy":
+            url = _ch_url(ch, "url")
+            if url:
+                # ntfy Title is an HTTP header → must be latin-1. Strip emoji
+                # (severity is already conveyed by Priority + Tags); the full
+                # text with emoji still goes in the UTF-8 body.
+                hdr_title = title.encode("ascii", "ignore").decode("ascii").strip() or "Hearth alert"
+                await client.post(url, content=text.encode("utf-8"), timeout=8.0, headers={
+                    "Title": hdr_title,
+                    "Priority": "urgent" if sev == "bad" else "high" if sev == "hot" else "default",
+                    "Tags": "rotating_light" if sev == "bad" else "warning" if sev == "hot"
+                            else "white_check_mark" if sev == "ok" else "information_source",
+                })
+        elif typ == "telegram":
+            token = os.environ.get(ch.get("token_env", ""), "")
+            chat = str(ch.get("chat_id", ""))
+            if token and chat:
+                await client.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                  json={"chat_id": chat, "text": text}, timeout=8.0)
+        elif typ == "discord":
+            url = _ch_url(ch, "webhook_url")
+            if url:
+                await client.post(url, json={"content": f"**{title}**\n{body}"}, timeout=8.0)
+        elif typ == "slack":
+            url = _ch_url(ch, "webhook_url")
+            if url:
+                await client.post(url, json={"text": f"*{title}*\n{body}"}, timeout=8.0)
+        elif typ == "webhook":                       # generic JSON POST — escape hatch
+            url = _ch_url(ch, "url")
+            if url:
+                await client.post(url, json={"title": title, "body": body, "severity": sev},
+                                  timeout=8.0)
+        else:
+            print(f"[hearth] unknown alert channel type: {typ}", file=sys.stderr)
+    except Exception as e:
+        print(f"[hearth] alert push to {typ} failed: {e}", file=sys.stderr)
+
+
+async def _notify_alerts(alerts_list: list) -> None:
+    cfg = HEARTH_CFG.get("alerts") or {}
+    if not cfg.get("enabled"):
+        return
+    channels = cfg.get("channels") or []
+    if not channels:
+        return
+    min_rank = _SEV_RANK.get(cfg.get("min_severity", "warn"), 1)
+    repeat_s = float(cfg.get("repeat_after_minutes", 30)) * 60
+    now = time.time()
+    cname = (HEARTH_CFG.get("display") or {}).get("cluster_name", "Hearth")
+
+    firing = {a["key"]: a for a in alerts_list
+              if a.get("key") and _SEV_RANK.get(a["sev"], 0) >= min_rank}
+    pushes = []   # (title, body, sev)
+
+    for key, a in firing.items():
+        st = _ALERT_STATE.get(key)
+        if st is None:
+            pushes.append((f"🔴 {a['msg']}", a.get("sub", ""), a["sev"]))
+            _ALERT_STATE[key] = {"sev": a["sev"], "msg": a["msg"],
+                                 "first": now, "last_push": now}
+        elif repeat_s > 0 and now - st.get("last_push", 0) >= repeat_s:
+            pushes.append((f"🔴 still firing · {a['msg']}", a.get("sub", ""), a["sev"]))
+            st["last_push"] = now
+
+    for key in list(_ALERT_STATE.keys()):
+        if key not in firing:
+            msg = _ALERT_STATE[key].get("msg", key)
+            pushes.append((f"✅ resolved · {msg}", "", "ok"))
+            del _ALERT_STATE[key]
+
+    if pushes:
+        _save_alert_state(_ALERT_STATE)
+        for title, body, sev in pushes:
+            full = f"[{cname}] {title}"
+            await asyncio.gather(*[_push_channel(ch, full, body, sev) for ch in channels],
+                                 return_exceptions=True)
 
 
 # ── 全量快照缓存：解耦 SSE 发送节奏与重活构建 ───────────────────────
@@ -959,6 +1082,7 @@ async def _build_snapshot() -> dict:
     log = await _litellm_request_log(40)
     cl, models = await asyncio.gather(cluster(), models_list())
     al = await _alerts(nodes, log)                # 复用 nodes/log, 不重复跑
+    await _notify_alerts(al)                       # 推送渠道(跳变才发, 不阻塞失败)
     return {"ts": time.time(), "cluster": cl, "nodes": nodes,
             "models": models, "alerts": al, "log": log}
 

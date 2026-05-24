@@ -126,3 +126,39 @@ model_meta:
   #   vendor: "DeepSeek"
   #   kind: chat
   #   tags: [reasoning, long-ctx]
+
+
+# ---------------------------------------------------------------------
+# Alert push — OPTIONAL.
+#
+# Hearth's rule engine already shows alerts in the UI. This section
+# pushes them to your phone/chat when a node goes unhealthy (and again
+# when it recovers). Fires only on state *transitions* — no spam every
+# tick. State persists across restarts.
+#
+# Channel secrets come from ENV VARS (you give the env-var name here,
+# the value lives in your .env / systemd drop-in — never in this file).
+# ---------------------------------------------------------------------
+alerts:
+  enabled: false                       # flip to true to turn on push
+  min_severity: warn                   # warn | hot | bad  (push this and above)
+  repeat_after_minutes: 30             # re-notify if still firing (0 = never repeat)
+  channels:
+    # ── ntfy (free, no account, self-hostable — easiest) ──────────────
+    # - type: ntfy
+    #   url: "https://ntfy.sh/your-random-topic-name"   # or url_env: NTFY_URL
+    #
+    # ── Telegram bot ──────────────────────────────────────────────────
+    # - type: telegram
+    #   token_env: "TELEGRAM_BOT_TOKEN"                 # @BotFather token
+    #   chat_id: "123456789"                            # your chat id
+    #
+    # ── Discord / Slack incoming webhook ──────────────────────────────
+    # - type: discord
+    #   webhook_url_env: "DISCORD_WEBHOOK_URL"
+    # - type: slack
+    #   webhook_url_env: "SLACK_WEBHOOK_URL"
+    #
+    # ── Generic JSON POST (escape hatch — wire to anything) ───────────
+    # - type: webhook
+    #   url_env: "MY_WEBHOOK_URL"

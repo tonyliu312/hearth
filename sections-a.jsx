@@ -44,6 +44,11 @@ function Nav({ onOpenCmd }) {
   const isReconnect = status === "reconnecting" || status === "connecting";
   const { t } = useLang();
   const close = () => setMenuOpen(false);
+  // 真实在线节点计数(后端权威 up)——不再写死 "5/5"
+  const _nids = Object.keys(live.nodes);
+  const _total = _nids.length;
+  const _online = _nids.filter((id) => live.nodes[id].up !== false).length;
+  const _degraded = _online < _total;
   return (
     <header className="nav">
       <div className="nav-logo">
@@ -59,12 +64,12 @@ function Nav({ onOpenCmd }) {
         <a href="#fabric" onClick={close}>{t("Fabric")}</a>
       </nav>
       <div className="nav-right">
-        <span className={"dot" + (isReconnect ? " warn" : "")} />
+        <span className={"dot" + (isReconnect || (isLive && _degraded) ? " warn" : "")} />
         <span className="nav-status-text">
-          {isLive ? t("5/5 nodes online")
+          {isLive ? `${_online}/${_total} ${t("nodes online")}`
             : isReconnect ? t("reconnecting…")
             : mode === "mock" ? t("mock data · no backend")
-            : t("5/5 nodes online")}
+            : `${_online}/${_total} ${t("nodes online")}`}
         </span>
         <span className="nav-sep" />
         <span className="nav-mode-badge" title={isLive ? "Streaming /api/stream" : "Local simulator"}

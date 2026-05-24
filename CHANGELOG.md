@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Alert push channels** — node-down / GPU-overheat / memory / disk / gateway-error alerts now push to ntfy, Telegram, Discord, Slack, or a generic webhook. Fires on state *transition* (healthy→firing, firing→resolved) only — no per-tick spam. State persists across restart. Configure via `alerts:` in `config/hearth.yaml`; secrets via env vars. End-to-end tested through ntfy.sh. Docs: [`docs/alerts.md`](docs/alerts.md).
+- Alert rule engine messages translated to English with stable `key`s (node:rule) for transition detection.
+
+### Fixed
+
+- **Honest node online/offline status.** NodeCard previously hard-coded "ONLINE" + a green dot for every node, regardless of reality — a powered-off node still showed ONLINE. Now reads the backend's authoritative `up` flag: offline nodes show "OFFLINE", a red dot, and the card dims. The nav "5/5 nodes online" was likewise hard-coded; it now computes the real online/total count and the status dot goes amber when degraded. (Backend was always honest — `up: false` for unreachable nodes — only the frontend was faking it.)
+
 ## [v0.1.1-alpha] — 2026-05-20
 
 **Documentation + usability polish on top of v0.1.0-alpha.** No code change to the API or UI; this release is about lowering the on-ramp.
