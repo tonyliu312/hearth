@@ -343,21 +343,48 @@
       live.cluster.pow  = pad(p.cluster.history.pow,  HIST);
       live.cluster.temp = pad(p.cluster.history.temp, HIST);
     }
-    // ── nodes ──
-    (p.nodes || []).forEach((n) => {
-      const ns = live.nodes[n.id]; if (!ns) return;
-      const lv = n.live || {};
-      ns.up = n.up !== false;            // 后端权威 up 状态 → 前端诚实显示在线/离线
-      const upd = (k, v) => { if (v === undefined || v === null) return;
-        ns[k].now = v; ns[k].hist.shift(); ns[k].hist.push(v); };
-      if (/gateway/i.test(n.role)) upd("gpu", lv.gpu);  // 网关节点(discrete)用真实 DCGM；Spark GPU 由下方加速器活跃度推导滚动驱动(GB10 DCGM 不可靠, 不灌进历史)
-      upd("vram", lv.vram);
-      upd("tempGpu", lv.tempGpu); upd("tempCpu", lv.tempCpu); upd("power", lv.power);
-      upd("cpu", lv.cpu); upd("mem", lv.mem); upd("disk", lv.disk);
-      upd("netIn", lv.netIn); upd("netOut", lv.netOut);
-      upd("rdmaIn", lv.rdmaIn); upd("rdmaOut", lv.rdmaOut);
-      if (live.nodeMeta[n.id]) live.nodeMeta[n.id].temps = Array.isArray(lv.temps) ? lv.temps : [];
-    });
+    // ── nodes：后端是运行时权威全集。前端动态对齐——后端发什么节点就显
+    //    什么(id 任意, 不要求匹配前端静态目录)。静态 NODES 仅 mock 模式用;
+    //    live 模式按 payload 重建 NODES + live.nodes, 否则后端 id(atlas/
+    //    spark-NN)与静态 id(node-N)对不上 → 全部节点无数据。与 MODELS 同款。
+    if (Array.isArray(p.nodes) && p.nodes.length) {
+      const byId = new Map(NODES.map((x) => [x.id, x]));
+      const next = [];
+      p.nodes.forEach((n) => {
+        const lv = n.live || {};
+        const e = byId.get(n.id) || { id: n.id, os: "—", kernel: "—", driver: "NVIDIA —", cuda: "—" };
+        e.name = n.name || n.id;
+        e.ip = n.ip || "";
+        e.class = n.class || "GPU host";
+        e.role = n.role || "node";
+        e.kind = n.kind || "discrete";
+        e.gpu = n.gpu || { name: "—", mem: 0 };
+        e.cpu = n.cpu || { cores: 0, threads: 0 };
+        e.ram = n.ram || 0; e.disk = n.disk || 0; e.net = n.net || "";
+        e.services = n.services || [];
+        e.gpuPending = !!n.gpuPending;
+        if (e.os === undefined) { e.os = "—"; e.kernel = "—"; e.driver = "NVIDIA —"; e.cuda = "—"; }
+        if (!live.nodes[n.id]) live.nodes[n.id] = makeNodeMetrics();
+        if (!live.nodeMeta[n.id]) live.nodeMeta[n.id] = { temps: [] };
+        const ns = live.nodes[n.id];
+        ns.up = n.up !== false;          // 后端权威 up → 诚实显示在线/离线
+        const upd = (k, v) => { if (v === undefined || v === null) return;
+          ns[k].now = v; ns[k].hist.shift(); ns[k].hist.push(v); };
+        if (/gateway/i.test(e.role)) upd("gpu", lv.gpu);  // 网关(discrete)用真实 DCGM
+        upd("vram", lv.vram);
+        upd("tempGpu", lv.tempGpu); upd("tempCpu", lv.tempCpu); upd("power", lv.power);
+        upd("cpu", lv.cpu); upd("mem", lv.mem); upd("disk", lv.disk);
+        upd("netIn", lv.netIn); upd("netOut", lv.netOut);
+        upd("rdmaIn", lv.rdmaIn); upd("rdmaOut", lv.rdmaOut);
+        live.nodeMeta[n.id].temps = Array.isArray(lv.temps) ? lv.temps : [];
+        next.push(e);
+      });
+      const keep = new Set(next.map((x) => x.id));
+      Object.keys(live.nodes).forEach((id) => {
+        if (!keep.has(id)) { delete live.nodes[id]; delete live.nodeMeta[id]; }
+      });
+      NODES.length = 0; Array.prototype.push.apply(NODES, next);   // 原地替换保持引用
+    }
     // ── models：后端(网关 /health 自动发现)是运行时权威全集。
     //    前端动态对齐——后端返回什么就显什么(新模型自动建条目+live槽，
     //    消失的删掉)，顺序随后端(运行中+vLLM 优先)。不再依赖前端静态目录，

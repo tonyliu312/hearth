@@ -104,7 +104,11 @@ def _node_from_yaml(y: dict) -> dict:
         "role": y.get("role_label", y.get("role", "node")),
         "kind": y.get("kind", "discrete"),
         "obs_node": obs_label,
-        "node_source": "obs" if obs_label else "direct",
+        # node_metrics: "obs" | "direct" — override for hosts whose node_exporter
+        # the obs Prometheus can't reach (e.g. the obs host's own bridge-net
+        # hairpin). Such a node keeps obs_node_label (GPU via obs DCGM) but
+        # scrapes :9100 directly for CPU/mem/disk/net. Default: obs if labelled.
+        "node_source": src.get("node_metrics") or ("obs" if obs_label else "direct"),
         "gpu": {"name": hw.get("gpu", "—"),
                 "mem":  hw.get("vram_gb", 0),
                 "fp16": hw.get("fp16_tflops", 0),

@@ -68,6 +68,13 @@ gateway:
 #                     labels.node).  Leave empty to probe :9100 / :9400
 #                     directly from the api container instead of via
 #                     Prometheus.
+#     node_metrics    "obs" (default when obs_node_label is set) | "direct".
+#                     Force CPU/mem/disk/net to be scraped straight from
+#                     :9100 even though obs_node_label is set (GPU still
+#                     comes from obs DCGM). Use this for the host running
+#                     your obs stack itself — a Prometheus on the same
+#                     Docker bridge often can't scrape its own host's
+#                     node_exporter (hairpin NAT), leaving CPU/mem at 0.
 # ---------------------------------------------------------------------
 nodes:
   - id: node-1

@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Node metrics now render for any backend-reported node id.** The frontend keyed its live node buffers off the *static* `NODES` catalog ids, so a deployment whose `hearth.yaml` used different ids (e.g. `atlas` / `spark-01`) had every node's CPU/mem/GPU/temp silently dropped — the cards showed blanks. `applyLivePayload` now rebuilds `NODES` + `live.nodes` dynamically from the SSE payload (same reconcile the models list already used), so node cards populate regardless of how operators name their nodes.
+- **`node_metrics: direct` override for the obs-host hairpin.** The host running the obs Prometheus stack often can't scrape its own `node_exporter` (Docker bridge hairpin NAT), leaving its CPU/mem rings at 0 even though its GPU (DCGM, same bridge) works. New per-node `sources.node_metrics: obs | direct` forces CPU/mem/disk/net to scrape `:9100` directly while GPU stays on obs DCGM. Documented in [`docs/topology.md`](docs/topology.md) and [`config/hearth.example.yaml`](config/hearth.example.yaml).
 - **Honest node online/offline status.** NodeCard previously hard-coded "ONLINE" + a green dot for every node, regardless of reality — a powered-off node still showed ONLINE. Now reads the backend's authoritative `up` flag: offline nodes show "OFFLINE", a red dot, and the card dims. The nav "5/5 nodes online" was likewise hard-coded; it now computes the real online/total count and the status dot goes amber when degraded. (Backend was always honest — `up: false` for unreachable nodes — only the frontend was faking it.)
 
 ## [v0.1.1-alpha] — 2026-05-20
