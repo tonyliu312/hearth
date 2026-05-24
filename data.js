@@ -413,7 +413,7 @@
       let act = 0;
       MODELS.forEach((m) => {
         // 任何有真实推理指标的后端(vLLM / llama.cpp) → 都参与节点活跃度推导
-        if (!(m.metricsSource === "vllm" || m.metricsSource === "llamacpp")) return;
+        if (!(m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang")) return;
         if (!(m.nodes || []).includes(n.id)) return;
         const mm = live.models[m.id];
         if (!mm) return;
@@ -427,7 +427,7 @@
     });
     // ── cluster tps/kv：从 vLLM 真实模型指标聚合滚动（无 Prometheus range 源）──
     if (p.models) {
-      const vm = MODELS.filter((m) => (m.metricsSource === "vllm" || m.metricsSource === "llamacpp") && live.models[m.id]);
+      const vm = MODELS.filter((m) => (m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang") && live.models[m.id]);
       const cTps = vm.reduce((a, m) => a + (live.models[m.id].tps.now || 0), 0);
       const cKv  = vm.length ? Math.max(...vm.map((m) => live.models[m.id].kv.now || 0)) : 0;
       live.cluster.tpsNow = cTps;

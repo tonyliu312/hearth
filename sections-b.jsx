@@ -282,9 +282,9 @@ function ModelsSection() {
               litellm · {_live.gatewayHost || "127.0.0.1:4000"} · OpenAI-compatible /v1/*
             </div>
           </div>
-          <GatewayStat label={t("Catalog models")} value={_MODELS.length} sub={`${_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp").length} ${t("with live metrics")}`} />
-          <GatewayStat label={t("Live metric sources")} value={_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp").length} sub={t("vLLM + llama.cpp /metrics")} />
-          <GatewayStat label={t("Live throughput")} value={Math.round(_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp").reduce((a,m)=>a+(_live.models[m.id]?_live.models[m.id].tps.now:0),0))} sub={t("t/s · measured sum")} />
+          <GatewayStat label={t("Catalog models")} value={_MODELS.length} sub={`${_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp"||m.metricsSource==="sglang").length} ${t("with live metrics")}`} />
+          <GatewayStat label={t("Live metric sources")} value={_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp"||m.metricsSource==="sglang").length} sub={t("vLLM + llama.cpp + SGLang /metrics")} />
+          <GatewayStat label={t("Live throughput")} value={Math.round(_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp"||m.metricsSource==="sglang").reduce((a,m)=>a+(_live.models[m.id]?_live.models[m.id].tps.now:0),0))} sub={t("t/s · measured sum")} />
           <GatewayStat label={t("LiteLLM metrics")} value={t("enterprise")} sub={t("OSS not exposed · documented")} />
         </div>
       </div>
@@ -307,7 +307,7 @@ function ModelsSection() {
                 <span>{m.vendor} · {m.params} · {m.quant} · ctx&nbsp;{m.ctx === 0 ? "—" : m.ctx >= 1e6 ? `${(m.ctx/1e6).toFixed(0)}M` : `${(m.ctx/1024).toFixed(0)}K`}</span>
               </div>
               <div>
-                {(m.metricsSource === "vllm" || m.metricsSource === "llamacpp") ? (
+                {(m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang") ? (
                   <>
                     <div className="model-bigmetric">{_live.models[m.id].tps.now.toFixed(0)}<small>t/s</small></div>
                     <div className="model-spark"><Sparkline data={_live.models[m.id].tps.hist} color="var(--accent)" height={20} /></div>
@@ -316,17 +316,17 @@ function ModelsSection() {
               </div>
               <div className="num" style={{ fontSize: 12, color: "var(--ink-2)" }}>
                 {/* TTFT: vLLM 暴露, llama.cpp 不暴露(诚实显—); TPOT: 两者都有 */}
-                {m.metricsSource === "vllm" ? (
+                {(m.metricsSource === "vllm" || m.metricsSource === "sglang") ? (
                   <div><b style={{ color: "var(--ink)" }}>{_live.models[m.id].ttft.now.toFixed(0)}</b> <small style={{ color: "var(--ink-3)", fontFamily: "var(--mono)" }}>ms TTFT</small></div>
                 ) : m.metricsSource === "llamacpp" ? (
                   <div><span style={{ color: "var(--ink-4)" }}>—</span> <small style={{ color: "var(--ink-3)", fontFamily: "var(--mono)" }}>ms TTFT</small></div>
                 ) : null}
-                {(m.metricsSource === "vllm" || m.metricsSource === "llamacpp") ? (
+                {(m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang") ? (
                   <div><b style={{ color: "var(--ink)" }}>{_live.models[m.id].tpot.now.toFixed(0)}</b> <small style={{ color: "var(--ink-3)", fontFamily: "var(--mono)" }}>ms/tok</small></div>
                 ) : <span style={{ color: "var(--ink-4)" }}>—</span>}
               </div>
               <div>
-                {m.metricsSource === "vllm" ? (
+                {(m.metricsSource === "vllm" || m.metricsSource === "sglang") ? (
                   <>
                     <div style={{ marginBottom: 4, fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-2)" }}>
                       {_live.models[m.id].kv.now.toFixed(1)}%
@@ -338,7 +338,7 @@ function ModelsSection() {
                 ) : <span style={{ color: "var(--ink-4)", fontFamily: "var(--mono)", fontSize: 10.5 }}>—</span>}
               </div>
               <div className="num" style={{ fontSize: 11.5, color: "var(--ink-2)" }}>
-                {m.metricsSource === "vllm" ? <>
+                {(m.metricsSource === "vllm" || m.metricsSource === "sglang") ? <>
                   <span style={{ color: "var(--ink)" }}>{m.p50}</span>
                   <span style={{ color: "var(--ink-4)" }}> / </span>
                   <span>{m.p95}</span>
@@ -390,7 +390,7 @@ function ModelDetail({ model }) {
         <AreaChart series={[ms.tps.hist]} colors={["var(--accent)"]} height={140} unit={model.kind === "embed" ? " e/s" : " t/s"} padding={{l:42,r:14,t:10,b:18}} ticks={3} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        {model.metricsSource === "vllm" ? <>
+        {(model.metricsSource === "vllm" || model.metricsSource === "sglang") ? <>
           <DetailMetric label={t("TTFT (first token)")} value={ms.ttft.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.ttft.now / 8)} color="violet" />
           <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
           <DetailMetric label={t("Requests / sec")}     value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
