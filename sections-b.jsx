@@ -25,11 +25,12 @@ function NodesSection() {
         </div>
       </div>
 
-      {/* auto-fit + minmax(280px,1fr): 每张卡保底 280px(3 个 66px 环 + gap
-          一定能放下, CPU 环不再被 .node overflow:hidden 截), 列数随宽度自
-          适应——宽屏 5 列、中屏 4/3 列、手机 1 列。container 已 margin:0
-          auto 居中, 卡片随网格平铺填满, 左右留白天然等距。 */}
-      <div className="grid g-5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+      {/* 固定 5 列(.g-5 = repeat(5, minmax(0,1fr))): 5 台设备一行平铺,
+          不用 auto-fit——auto-fit 在 ~1414px 以下放不下第 5 张就折成 4+1,
+          很丑。卡片随列宽自适应变窄, 环已收紧到 56px(+gap10/pad18)保证
+          窄卡也不被 .node overflow:hidden 截。响应式塌缩交给 .g-5 的媒体
+          查询(≤1180→3 列, ≤820→2 列, 手机→1 列)。 */}
+      <div className="grid g-5">
         {_NODES.filter((n) => nfilter === "All" ? true
               : nfilter === "RTX" ? (n.kind || "discrete") === "discrete"
               : nfilter === "DGX" ? (n.kind || "discrete") !== "discrete"
@@ -71,16 +72,16 @@ function NodeCard({ node, onClick }) {
       <div className="node-rings">
         <div>
           {node.gpuPending
-            ? <div style={{ width: 66, height: 66, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--mono)", fontSize: 8.5, color: "var(--ink-3)", textAlign: "center", lineHeight: 1.35 }}>GPU<br />{t("maint. pending")}</div>
-            : <Ring value={ns.gpu.now} size={66} stroke={5} sub="GPU" />}
+            ? <div style={{ width: 56, height: 56, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--mono)", fontSize: 8, color: "var(--ink-3)", textAlign: "center", lineHeight: 1.35 }}>GPU<br />{t("maint. pending")}</div>
+            : <Ring value={ns.gpu.now} size={56} stroke={5} sub="GPU" />}
           <div className="rl">GPU</div>
         </div>
         <div>
-          <Ring value={ns.vram.now} size={66} stroke={5} sub="VRAM" />
+          <Ring value={ns.vram.now} size={56} stroke={5} sub="VRAM" />
           <div className="rl">VRAM</div>
         </div>
         <div>
-          <Ring value={ns.cpu.now} size={66} stroke={5} sub="CPU" />
+          <Ring value={ns.cpu.now} size={56} stroke={5} sub="CPU" />
           <div className="rl">CPU</div>
         </div>
       </div>
