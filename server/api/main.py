@@ -68,6 +68,7 @@ def _default_config() -> dict:
                         "dcgm": "host.docker.internal:9400"},
         }],
         "model_meta": {},
+        "model_topology": {},
     }
 
 
@@ -674,6 +675,19 @@ async def _discover() -> list[dict]:
         if mm["_aliases"]:
             mm["tags"] = mm["tags"] + ["alias:" + ",".join(sorted(mm["_aliases"]))]
         mm["nodes"] = sorted(mm.pop("_nodes"))
+        # Multi-node (tensor/pipeline parallel) override. A TP=N deployment
+        # exposes ONE gateway endpoint (the Ray/torchrun head), so auto-
+        # discovery only ever attributes the model to the head node — the
+        # worker nodes look idle while genuinely running TP shards. When the
+        # operator declares the span in `model_topology`, attribute the model
+        # to every participating node so node GPU-activity rings (derived from
+        # this model's tps) light up across the whole TP group, not just head.
+        topo = (HEARTH_CFG.get("model_topology") or {}).get(mm["id"])
+        if topo and topo.get("nodes"):
+            valid = [n for n in topo["nodes"] if n in IP_TO_ID.values()]
+            mm["nodes"] = sorted(set(mm["nodes"]) | set(valid))
+            if topo.get("parallelism") and topo["parallelism"] not in mm["tags"]:
+                mm["tags"] = mm["tags"] + [topo["parallelism"]]
         mm.pop("_aliases", None)
         mm.pop("_bases", None)
     return sorted(models.values(),
