@@ -62,7 +62,27 @@ model_meta:                          # OPTIONAL display overlay for routes
     vendor: <string>
     kind: chat | vision | embed | rerank
     tags: [<string>, ...]
+
+model_topology:                      # OPTIONAL multi-node (TP/PP) declaration
+  <model id>:
+    nodes: [<node id>, ...]          # every node in the parallel group
+    parallelism: <string>            # display label, e.g. "TP=4"
 ```
+
+## `model_topology` — multi-node tensor/pipeline parallel
+
+A model served with `--tensor-parallel-size N` (or pipeline parallel) across several hosts via Ray/torchrun exposes **one** OpenAI endpoint: the head node. The LiteLLM gateway only knows that one `api_base`, so Hearth's auto-discovery attributes the model to the head node alone — the worker nodes show idle even though they're running TP shards and their GPUs are fully engaged.
+
+Declare the span and Hearth attributes the model, and its derived GPU-activity rings, to **every** node in the group:
+
+```yaml
+model_topology:
+  deepseek-v4-flash:
+    nodes: [spark-01, spark-02, spark-03, spark-04]   # TP=4 across 4 hosts
+    parallelism: "TP=4"
+```
+
+Node ids must match `nodes[].id`; unknown ids are ignored. The model's live metrics (tps / TTFT / KV / …) still come from the head endpoint — TP ranks compute in lockstep, so the head's throughput reflects the whole group — and that activity now lights up all member nodes instead of just the head.
 
 ## The `kind` field — why it matters
 

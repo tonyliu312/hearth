@@ -109,6 +109,18 @@ nodes:
   #     dcgm: "192.168.1.11:9400"
   #     obs_node_label: "inference-1"
 
+# ── Multi-node (tensor / pipeline parallel) topology ───────────────────
+# A TP/PP deployment (vLLM --tensor-parallel-size N over Ray/torchrun)
+# exposes ONE gateway endpoint — the head node. Auto-discovery therefore
+# attributes the model to the head only, and the worker nodes look idle
+# while genuinely running TP shards. Declare the span here and Hearth
+# attributes the model — and its GPU-activity rings — to every node in it.
+# Optional; omit entirely for single-node models.
+# model_topology:
+#   my-big-model:
+#     nodes: [node-1, node-2, node-3, node-4]   # all nodes in the TP/PP group
+#     parallelism: "TP=4"                        # display label on the model card
+
 
 # ---------------------------------------------------------------------
 # Model metadata overlay — OPTIONAL.
