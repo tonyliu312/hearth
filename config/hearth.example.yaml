@@ -19,6 +19,12 @@
 display:
   # Shown in the navbar and browser tab title.
   cluster_name: "Home Cluster"
+  # OPTIONAL — pin all timestamps (nav clock, request log) to a specific
+  # IANA zone regardless of the viewer's browser locale. Omit or leave
+  # blank to render in the browser's own timezone (default).
+  # Useful when the same UI is shared across regions, or viewed from a
+  # server-side browser whose TZ isn't your operating zone.
+  # timezone: "Asia/Taipei"           # or "Europe/London", "America/Los_Angeles", ...
 
   # Browser-local timezone is used for UI clocks by default.  Override
   # here only if you want all dashboard users to see the same TZ

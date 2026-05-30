@@ -1318,6 +1318,20 @@ async def logs(limit: int = 30):
     return await _litellm_request_log(limit)
 
 
+@app.get("/api/config")
+async def config():
+    """Display-only config the frontend needs at boot. Kept tiny so it can be
+    fetched once and cached; not for live metrics."""
+    d = HEARTH_CFG.get("display") or {}
+    # `timezone` is an optional IANA zone (e.g. "Asia/Taipei", "Europe/London").
+    # Omit / leave empty → frontend formats timestamps in the browser's own
+    # locale. Set it to pin the dashboard to a fixed zone regardless of who's
+    # looking — useful when the same UI is shared across regions or viewed
+    # from a server-side browser whose TZ isn't your operating zone.
+    return {"cluster_name": d.get("cluster_name", "Hearth"),
+            "timezone": (d.get("timezone") or "").strip() or None}
+
+
 # ── Topology ───────────────────────────────────────────────────────
 @app.get("/api/topology")
 async def topology():

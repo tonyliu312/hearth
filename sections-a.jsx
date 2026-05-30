@@ -35,9 +35,10 @@ function Nav({ onOpenCmd }) {
     return () => clearInterval(id);
   }, []);
   useEffect(() => subscribe(() => force((n) => n + 1)), []);
-  // 强制台北时区：用户在台北/偶尔公出中国，不依赖浏览器/机器时区设置
-  const time = clock.toLocaleTimeString("en-US", { hour12: false });
-  const date = clock.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  // 时区: 默认浏览器本地; hearth.yaml display.timezone 声明则覆盖
+  // (helper 在 data.js, 静态 IANA 时区由 /api/config 一次性加载)
+  const time = window.AIData.formatTime(clock);
+  const date = window.AIData.formatDate(clock);
   const mode = window.AIData.mode;
   const status = window.AIData.status;
   const isLive = status === "live";
