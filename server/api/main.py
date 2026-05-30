@@ -1255,7 +1255,20 @@ async def _litellm_request_log(limit: int = 40) -> list[dict]:
         "COALESCE(request_duration_ms,0),"
         "COALESCE(status,'success'),"
         "COALESCE(call_type,'completion')) "
-        "FROM \"LiteLLM_SpendLogs\" ORDER BY \"startTime\" DESC LIMIT 60;")
+        "FROM \"LiteLLM_SpendLogs\" "
+        # Hide LiteLLM's background health probes — two forms, both pollute the
+        # request panel and make an idle cluster look like it's under load:
+        #   1. Successful probes: a real 10+5-token completion every 27s,
+        #      tagged `api_key='litellm-internal-health-check'` with
+        #      `call_type='acompletion'`.
+        #   2. Failed probes against down backends: written with empty
+        #      `call_type` and api_key as NULL/empty-string/literal-"None"
+        #      (LiteLLM's error path), empty messages, 0 tokens / duration.
+        # Real gateway calls always have a real call_type and a real api_key;
+        # the dual filter cleanly separates business from monitoring noise.
+        "WHERE call_type IS NOT NULL AND call_type != '' "
+        "  AND COALESCE(api_key,'') NOT IN ('', 'None', 'litellm-internal-health-check') "
+        "ORDER BY \"startTime\" DESC LIMIT 60;")
     out: list[dict] = []
     for line in (await _psql(sql)).splitlines():
         f = line.split("\t")
@@ -1287,7 +1300,10 @@ async def _litellm_rollup() -> dict:
            "(ORDER BY request_duration_ms) FILTER (WHERE request_duration_ms>0)),0),"
            "COALESCE(round(percentile_cont(0.95) WITHIN GROUP "
            "(ORDER BY request_duration_ms) FILTER (WHERE request_duration_ms>0)),0)) "
-           "FROM \"LiteLLM_SpendLogs\";")
+           "FROM \"LiteLLM_SpendLogs\" "
+           # Same dual filter as _litellm_request_log — see note there.
+           "WHERE call_type IS NOT NULL AND call_type != '' "
+           "  AND COALESCE(api_key,'') NOT IN ('', 'None', 'litellm-internal-health-check');")
     r = (await _psql(sql)).strip().split("\t")
     if len(r) == 4 and r[0].isdigit():
         d = {"reqTotal": int(r[0]), "tokTotal": int(float(r[1])),
