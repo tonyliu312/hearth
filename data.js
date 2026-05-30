@@ -508,11 +508,35 @@
     emit();
   }
 
+  // ── Display config (cluster_name, timezone) ────────────────────────
+  // Loaded once from /api/config; mutated in place so consumers see fresh
+  // values on the next re-render (Nav re-renders every 1s clock tick).
+  // timezone=null → browser-local (default). Set via display.timezone in
+  // hearth.yaml when you want timestamps pinned to a fixed IANA zone.
+  const displayConfig = { cluster_name: "Hearth", timezone: null };
+  async function loadConfig() {
+    try {
+      const r = await fetch("/api/config", { cache: "no-store",
+        signal: AbortSignal.timeout(2500) });
+      if (r.ok) Object.assign(displayConfig, await r.json());
+    } catch (e) { /* keep defaults — browser-local timezone */ }
+  }
+  const _tzOpt = () => displayConfig.timezone ? { timeZone: displayConfig.timezone } : {};
+  function formatTime(d) {
+    return d.toLocaleTimeString("en-US", { hour12: false, ..._tzOpt() });
+  }
+  function formatDate(d) {
+    return d.toLocaleDateString("en-US",
+      { weekday: "short", month: "short", day: "numeric", ..._tzOpt() });
+  }
+
   // ── Public API ──────────────────────────────────────────────────────
   window.AIData = {
     NODES, MODELS, live, totals, subscribe,
     get mode() { return mode; },
     get status() { return connStatus; },
+    get displayConfig() { return displayConfig; },
+    formatTime, formatDate,
     switchMode,
     setIntervalMs(ms) {
       intervalMs = ms;
@@ -525,6 +549,7 @@
 
   // Boot
   seedMock();
+  loadConfig();   // fire-and-forget; first render uses defaults, ~250ms later switches
   pickMode().then((m) => {
     if (m === "live") startLive(); else startMock();
   });
