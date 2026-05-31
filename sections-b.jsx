@@ -443,6 +443,15 @@ function modelBtn(primary) {
 function TelemetrySection() {
   useLive();
   const { t } = useLang();
+  // HA-derived fields are null when the exporter is absent / sensor stale.
+  // Render the tm-card strip only when at least one field exists; otherwise
+  // the section degrades to its original 2-col grid as if HA never existed.
+  const pw = _live.power || null;
+  const en = _live.env   || null;
+  const haAny = (pw && (pw.wallW != null || pw.tokensPerW != null))
+             || (en && (en.rackTempC != null || en.acOn != null));
+  const fmt = (v, unit, digits = 1) =>
+    v == null ? "—" : (typeof v === "number" ? v.toFixed(digits) : String(v)) + (v == null ? "" : unit);
   return (
     <section className="page reveal" id="telemetry">
       <div className="eyebrow"><span className="num">05</span>{t("Telemetry · alerts")}</div>
@@ -450,6 +459,36 @@ function TelemetrySection() {
       <p className="lede">
         {t("Every request that lands at the gateway, every anomaly the rules engine catches — surfaced as a quiet, structured stream. No paging unless something actually needs you.")}
       </p>
+
+      {haAny && (
+        <div className="grid" style={{ gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
+          <div className="tm-card" data-metric="wall-power">
+            <div className="tm-card-l">{t("Wall power")}</div>
+            <div className="tm-card-v num">{fmt(pw?.wallW, " W")}</div>
+            <div className="tm-card-s">{t("Σ smart-plug · DCGM GPU ")}{fmt(pw?.gpuW, " W")}</div>
+          </div>
+          <div className="tm-card" data-metric="efficiency">
+            <div className="tm-card-l">{t("Efficiency")}</div>
+            <div className="tm-card-v num">{fmt(pw?.tokensPerW, "", 2)}
+              {pw?.tokensPerW != null && <small> tok·W⁻¹·s⁻¹</small>}
+            </div>
+            <div className="tm-card-s">{t("LiteLLM tokens / wall power")}</div>
+          </div>
+          <div className="tm-card" data-metric="rack-env">
+            <div className="tm-card-l">{t("Rack")}</div>
+            <div className="tm-card-v num">
+              {fmt(en?.rackTempC, " °C")}
+              <span style={{ color: "var(--ink-3)", marginLeft: 10 }}>{fmt(en?.rackRH, "%", 0)}</span>
+            </div>
+            <div className="tm-card-s">
+              <span className={"dot " + (en?.acOn === true ? "ok" : en?.acOn === false ? "bad" : "")}
+                    style={{ marginRight: 6 }} />
+              {t("AC ")}{en?.acOn == null ? "—" : en.acOn ? t("on") : t("off")}
+              {en?.acW != null && <span style={{ color: "var(--ink-3)" }}> · {fmt(en.acW, " W")}</span>}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: "1.5fr 1fr", gap: 16 }}>
         <div className="card">

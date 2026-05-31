@@ -77,3 +77,13 @@ scrape_configs:
   - job_name: alertmanager
     static_configs:
       - targets: [alertmanager:9093]
+
+  # ── Home Assistant — wall power + rack environment (OPTIONAL) ────
+  # Scrapes the Hearth HA exporter, which polls HA REST every 15 s and
+  # emits ha_* metrics. Drop this whole block if you don't run the
+  # exporter — the rest of Hearth degrades cleanly.
+  - job_name: home_assistant
+    scrape_interval: 15s
+    static_configs:
+      - targets: [host.docker.internal:9105]
+        labels: { source: home-assistant }

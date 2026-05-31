@@ -511,7 +511,42 @@ async def cluster():
             "max(time() - node_boot_time_seconds)")) or 0),
         "reqTotal": roll["reqTotal"],   # vLLM 原生累计(非 litellm 企业版门控)
         "tokTotal": roll["tokTotal"],
+        # ── HA-derived (OPTIONAL; null fields when ha-exporter is absent) ─
+        # Wall power = real socket-side W from smart plugs; tokens·W⁻¹ joins
+        # LiteLLM throughput with that. Rack env = temperature/humidity/AC.
+        # Every field is null when the underlying ha_* series is stale or
+        # missing — frontend treats null as "—", not 0.
+        "power": await _ha_power(),
+        "env":   await _ha_env(),
     }
+
+
+# ── HA-derived cluster fields (gracefully null when HA exporter absent) ─
+async def _ha_power() -> dict:
+    wall, gpu, eff = await asyncio.gather(
+        promql("cluster:wall_power_w:sum"),
+        promql("cluster:gpu_power_w:sum"),
+        promql("cluster:tokens_per_watt"),
+    )
+    def _f(r, digits=1):
+        v = _one(r)
+        return None if v is None else round(v, digits)
+    return {"wallW": _f(wall), "gpuW": _f(gpu), "tokensPerW": _f(eff, 2)}
+
+
+async def _ha_env() -> dict:
+    t, h, ac_w, ac_s = await asyncio.gather(
+        promql("ha_rack_temperature_celsius"),
+        promql("ha_rack_humidity_percent"),
+        promql("ha_rack_ac_power_watts"),
+        promql("ha_rack_ac_state"),
+    )
+    def _f(r, digits=1):
+        v = _one(r)
+        return None if v is None else round(v, digits)
+    ac_v = _one(ac_s)
+    return {"rackTempC": _f(t), "rackRH": _f(h, 0),
+            "acW": _f(ac_w), "acOn": None if ac_v is None else bool(ac_v)}
 
 
 # ── Models (真实：直采 vLLM 原生 /metrics；LiteLLM prometheus 企业版门控不可用) ──

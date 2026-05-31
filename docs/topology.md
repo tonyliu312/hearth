@@ -131,3 +131,31 @@ Hearth caches config at process start. To pick up topology changes, restart the 
 | GPU ring flat zero but node serving | Wrong `kind` (e.g., GB10 set to `discrete` — should be `unified-arm-soc`) |
 | Model card shows "no live metrics source" | The backend has no `/metrics` endpoint Hearth recognizes (vLLM / llama.cpp). Verify by `curl http://<host>:<port>/metrics`. |
 | All node times shown in wrong timezone | Browser TZ vs server TZ mismatch — Hearth uses *browser* local time. Check your OS/browser TZ. |
+
+## `ha:` — optional Home Assistant integration
+
+Hearth ships an optional Prometheus exporter (`server/integration/ha-exporter.py`) that turns a Home Assistant instance into wall-power and rack-environment metrics. Three lightweight `tm-card`s in the Telemetry section then render: **Wall power** (Σ smart-plug W), **Efficiency** (`tokens·W⁻¹·s⁻¹` = LiteLLM throughput / wall power), **Rack** (temperature / humidity / AC state).
+
+```yaml
+ha:
+  base_url: "http://homeassistant.local:8123"      # prefer mDNS — survives DHCP drift
+  exporter_target: "127.0.0.1:9105"                 # where Prometheus scrapes the exporter
+  rack_sensor_id: "miaomiaoc_cn_..._t8"             # OPTIONAL temp/humidity sensor entity prefix
+  rack_ac_plug_id: "2027457700"                     # OPTIONAL rack AC's smart-plug id
+  blocklist:                                         # plugs the exporter REFUSES to monitor (refuses to start if seen)
+    - "2051674991"                                   # MT6000 router default — turning it off kills the LAN
+
+nodes:
+  - id: spark-01
+    sources:
+      ha_plug_id: "2029950736"                      # this node's smart-plug id
+```
+
+**Honest degradation**:
+- HA exporter absent → `/api/cluster.power` / `.env` come back `null`,前端 three cards are hidden entirely.
+- One sensor stale → that field is `null`; siblings still render.
+- A node has no `ha_plug_id` → its wall-power column shows `—` (not `0 W`). Atlas with no smart plug is the canonical example.
+
+**Bearer token**: never put the HA long-lived token in `hearth.yaml` or any committed file. The systemd unit at `server/deploy/ha-exporter.service` loads it from a root-only drop-in (`HA_TOKEN=…` in `/etc/systemd/system/ha-exporter.service.d/token.conf`,`chmod 600`).
+
+Full design rationale + open spec handoffs: [`docs/requirements/ha-integration.md`](requirements/ha-integration.md).

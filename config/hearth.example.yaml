@@ -187,3 +187,25 @@ alerts:
     # ── Generic JSON POST (escape hatch — wire to anything) ───────────
     # - type: webhook
     #   url_env: "MY_WEBHOOK_URL"
+
+# ── Home Assistant integration (OPTIONAL) ───────────────────────────
+# Fills the gap DCGM and node_exporter can't: per-host WALL power (real
+# socket-side W, not just GPU), tokens/W efficiency, and rack environment
+# (temperature, humidity, AC). The exporter polls Home Assistant REST every
+# 15s and produces Prometheus metrics on :9105; obs Prometheus scrapes it
+# the same way it scrapes node_exporter. Omit the entire `ha:` block to
+# disable — Hearth degrades cleanly (the energy/env cards hide themselves).
+#
+# Per-node: declare each smart-plug → node mapping in nodes[].sources.ha_plug_id.
+#
+# Deployment: see server/deploy/ha-exporter.service (systemd unit) and the
+# install script in server/deploy/. The HA bearer token must come from a
+# root-only systemd drop-in, NEVER from this file.
+#
+# ha:
+#   base_url: "http://homeassistant.local:8123"      # mDNS — use this, not an IP, so DHCP changes don't break you
+#   exporter_target: "127.0.0.1:9105"                 # where Prometheus scrapes the exporter
+#   rack_sensor_id: "miaomiaoc_cn_blt_3_..."          # OPTIONAL temperature/humidity sensor entity id prefix
+#   rack_ac_plug_id: "2027457700"                     # OPTIONAL rack AC's smart-plug id
+#   blocklist:                                         # plugs the exporter must NEVER monitor (refuses to start if seen)
+#     - "2051674991"                                   # e.g. your main router — turning it off kills the whole LAN
