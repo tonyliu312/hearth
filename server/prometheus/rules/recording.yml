@@ -63,3 +63,27 @@ groups:
         sum by (model) (rate(litellm_total_requests_metric[5m]))
     - record: model:kv_cache
       expr: avg by (model) (vllm:gpu_cache_usage_perc)
+
+# ── Home Assistant integration (OPTIONAL) ─────────────────────────────
+# Aggregates and derived efficiency metrics from the ha-exporter feed.
+# These rules return empty if no ha_* series exist (exporter not deployed) —
+# Hearth's _ha_power/_ha_env helpers then emit null fields and the UI
+# hides the energy cards entirely.
+- name: home_assistant
+  interval: 15s
+  rules:
+    - record: cluster:wall_power_w:sum
+      expr: sum(ha_node_wall_power_watts)
+    - record: cluster:gpu_power_w:sum
+      expr: sum(DCGM_FI_DEV_POWER_USAGE)
+    # Real efficiency: LiteLLM throughput per watt of REAL (socket-side) power.
+    # clamp_min(1) prevents div-by-zero when wall power is absent.
+    - record: cluster:tokens_per_watt
+      expr: |
+        sum(rate(litellm_total_tokens_metric[1m]))
+          /
+        clamp_min(sum(ha_node_wall_power_watts), 1)
+    # Per-node "overhead" ratio = wall / GPU. > 1 means CPU/PSU/fan/AC
+    # overhead; closer to 1 means GPU dominates the draw.
+    - record: node:power_overhead_ratio
+      expr: ha_node_wall_power_watts / clamp_min(on(node) DCGM_FI_DEV_POWER_USAGE, 1)

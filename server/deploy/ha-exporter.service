@@ -1,0 +1,29 @@
+[Unit]
+Description=Hearth · Home Assistant Prometheus exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tony
+WorkingDirectory=/home/tony/dev/hearth
+# HEARTH_CONFIG points to the same YAML hearth-api reads.
+Environment=HEARTH_CONFIG=/etc/hearth/config.yaml
+Environment=HA_URL=http://homeassistant.local:8123
+Environment=HA_EXPORTER_PORT=9105
+Environment=HA_POLL_INTERVAL=15
+# HA_TOKEN comes from a root-only drop-in (never put it in this unit, never
+# commit it). Create the drop-in with:
+#   sudo install -d -m 700 /etc/systemd/system/ha-exporter.service.d
+#   printf '[Service]\nEnvironment=HA_TOKEN=%s\n' "$(cat ~/.config/ha/token)" \
+#     | sudo tee /etc/systemd/system/ha-exporter.service.d/token.conf >/dev/null
+#   sudo chmod 600 /etc/systemd/system/ha-exporter.service.d/token.conf
+ExecStart=/home/tony/dev/hearth/.venv/bin/python /home/tony/dev/hearth/server/integration/ha-exporter.py
+Restart=on-failure
+RestartSec=5
+# Prevent infinite restart-loop if the token is bad or HA is permanently dead.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

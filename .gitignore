@@ -45,3 +45,4 @@ BASELINES.md
 .specify/
 config/hearth.yaml
 _local/
+.claude/

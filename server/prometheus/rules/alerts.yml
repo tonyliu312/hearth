@@ -92,3 +92,39 @@ groups:
       labels: { severity: warning }
       annotations:
         summary: "{{ $labels.model }} P95 latency > 8s"
+
+# ── Home Assistant alerts (OPTIONAL — fire only when exporter present) ──
+- name: home_assistant
+  interval: 30s
+  rules:
+    - alert: HAExporterDown
+      expr: up{job="home_assistant"} == 0 or ha_up == 0
+      for: 3m
+      labels: { severity: warning }
+      annotations:
+        summary: "HA exporter unreachable — wall-power / rack-env data stale"
+    - alert: RackOverTemp
+      expr: ha_rack_temperature_celsius > 38
+      for: 5m
+      labels: { severity: critical }
+      annotations:
+        summary: "Rack temperature {{ $value | printf \"%.1f\" }}°C exceeds 38°C"
+        description: "Check rack AC (ha_rack_ac_state) and node load."
+    - alert: RackACOff
+      expr: ha_rack_ac_state == 0 and cluster:wall_power_w:sum > 150
+      for: 2m
+      labels: { severity: critical }
+      annotations:
+        summary: "Cluster under load but rack AC is OFF — overheating risk"
+    - alert: NodePowerLost
+      expr: ha_node_plug_state == 0
+      for: 1m
+      labels: { severity: critical }
+      annotations:
+        summary: "Node {{ $labels.node }} smart-plug reports OFF"
+    - alert: RackSensorLowBattery
+      expr: ha_rack_sensor_battery_percent < 15
+      for: 30m
+      labels: { severity: info }
+      annotations:
+        summary: "Rack temp/humidity sensor battery at {{ $value }}%"

@@ -342,6 +342,10 @@
       live.cluster.rps  = pad(p.cluster.history.rps,  HIST);
       live.cluster.pow  = pad(p.cluster.history.pow,  HIST);
       live.cluster.temp = pad(p.cluster.history.temp, HIST);
+      // Home Assistant — optional. Each field may be null (HA exporter
+      // absent or sensor stale); the UI treats null as "—", not 0.
+      live.power = p.cluster.power || null;
+      live.env   = p.cluster.env   || null;
     }
     // ── nodes：后端是运行时权威全集。前端动态对齐——后端发什么节点就显
     //    什么(id 任意, 不要求匹配前端静态目录)。静态 NODES 仅 mock 模式用;
