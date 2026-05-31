@@ -523,10 +523,13 @@ async def cluster():
 
 # ── HA-derived cluster fields (gracefully null when HA exporter absent) ─
 async def _ha_power() -> dict:
+    # Direct aggregation in PromQL — works without recording rules so the
+    # obs Prometheus needs no extra config beyond the scrape job.
     wall, gpu, eff = await asyncio.gather(
-        promql("cluster:wall_power_w:sum"),
-        promql("cluster:gpu_power_w:sum"),
-        promql("cluster:tokens_per_watt"),
+        promql("sum(ha_node_wall_power_watts)"),
+        promql("sum(DCGM_FI_DEV_POWER_USAGE)"),
+        promql("sum(rate(litellm_total_tokens_metric[1m])) "
+               "/ clamp_min(sum(ha_node_wall_power_watts), 1)"),
     )
     def _f(r, digits=1):
         v = _one(r)
