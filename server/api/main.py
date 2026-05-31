@@ -525,16 +525,23 @@ async def cluster():
 async def _ha_power() -> dict:
     # Direct aggregation in PromQL — works without recording rules so the
     # obs Prometheus needs no extra config beyond the scrape job.
-    wall, gpu, eff = await asyncio.gather(
-        promql("sum(ha_node_wall_power_watts)"),
+    # `byNode` is the per-device breakdown the Telemetry table needs; the
+    # cluster Σ is then derived from byNode in the frontend so the rollup
+    # and the table are guaranteed consistent (no drift between PromQL
+    # rounds).
+    gpu, eff, per_node = await asyncio.gather(
         promql("sum(DCGM_FI_DEV_POWER_USAGE)"),
         promql("sum(rate(litellm_total_tokens_metric[1m])) "
                "/ clamp_min(sum(ha_node_wall_power_watts), 1)"),
+        promql("ha_node_wall_power_watts"),
     )
+    by_node = {k: round(float(v), 1) for k, v in _by(per_node, "node").items()}
+    wall_total = round(sum(by_node.values()), 1) if by_node else None
     def _f(r, digits=1):
         v = _one(r)
         return None if v is None else round(v, digits)
-    return {"wallW": _f(wall), "gpuW": _f(gpu), "tokensPerW": _f(eff, 2)}
+    return {"wallW": wall_total, "gpuW": _f(gpu),
+            "tokensPerW": _f(eff, 2), "byNode": by_node}
 
 
 async def _ha_env() -> dict:

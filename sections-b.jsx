@@ -490,6 +490,71 @@ function TelemetrySection() {
         </div>
       )}
 
+      {haAny && (
+        <div className="card" style={{ marginBottom: 18 }} data-metric="device-power">
+          <div className="card-head">
+            <div>
+              <div className="card-title">{t("Devices · live power draw")}</div>
+              <div className="card-sub">{t("Per smart-plug reading from Home Assistant · 15s polled")}</div>
+            </div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>
+              Σ <b style={{ color: "var(--ink)" }} className="num">{fmt(pw?.wallW, " W")}</b>
+            </div>
+          </div>
+          <div className="card-body" style={{ padding: "8px 22px 16px" }}>
+            <table className="tm-devices">
+              <thead>
+                <tr>
+                  <th style={{ width: "32%" }}>{t("Device")}</th>
+                  <th style={{ width: "22%" }}>{t("Type")}</th>
+                  <th style={{ width: "20%", textAlign: "right" }}>{t("Power")}</th>
+                  <th style={{ width: "26%" }}>{t("State")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {_NODES.map((n) => {
+                  const w = pw?.byNode?.[n.id];
+                  const has = w != null;
+                  return (
+                    <tr key={n.id} data-device={n.id}>
+                      <td><b style={{ color: "var(--ink)" }}>{n.name}</b>
+                        <span style={{ color: "var(--ink-4)", marginLeft: 8, fontFamily: "var(--mono)", fontSize: 10.5 }}>{n.ip}</span>
+                      </td>
+                      <td style={{ color: "var(--ink-3)" }}>{n.class || t("Compute node")}</td>
+                      <td className="num" style={{ textAlign: "right", color: has ? "var(--ink)" : "var(--ink-4)" }}>
+                        {has ? w.toFixed(0) + " W" : "—"}
+                      </td>
+                      <td>
+                        {has ? (
+                          <><span className="dot ok" style={{ marginRight: 6 }} />{t("on")}</>
+                        ) : (
+                          <span style={{ color: "var(--ink-4)", fontSize: 11 }}>{t("no smart plug")}</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {(en?.acW != null || en?.acOn != null) && (
+                  <tr data-device="rack-ac">
+                    <td><b style={{ color: "var(--ink)" }}>{t("Rack AC")}</b>
+                      <span style={{ color: "var(--ink-4)", marginLeft: 8, fontFamily: "var(--mono)", fontSize: 10.5 }}>—</span>
+                    </td>
+                    <td style={{ color: "var(--ink-3)" }}>{t("Cabinet HVAC")}</td>
+                    <td className="num" style={{ textAlign: "right" }}>
+                      {en.acW != null ? en.acW.toFixed(0) + " W" : "—"}
+                    </td>
+                    <td>
+                      <span className={"dot " + (en.acOn === true ? "ok" : en.acOn === false ? "bad" : "")} style={{ marginRight: 6 }} />
+                      {en.acOn == null ? t("unknown") : en.acOn ? t("on") : t("off")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <div className="grid" style={{ gridTemplateColumns: "1.5fr 1fr", gap: 16 }}>
         <div className="card">
           <div className="card-head">
