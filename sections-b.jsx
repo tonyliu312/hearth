@@ -499,21 +499,32 @@ function TelemetrySection() {
             </div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>
               Σ <b style={{ color: "var(--ink)" }} className="num">{fmt(pw?.wallW, " W")}</b>
+              {pw?.kwh24h != null && <span style={{ marginLeft: 12 }}>· {t("24h ")}
+                <b style={{ color: "var(--ink)" }} className="num">{pw.kwh24h.toFixed(2)}<small> kWh</small></b></span>}
+              {pw?.kwh30d != null && <span style={{ marginLeft: 8 }}>· {t("30d ")}
+                <b style={{ color: "var(--ink)" }} className="num">{pw.kwh30d.toFixed(1)}<small> kWh</small></b></span>}
             </div>
           </div>
           <div className="card-body" style={{ padding: "8px 22px 16px" }}>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-3)", marginBottom: 8, letterSpacing: ".06em" }}>
+              {t("Energy = rolling-window integral of live power · cuco's kWh field is unreliable so Hearth derives it itself")}
+            </div>
             <table className="tm-devices">
               <thead>
                 <tr>
-                  <th style={{ width: "32%" }}>{t("Device")}</th>
-                  <th style={{ width: "22%" }}>{t("Type")}</th>
-                  <th style={{ width: "20%", textAlign: "right" }}>{t("Power")}</th>
-                  <th style={{ width: "26%" }}>{t("State")}</th>
+                  <th style={{ width: "26%" }}>{t("Device")}</th>
+                  <th style={{ width: "18%" }}>{t("Type")}</th>
+                  <th style={{ width: "12%", textAlign: "right" }}>{t("Power")}</th>
+                  <th style={{ width: "14%", textAlign: "right" }}>{t("24h")}</th>
+                  <th style={{ width: "14%", textAlign: "right" }}>{t("30d")}</th>
+                  <th style={{ width: "16%" }}>{t("State")}</th>
                 </tr>
               </thead>
               <tbody>
                 {_NODES.map((n) => {
                   const w = pw?.byNode?.[n.id];
+                  const k24 = pw?.byNode24h?.[n.id];
+                  const k30 = pw?.byNode30d?.[n.id];
                   const has = w != null;
                   return (
                     <tr key={n.id} data-device={n.id}>
@@ -523,6 +534,12 @@ function TelemetrySection() {
                       <td style={{ color: "var(--ink-3)" }}>{n.class || t("Compute node")}</td>
                       <td className="num" style={{ textAlign: "right", color: has ? "var(--ink)" : "var(--ink-4)" }}>
                         {has ? w.toFixed(0) + " W" : "—"}
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: k24 != null ? "var(--ink)" : "var(--ink-4)" }}>
+                        {k24 != null ? k24.toFixed(2) + " kWh" : "—"}
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: k30 != null ? "var(--ink)" : "var(--ink-4)" }}>
+                        {k30 != null ? k30.toFixed(1) + " kWh" : "—"}
                       </td>
                       <td>
                         {has ? (
@@ -542,6 +559,12 @@ function TelemetrySection() {
                     <td style={{ color: "var(--ink-3)" }}>{t("Cabinet HVAC")}</td>
                     <td className="num" style={{ textAlign: "right" }}>
                       {en.acW != null ? en.acW.toFixed(0) + " W" : "—"}
+                    </td>
+                    <td className="num" style={{ textAlign: "right", color: en.acKwh24h != null ? "var(--ink)" : "var(--ink-4)" }}>
+                      {en.acKwh24h != null ? en.acKwh24h.toFixed(2) + " kWh" : "—"}
+                    </td>
+                    <td className="num" style={{ textAlign: "right", color: en.acKwh30d != null ? "var(--ink)" : "var(--ink-4)" }}>
+                      {en.acKwh30d != null ? en.acKwh30d.toFixed(1) + " kWh" : "—"}
                     </td>
                     <td>
                       <span className={"dot " + (en.acOn === true ? "ok" : en.acOn === false ? "bad" : "")} style={{ marginRight: 6 }} />

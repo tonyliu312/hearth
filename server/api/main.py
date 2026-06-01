@@ -529,32 +529,49 @@ async def _ha_power() -> dict:
     # cluster Σ is then derived from byNode in the frontend so the rollup
     # and the table are guaranteed consistent (no drift between PromQL
     # rounds).
-    gpu, eff, per_node_w, per_node_kwh = await asyncio.gather(
+    # Per-node W is the live snapshot from Prometheus. The two energy windows
+    # are Hearth-side rolling integrals over the trusted W series — the cuco
+    # entity's claimed kWh field doesn't actually accumulate (verified empty
+    # 24h history), so we ignore it. avg_over_time(W) × hours / 1000 = kWh.
+    # 24h window = "last day"; 30d window = "last 30 days" — sliding, not
+    # calendar-aligned, but immune to HA-side counter resets / TZ confusion.
+    gpu, eff, per_node_w, per_node_24h, per_node_30d = await asyncio.gather(
         promql("sum(DCGM_FI_DEV_POWER_USAGE)"),
         promql("sum(rate(litellm_total_tokens_metric[1m])) "
                "/ clamp_min(sum(ha_node_wall_power_watts), 1)"),
         promql("ha_node_wall_power_watts"),
-        promql("ha_node_wall_energy_kwh"),
+        # sum_over_time × step / 3600 / 1000 — integrates only the seconds
+        # that actually have samples. avg_over_time × window-length would
+        # extrapolate a 1-hour average to a 30-day total whenever the series
+        # is newly added; this form honestly reports "kWh accumulated since
+        # we started polling" and converges to the true window total over
+        # time. step = 15s (the obs scrape interval).
+        promql("sum_over_time(ha_node_wall_power_watts[24h]) * 15 / 3600 / 1000"),
+        promql("sum_over_time(ha_node_wall_power_watts[30d]) * 15 / 3600 / 1000"),
     )
-    by_node = {k: round(float(v), 1) for k, v in _by(per_node_w, "node").items()}
-    by_node_kwh = {k: round(float(v), 2)
-                   for k, v in _by(per_node_kwh, "node").items()}
-    wall_total = round(sum(by_node.values()), 1) if by_node else None
-    kwh_total = round(sum(by_node_kwh.values()), 2) if by_node_kwh else None
+    by_node    = {k: round(float(v), 1) for k, v in _by(per_node_w,   "node").items()}
+    by_node_d  = {k: round(float(v), 2) for k, v in _by(per_node_24h, "node").items()}
+    by_node_m  = {k: round(float(v), 2) for k, v in _by(per_node_30d, "node").items()}
+    wall_total = round(sum(by_node.values()), 1)   if by_node   else None
+    kwh_d_tot  = round(sum(by_node_d.values()), 2) if by_node_d else None
+    kwh_m_tot  = round(sum(by_node_m.values()), 2) if by_node_m else None
     def _f(r, digits=1):
         v = _one(r)
         return None if v is None else round(v, digits)
-    return {"wallW": wall_total, "wallKwh": kwh_total,
-            "gpuW": _f(gpu), "tokensPerW": _f(eff, 2),
-            "byNode": by_node, "byNodeKwh": by_node_kwh}
+    return {"wallW": wall_total, "gpuW": _f(gpu), "tokensPerW": _f(eff, 2),
+            "kwh24h": kwh_d_tot, "kwh30d": kwh_m_tot,
+            "byNode": by_node, "byNode24h": by_node_d, "byNode30d": by_node_m}
 
 
 async def _ha_env() -> dict:
-    t, h, ac_w, ac_kwh, ac_s = await asyncio.gather(
+    # Same Hearth-side rolling-window kWh for the rack AC — direct from the
+    # ha_rack_ac_power_watts series rather than the unreliable cuco kWh field.
+    t, h, ac_w, ac_24h, ac_30d, ac_s = await asyncio.gather(
         promql("ha_rack_temperature_celsius"),
         promql("ha_rack_humidity_percent"),
         promql("ha_rack_ac_power_watts"),
-        promql("ha_rack_ac_energy_kwh"),
+        promql("sum_over_time(ha_rack_ac_power_watts[24h]) * 15 / 3600 / 1000"),
+        promql("sum_over_time(ha_rack_ac_power_watts[30d]) * 15 / 3600 / 1000"),
         promql("ha_rack_ac_state"),
     )
     def _f(r, digits=1):
@@ -562,7 +579,7 @@ async def _ha_env() -> dict:
         return None if v is None else round(v, digits)
     ac_v = _one(ac_s)
     return {"rackTempC": _f(t), "rackRH": _f(h, 0),
-            "acW": _f(ac_w), "acKwh": _f(ac_kwh, 2),
+            "acW": _f(ac_w), "acKwh24h": _f(ac_24h, 2), "acKwh30d": _f(ac_30d, 2),
             "acOn": None if ac_v is None else bool(ac_v)}
 
 
