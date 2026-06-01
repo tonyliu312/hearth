@@ -209,3 +209,32 @@ alerts:
 #   rack_ac_plug_id: "2027457700"                     # OPTIONAL rack AC's smart-plug id
 #   blocklist:                                         # plugs the exporter must NEVER monitor (refuses to start if seen)
 #     - "2051674991"                                   # e.g. your main router — turning it off kills the whole LAN
+#
+#   # ── Layer-2 AC controller (OPT-IN, default disabled) ────────────
+#   # When enabled, a separate systemd service (ha-controller) reads
+#   # max(DCGM_FI_DEV_GPU_TEMP) and can DE-ENERGIZE the rack AC plug to
+#   # save power when GPUs are demonstrably cool.  It never overrides
+#   # the AC's own controller's "stop cooling" decisions — Layer 2 can
+#   # only turn the plug off, not force-cool.  This guarantees L2-on
+#   # is mathematically ≥ L2-off in energy savings, with safety from
+#   # three independent watchdog layers (controller's own fail-safe,
+#   # max-OFF cap, external cron watchdog).
+#   #
+#   # Layer 1 (the AC's own F01/F02/F05 setpoints) MUST be configured
+#   # to safely run the rack on its own — L2 is an opportunistic
+#   # override, not a replacement.
+#   #
+#   # See docs/topology.md ha.controller section + the ARCHITECTURE
+#   # comment block at the top of server/integration/ha-controller.py.
+#   #
+#   controller:
+#     enabled: false                            # set true to opt in
+#     target_plug_id: "2027457700"              # MUST also be the AC plug, not a node plug
+#     decision_interval_s: 30
+#     gpu_open_threshold: 65                    # max-GPU ≥ this → plug ON
+#     gpu_close_threshold: 55                   # max-GPU ≤ this → plug may turn OFF
+#     min_switch_interval_s: 300                # compressor protection — at least this between switches
+#     max_off_duration_s: 600                   # safety cap: plug OFF ≤ 10 min, then forced ON
+#     emergency_open_threshold: 75              # max-GPU ≥ this for 30s → force ON immediately
+#     emergency_open_dur_s: 30
+#     fail_safe: "on"                           # if signal missing, default to ON (never strand without cooling)
