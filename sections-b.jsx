@@ -502,12 +502,12 @@ function TelemetrySection() {
               {pw?.kwh24h != null && <span style={{ marginLeft: 12 }}>· {t("24h ")}
                 <b style={{ color: "var(--ink)" }} className="num">{pw.kwh24h.toFixed(2)}<small> kWh</small></b></span>}
               {pw?.kwh30d != null && <span style={{ marginLeft: 8 }}>· {t("30d ")}
-                <b style={{ color: "var(--ink)" }} className="num">{pw.kwh30d.toFixed(1)}<small> kWh</small></b></span>}
+                <b style={{ color: "var(--ink)" }} className="num">{pw.kwh30d.toFixed(2)}<small> kWh</small></b></span>}
             </div>
           </div>
           <div className="card-body" style={{ padding: "8px 22px 16px" }}>
             <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-3)", marginBottom: 8, letterSpacing: ".06em" }}>
-              {t("Energy = rolling-window integral of live power · cuco's kWh field is unreliable so Hearth derives it itself")}
+              {t("Energy = sliding-window integral of live wall power, independent from HA/Mi Home counters. 24h ≤ 30d strictly by construction; values grow as the series matures.")}
             </div>
             <table className="tm-devices">
               <thead>
@@ -539,7 +539,7 @@ function TelemetrySection() {
                         {k24 != null ? k24.toFixed(2) + " kWh" : "—"}
                       </td>
                       <td className="num" style={{ textAlign: "right", color: k30 != null ? "var(--ink)" : "var(--ink-4)" }}>
-                        {k30 != null ? k30.toFixed(1) + " kWh" : "—"}
+                        {k30 != null ? k30.toFixed(2) + " kWh" : "—"}
                       </td>
                       <td>
                         {has ? (
@@ -564,7 +564,7 @@ function TelemetrySection() {
                       {en.acKwh24h != null ? en.acKwh24h.toFixed(2) + " kWh" : "—"}
                     </td>
                     <td className="num" style={{ textAlign: "right", color: en.acKwh30d != null ? "var(--ink)" : "var(--ink-4)" }}>
-                      {en.acKwh30d != null ? en.acKwh30d.toFixed(1) + " kWh" : "—"}
+                      {en.acKwh30d != null ? en.acKwh30d.toFixed(2) + " kWh" : "—"}
                     </td>
                     <td>
                       <span className={"dot " + (en.acOn === true ? "ok" : en.acOn === false ? "bad" : "")} style={{ marginRight: 6 }} />
