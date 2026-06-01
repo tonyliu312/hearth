@@ -101,6 +101,14 @@ g_wall_energy   = Gauge("ha_node_wall_energy_kwh",
                         ["node"])
 g_plug_state    = Gauge("ha_node_plug_state",
                         "Per-node smart-plug state (1=on, 0=off)", ["node"])
+# Each cuco plug has an internal temperature sensor (_temperature_p_12_2).
+# At the small spark-node power level (~70 W) self-heating is modest, so the
+# reading is a usable PROXY for cabinet-ambient air in that part of the rack —
+# crucially better than a sensor sitting in the bedroom. Not absolute
+# accurate (±5°C from cabinet air), but trends and relative differences are
+# trustworthy.
+g_plug_temp     = Gauge("ha_node_plug_temp_celsius",
+                        "Per-node smart-plug internal temperature (°C)", ["node"])
 
 # These four are created lazily — only when the corresponding entity is
 # actually configured. prometheus_client Gauges, once declared at import
@@ -169,6 +177,8 @@ def scrape_once(session: requests.Session, rt: dict) -> None:
         en, _ = get_state(session, base,
                           f"sensor.cuco_cn_{cid}_v3_power_consumption_p_11_1")
         sw, _ = get_state(session, base, f"switch.cuco_cn_{cid}_v3_on_p_2_1")
+        tp, _ = get_state(session, base,
+                          f"sensor.cuco_cn_{cid}_v3_temperature_p_12_2")
         v = as_float(pw)
         if v is not None:
             g_wall_power.labels(node=node).set(v)
@@ -178,6 +188,8 @@ def scrape_once(session: requests.Session, rt: dict) -> None:
             g_wall_energy.labels(node=node).set(kwh)
         if sw in ("on", "off"):
             g_plug_state.labels(node=node).set(1 if sw == "on" else 0)
+        if (t := as_float(tp)) is not None:
+            g_plug_temp.labels(node=node).set(t)
 
     if rt["rack_ac_plug"] and g_ac_power is not None:
         cid = rt["rack_ac_plug"]

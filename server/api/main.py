@@ -568,23 +568,33 @@ async def _ha_power() -> dict:
 async def _ha_env() -> dict:
     # Same Hearth-side rolling-window kWh for the rack AC — direct from the
     # ha_rack_ac_power_watts series rather than the unreliable cuco kWh field.
-    t, h, ac_w, ac_24h, ac_30d, ac_s = await asyncio.gather(
+    # cabinetHeatProxyC: each spark cuco plug has an internal temp sensor.
+    # At ~70 W load self-heating is ~5°C, so the mean across all spark plugs
+    # is a usable PROXY for cabinet ambient — beats no signal at all, and
+    # uncalibrated absolute (±5°C) but trends are trustworthy. Replaces the
+    # bedroom sensor we accidentally pointed at earlier.
+    t, h, ac_w, ac_24h, ac_30d, ac_s, plug_temps = await asyncio.gather(
         promql("ha_rack_temperature_celsius"),
         promql("ha_rack_humidity_percent"),
         promql("ha_rack_ac_power_watts"),
         promql("sum_over_time(ha_rack_ac_power_watts[24h]) * 15 / 3600 / 1000"),
         promql("sum_over_time(ha_rack_ac_power_watts[30d]) * 15 / 3600 / 1000"),
         promql("ha_rack_ac_state"),
+        promql("ha_node_plug_temp_celsius"),
     )
+    by_node_plug = {k: round(float(v), 1)
+                    for k, v in _by(plug_temps, "node").items()}
+    proxy = round(sum(by_node_plug.values()) / len(by_node_plug), 1) \
+        if by_node_plug else None
     # Empty PromQL result = no such metric (entity not configured). Emit null
     # rather than the 0.0 default, so the frontend can render "—" instead of
     # claiming the rack is at 0°C / off when the sensor simply doesn't exist.
     def _f(r, digits=1):
         return None if not r else round(r[0]["value"], digits)
-    ac_v = r if (r := ac_s) and r[0]["value"] is not None else None
     return {"rackTempC": _f(t), "rackRH": _f(h, 0),
             "acW": _f(ac_w), "acKwh24h": _f(ac_24h, 2), "acKwh30d": _f(ac_30d, 2),
-            "acOn": None if not ac_s else bool(ac_s[0]["value"])}
+            "acOn": None if not ac_s else bool(ac_s[0]["value"]),
+            "byNodePlugTempC": by_node_plug, "cabinetHeatProxyC": proxy}
 
 
 # ── Models (真实：直采 vLLM 原生 /metrics；LiteLLM prometheus 企业版门控不可用) ──

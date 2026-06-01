@@ -503,6 +503,9 @@ function TelemetrySection() {
                 <b style={{ color: "var(--ink)" }} className="num">{pw.kwh24h.toFixed(2)}<small> kWh</small></b></span>}
               {pw?.kwh30d != null && <span style={{ marginLeft: 8 }}>· {t("30d ")}
                 <b style={{ color: "var(--ink)" }} className="num">{pw.kwh30d.toFixed(2)}<small> kWh</small></b></span>}
+              {en?.cabinetHeatProxyC != null && <span style={{ marginLeft: 12 }} title="Mean of all spark cuco plug internal temps · proxy for cabinet ambient, ±5°C uncertain">
+                · {t("cabinet ~")}
+                <b style={{ color: "var(--ink)" }} className="num">{en.cabinetHeatProxyC.toFixed(1)}<small> °C</small></b></span>}
             </div>
           </div>
           <div className="card-body" style={{ padding: "8px 22px 16px" }}>
@@ -512,12 +515,13 @@ function TelemetrySection() {
             <table className="tm-devices">
               <thead>
                 <tr>
-                  <th style={{ width: "26%" }}>{t("Device")}</th>
-                  <th style={{ width: "18%" }}>{t("Type")}</th>
-                  <th style={{ width: "12%", textAlign: "right" }}>{t("Power")}</th>
-                  <th style={{ width: "14%", textAlign: "right" }}>{t("24h")}</th>
-                  <th style={{ width: "14%", textAlign: "right" }}>{t("30d")}</th>
-                  <th style={{ width: "16%" }}>{t("State")}</th>
+                  <th style={{ width: "23%" }}>{t("Device")}</th>
+                  <th style={{ width: "16%" }}>{t("Type")}</th>
+                  <th style={{ width: "11%", textAlign: "right" }}>{t("Power")}</th>
+                  <th style={{ width: "12%", textAlign: "right" }}>{t("24h")}</th>
+                  <th style={{ width: "12%", textAlign: "right" }}>{t("30d")}</th>
+                  <th style={{ width: "12%", textAlign: "right" }} title="Smart-plug internal temperature — proxy for ambient air at that location in the rack">{t("Plug °C")}</th>
+                  <th style={{ width: "14%" }}>{t("State")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -525,7 +529,9 @@ function TelemetrySection() {
                   const w = pw?.byNode?.[n.id];
                   const k24 = pw?.byNode24h?.[n.id];
                   const k30 = pw?.byNode30d?.[n.id];
+                  const ptemp = en?.byNodePlugTempC?.[n.id];
                   const has = w != null;
+                  const hot = ptemp != null && ptemp >= 50;
                   return (
                     <tr key={n.id} data-device={n.id}>
                       <td><b style={{ color: "var(--ink)" }}>{n.name}</b>
@@ -540,6 +546,9 @@ function TelemetrySection() {
                       </td>
                       <td className="num" style={{ textAlign: "right", color: k30 != null ? "var(--ink)" : "var(--ink-4)" }}>
                         {k30 != null ? k30.toFixed(2) + " kWh" : "—"}
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: ptemp == null ? "var(--ink-4)" : hot ? "var(--hot)" : "var(--ink)" }}>
+                        {ptemp != null ? ptemp.toFixed(0) + " °C" : "—"}
                       </td>
                       <td>
                         {has ? (
@@ -565,6 +574,9 @@ function TelemetrySection() {
                     </td>
                     <td className="num" style={{ textAlign: "right", color: en.acKwh30d != null ? "var(--ink)" : "var(--ink-4)" }}>
                       {en.acKwh30d != null ? en.acKwh30d.toFixed(2) + " kWh" : "—"}
+                    </td>
+                    <td className="num" style={{ textAlign: "right", color: "var(--ink-4)" }} title="AC plug runs hot from compressor — not a useful ambient signal">
+                      —
                     </td>
                     <td>
                       <span className={"dot " + (en.acOn === true ? "ok" : en.acOn === false ? "bad" : "")} style={{ marginRight: 6 }} />
