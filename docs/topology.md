@@ -159,3 +159,22 @@ nodes:
 **Bearer token**: never put the HA long-lived token in `hearth.yaml` or any committed file. The systemd unit at `server/deploy/ha-exporter.service` loads it from a root-only drop-in (`HA_TOKEN=…` in `/etc/systemd/system/ha-exporter.service.d/token.conf`,`chmod 600`).
 
 Full design rationale + open spec handoffs: [`docs/requirements/ha-integration.md`](requirements/ha-integration.md).
+
+### Why Hearth's kWh won't match HA / Mi Home / your utility meter
+
+This is intentional, and worth stating up front:
+
+The energy columns ("24h", "30d") in the Telemetry table are **Hearth's own integral** of the live `ha_node_wall_power_watts` series — that is, every 15s scrape of W × 15s, summed over the window, converted to kWh. They are **not** scraped from any "kWh accumulator" field. **They will not equal** what you see in:
+
+- the Mi Home (米家) / Tuya / Aqara / SmartThings app on your phone,
+- the Home Assistant Energy Dashboard,
+- your electric utility's smart meter.
+
+The reasons are deliberate and structural:
+
+1. **Vendor clouds are not real-time, lossless, or auditable.** Mi Home (and friends) sync the plug's internal counter to their cloud on their own schedule, occasionally miss samples, sometimes reset on firmware updates, and aggregate into hourly / daily buckets in ways the user can't see. Hearth treats the only thing the device reports honestly — instantaneous wall watts — as the source of truth, and integrates that itself.
+2. **HA inherits those gaps.** Empirically, on the upstream cluster, the cuco `power_consumption_p_11_1` entity sat frozen at 0.01 kWh for >24h while the W series moved normally. HA's Energy Dashboard does its own long-term-statistics rollup on top, which can still drift from any of the above.
+3. **Sliding window, not calendar window.** "24h" means "the last 24 hours", not "today since midnight". Same for "30d". A calendar boundary would need timezone-aware bucketing on the Prometheus side for very little real-world benefit on a home cluster — "what did this rack actually draw recently" is the question that matters for deciding when to migrate a workload or scale down a node.
+4. **Hearth's number is the one you can defend.** It's computed from a single, verifiable input (the live wall-W series), with one trivially-checkable formula. If Hearth says 4.30 kWh, you can replay the underlying Prometheus series and arrive at the same number deterministically. The vendor cloud's number can't be replayed.
+
+**Bottom line for OSS users**: don't try to make Hearth match your phone app. Use Hearth to monitor your *cluster's* energy reality (which is what you can act on), and use the phone app or the utility meter for the bill.
