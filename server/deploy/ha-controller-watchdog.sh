@@ -23,7 +23,10 @@
 #                    hearth.yaml's ha.controller.target_plug_id.
 #   HA_TOKEN_FILE  — path to HA long-lived token (default ~/.config/ha/token).
 
-set -euo pipefail
+# NOTE: deliberately not `set -e` for the metrics fetch — when the
+# controller is dead the curl will fail, and that failure is the exact
+# signal the watchdog needs to act on, not a reason to bail out.
+set -uo pipefail
 
 CONTROLLER_METRICS=${CONTROLLER_METRICS:-http://127.0.0.1:9106/metrics}
 STALE_SECONDS=${STALE_SECONDS:-120}
@@ -37,10 +40,12 @@ log() { printf '%(%Y-%m-%d %H:%M:%S)T watchdog: %s\n' -1 "$*"; }
 HA_TOKEN=$(cat "$HA_TOKEN_FILE")
 PLUG_ENTITY="switch.cuco_cn_${TARGET_PLUG_ID}_v3_on_p_2_1"
 
-# 1) Read controller's last-decision timestamp.  Default to 0 (dead) if
-# the metrics endpoint is unreachable.
+# 1) Read controller's last-decision timestamp.  curl/awk failure (e.g.
+# controller dead, metrics endpoint unreachable) is the exact signal we
+# need — treat as ts=0 (∞ stale) and proceed to the rescue path.
 last_ts=$(curl -fsS --max-time 4 "$CONTROLLER_METRICS" 2>/dev/null \
-          | awk '/^hearth_ac_controller_last_decision_ts/ { print int($2); exit }')
+          | awk '/^hearth_ac_controller_last_decision_ts/ { print int($2); exit }' \
+          || echo 0)
 last_ts=${last_ts:-0}
 now=$(date +%s)
 age=$((now - last_ts))
