@@ -529,26 +529,32 @@ async def _ha_power() -> dict:
     # cluster Σ is then derived from byNode in the frontend so the rollup
     # and the table are guaranteed consistent (no drift between PromQL
     # rounds).
-    gpu, eff, per_node = await asyncio.gather(
+    gpu, eff, per_node_w, per_node_kwh = await asyncio.gather(
         promql("sum(DCGM_FI_DEV_POWER_USAGE)"),
         promql("sum(rate(litellm_total_tokens_metric[1m])) "
                "/ clamp_min(sum(ha_node_wall_power_watts), 1)"),
         promql("ha_node_wall_power_watts"),
+        promql("ha_node_wall_energy_kwh"),
     )
-    by_node = {k: round(float(v), 1) for k, v in _by(per_node, "node").items()}
+    by_node = {k: round(float(v), 1) for k, v in _by(per_node_w, "node").items()}
+    by_node_kwh = {k: round(float(v), 2)
+                   for k, v in _by(per_node_kwh, "node").items()}
     wall_total = round(sum(by_node.values()), 1) if by_node else None
+    kwh_total = round(sum(by_node_kwh.values()), 2) if by_node_kwh else None
     def _f(r, digits=1):
         v = _one(r)
         return None if v is None else round(v, digits)
-    return {"wallW": wall_total, "gpuW": _f(gpu),
-            "tokensPerW": _f(eff, 2), "byNode": by_node}
+    return {"wallW": wall_total, "wallKwh": kwh_total,
+            "gpuW": _f(gpu), "tokensPerW": _f(eff, 2),
+            "byNode": by_node, "byNodeKwh": by_node_kwh}
 
 
 async def _ha_env() -> dict:
-    t, h, ac_w, ac_s = await asyncio.gather(
+    t, h, ac_w, ac_kwh, ac_s = await asyncio.gather(
         promql("ha_rack_temperature_celsius"),
         promql("ha_rack_humidity_percent"),
         promql("ha_rack_ac_power_watts"),
+        promql("ha_rack_ac_energy_kwh"),
         promql("ha_rack_ac_state"),
     )
     def _f(r, digits=1):
@@ -556,7 +562,8 @@ async def _ha_env() -> dict:
         return None if v is None else round(v, digits)
     ac_v = _one(ac_s)
     return {"rackTempC": _f(t), "rackRH": _f(h, 0),
-            "acW": _f(ac_w), "acOn": None if ac_v is None else bool(ac_v)}
+            "acW": _f(ac_w), "acKwh": _f(ac_kwh, 2),
+            "acOn": None if ac_v is None else bool(ac_v)}
 
 
 # ── Models (真实：直采 vLLM 原生 /metrics；LiteLLM prometheus 企业版门控不可用) ──
