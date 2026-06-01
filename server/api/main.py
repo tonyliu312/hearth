@@ -555,9 +555,11 @@ async def _ha_power() -> dict:
     wall_total = round(sum(by_node.values()), 1)   if by_node   else None
     kwh_d_tot  = round(sum(by_node_d.values()), 2) if by_node_d else None
     kwh_m_tot  = round(sum(by_node_m.values()), 2) if by_node_m else None
+    # Empty PromQL result = metric absent (e.g. exporter not configured for
+    # this entity). _one() defaults to 0.0 which would lie ("0 W of GPU"),
+    # so guard explicitly and emit null.
     def _f(r, digits=1):
-        v = _one(r)
-        return None if v is None else round(v, digits)
+        return None if not r else round(r[0]["value"], digits)
     return {"wallW": wall_total, "gpuW": _f(gpu), "tokensPerW": _f(eff, 2),
             "kwh24h": kwh_d_tot, "kwh30d": kwh_m_tot,
             "byNode": by_node, "byNode24h": by_node_d, "byNode30d": by_node_m}
@@ -574,13 +576,15 @@ async def _ha_env() -> dict:
         promql("sum_over_time(ha_rack_ac_power_watts[30d]) * 15 / 3600 / 1000"),
         promql("ha_rack_ac_state"),
     )
+    # Empty PromQL result = no such metric (entity not configured). Emit null
+    # rather than the 0.0 default, so the frontend can render "—" instead of
+    # claiming the rack is at 0°C / off when the sensor simply doesn't exist.
     def _f(r, digits=1):
-        v = _one(r)
-        return None if v is None else round(v, digits)
-    ac_v = _one(ac_s)
+        return None if not r else round(r[0]["value"], digits)
+    ac_v = r if (r := ac_s) and r[0]["value"] is not None else None
     return {"rackTempC": _f(t), "rackRH": _f(h, 0),
             "acW": _f(ac_w), "acKwh24h": _f(ac_24h, 2), "acKwh30d": _f(ac_30d, 2),
-            "acOn": None if ac_v is None else bool(ac_v)}
+            "acOn": None if not ac_s else bool(ac_s[0]["value"])}
 
 
 # ── Models (真实：直采 vLLM 原生 /metrics；LiteLLM prometheus 企业版门控不可用) ──

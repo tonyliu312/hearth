@@ -87,6 +87,7 @@ def build_runtime_config(cfg: dict) -> dict:
 
 
 # ── Metrics ─────────────────────────────────────────────────────────────
+# Metrics that always exist (regardless of which entities are configured).
 g_up            = Gauge("ha_up", "HA REST reachability (1=ok, 0=down)")
 g_wall_power    = Gauge("ha_node_wall_power_watts",
                         "Per-node wall-socket power (W) measured by HA smart plug",
@@ -100,18 +101,38 @@ g_wall_energy   = Gauge("ha_node_wall_energy_kwh",
                         ["node"])
 g_plug_state    = Gauge("ha_node_plug_state",
                         "Per-node smart-plug state (1=on, 0=off)", ["node"])
-g_ac_power      = Gauge("ha_rack_ac_power_watts", "Rack AC power (W)")
-g_ac_energy     = Gauge("ha_rack_ac_energy_kwh",
-                        "Rack AC cumulative energy from HA smart plug (kWh)")
-g_ac_state      = Gauge("ha_rack_ac_state", "Rack AC on/off (1=on, 0=off)")
-g_ac_inner_temp = Gauge("ha_rack_ac_plug_temp_celsius",
-                        "Rack AC plug internal temperature (°C)")
-g_rack_temp     = Gauge("ha_rack_temperature_celsius",
-                        "Rack environmental temperature (°C)")
-g_rack_humidity = Gauge("ha_rack_humidity_percent",
-                        "Rack environmental relative humidity (%)")
-g_rack_battery  = Gauge("ha_rack_sensor_battery_percent",
-                        "Rack temp/humidity sensor battery (%)")
+
+# These four are created lazily — only when the corresponding entity is
+# actually configured. prometheus_client Gauges, once declared at import
+# time, are emitted with their default 0 forever, which would lie about
+# physical reality (e.g. claiming the rack is 0°C when there's no sensor).
+# Honest degradation: no config → no metric → frontend renders "—".
+g_ac_power      = None
+g_ac_energy     = None
+g_ac_state      = None
+g_ac_inner_temp = None
+g_rack_temp     = None
+g_rack_humidity = None
+g_rack_battery  = None
+
+
+def init_optional_metrics(rt: dict) -> None:
+    global g_ac_power, g_ac_energy, g_ac_state, g_ac_inner_temp
+    global g_rack_temp, g_rack_humidity, g_rack_battery
+    if rt.get("rack_ac_plug"):
+        g_ac_power      = Gauge("ha_rack_ac_power_watts", "Rack AC power (W)")
+        g_ac_energy     = Gauge("ha_rack_ac_energy_kwh",
+                                "Rack AC cumulative energy from HA smart plug (kWh)")
+        g_ac_state      = Gauge("ha_rack_ac_state", "Rack AC on/off (1=on, 0=off)")
+        g_ac_inner_temp = Gauge("ha_rack_ac_plug_temp_celsius",
+                                "Rack AC plug internal temperature (°C)")
+    if rt.get("rack_sensor"):
+        g_rack_temp     = Gauge("ha_rack_temperature_celsius",
+                                "Rack environmental temperature (°C)")
+        g_rack_humidity = Gauge("ha_rack_humidity_percent",
+                                "Rack environmental relative humidity (%)")
+        g_rack_battery  = Gauge("ha_rack_sensor_battery_percent",
+                                "Rack temp/humidity sensor battery (%)")
 
 
 def make_session(token: str) -> requests.Session:
@@ -158,7 +179,7 @@ def scrape_once(session: requests.Session, rt: dict) -> None:
         if sw in ("on", "off"):
             g_plug_state.labels(node=node).set(1 if sw == "on" else 0)
 
-    if rt["rack_ac_plug"]:
+    if rt["rack_ac_plug"] and g_ac_power is not None:
         cid = rt["rack_ac_plug"]
         pw, _ = get_state(session, base,
                           f"sensor.cuco_cn_{cid}_v3_electric_power_p_11_2")
@@ -176,7 +197,7 @@ def scrape_once(session: requests.Session, rt: dict) -> None:
         if (v := as_float(tp)) is not None:
             g_ac_inner_temp.set(v)
 
-    if rt["rack_sensor"]:
+    if rt["rack_sensor"] and g_rack_temp is not None:
         sid = rt["rack_sensor"]
         t, _ = get_state(session, base, f"sensor.{sid}_temperature_p_3_1001")
         h, _ = get_state(session, base, f"sensor.{sid}_relative_humidity_p_3_1002")
@@ -205,6 +226,7 @@ def main() -> None:
                     "ha.rack_sensor_id / ha.rack_ac_plug_id to enable.",
                     HEARTH_CONFIG_PATH)
 
+    init_optional_metrics(rt)
     log.info("Hearth HA exporter — base_url=%s port=%d interval=%.0fs "
              "nodes=%d ac=%s sensor=%s",
              rt["base_url"], PORT, INTERVAL, len(rt["node_plugs"]),
