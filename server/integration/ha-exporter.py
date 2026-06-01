@@ -91,9 +91,18 @@ g_up            = Gauge("ha_up", "HA REST reachability (1=ok, 0=down)")
 g_wall_power    = Gauge("ha_node_wall_power_watts",
                         "Per-node wall-socket power (W) measured by HA smart plug",
                         ["node"])
+# Cumulative energy is reported by HA as a kWh-typed numeric `state`. Prometheus
+# would prefer a Counter (rate() friendly), but the cuco plug already resets
+# this value at user-defined cycles, so treat it as a Gauge — the dashboard
+# just renders the current reading verbatim ("kWh on the meter").
+g_wall_energy   = Gauge("ha_node_wall_energy_kwh",
+                        "Per-node cumulative energy from HA smart plug (kWh)",
+                        ["node"])
 g_plug_state    = Gauge("ha_node_plug_state",
                         "Per-node smart-plug state (1=on, 0=off)", ["node"])
 g_ac_power      = Gauge("ha_rack_ac_power_watts", "Rack AC power (W)")
+g_ac_energy     = Gauge("ha_rack_ac_energy_kwh",
+                        "Rack AC cumulative energy from HA smart plug (kWh)")
 g_ac_state      = Gauge("ha_rack_ac_state", "Rack AC on/off (1=on, 0=off)")
 g_ac_inner_temp = Gauge("ha_rack_ac_plug_temp_celsius",
                         "Rack AC plug internal temperature (°C)")
@@ -136,12 +145,16 @@ def scrape_once(session: requests.Session, rt: dict) -> None:
     for node, cid in rt["node_plugs"].items():
         pw, _ = get_state(session, base,
                           f"sensor.cuco_cn_{cid}_v3_electric_power_p_11_2")
+        en, _ = get_state(session, base,
+                          f"sensor.cuco_cn_{cid}_v3_power_consumption_p_11_1")
         sw, _ = get_state(session, base, f"switch.cuco_cn_{cid}_v3_on_p_2_1")
         v = as_float(pw)
         if v is not None:
             g_wall_power.labels(node=node).set(v)
         else:
             ok = False
+        if (kwh := as_float(en)) is not None:
+            g_wall_energy.labels(node=node).set(kwh)
         if sw in ("on", "off"):
             g_plug_state.labels(node=node).set(1 if sw == "on" else 0)
 
@@ -149,11 +162,15 @@ def scrape_once(session: requests.Session, rt: dict) -> None:
         cid = rt["rack_ac_plug"]
         pw, _ = get_state(session, base,
                           f"sensor.cuco_cn_{cid}_v3_electric_power_p_11_2")
+        en, _ = get_state(session, base,
+                          f"sensor.cuco_cn_{cid}_v3_power_consumption_p_11_1")
         sw, _ = get_state(session, base, f"switch.cuco_cn_{cid}_v3_on_p_2_1")
         tp, _ = get_state(session, base,
                           f"sensor.cuco_cn_{cid}_v3_temperature_p_12_2")
         if (v := as_float(pw)) is not None:
             g_ac_power.set(v)
+        if (v := as_float(en)) is not None:
+            g_ac_energy.set(v)
         if sw in ("on", "off"):
             g_ac_state.set(1 if sw == "on" else 0)
         if (v := as_float(tp)) is not None:

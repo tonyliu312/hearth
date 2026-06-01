@@ -499,21 +499,27 @@ function TelemetrySection() {
             </div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>
               Σ <b style={{ color: "var(--ink)" }} className="num">{fmt(pw?.wallW, " W")}</b>
+              {pw?.wallKwh != null && <>
+                <span style={{ margin: "0 8px", color: "var(--ink-4)" }}>·</span>
+                <b style={{ color: "var(--ink)" }} className="num">{pw.wallKwh.toFixed(2)}<small style={{ color: "var(--ink-3)", marginLeft: 2 }}> kWh</small></b>
+              </>}
             </div>
           </div>
           <div className="card-body" style={{ padding: "8px 22px 16px" }}>
             <table className="tm-devices">
               <thead>
                 <tr>
-                  <th style={{ width: "32%" }}>{t("Device")}</th>
-                  <th style={{ width: "22%" }}>{t("Type")}</th>
-                  <th style={{ width: "20%", textAlign: "right" }}>{t("Power")}</th>
-                  <th style={{ width: "26%" }}>{t("State")}</th>
+                  <th style={{ width: "28%" }}>{t("Device")}</th>
+                  <th style={{ width: "20%" }}>{t("Type")}</th>
+                  <th style={{ width: "14%", textAlign: "right" }}>{t("Power")}</th>
+                  <th style={{ width: "16%", textAlign: "right" }}>{t("Energy")}</th>
+                  <th style={{ width: "22%" }}>{t("State")}</th>
                 </tr>
               </thead>
               <tbody>
                 {_NODES.map((n) => {
                   const w = pw?.byNode?.[n.id];
+                  const kwh = pw?.byNodeKwh?.[n.id];
                   const has = w != null;
                   return (
                     <tr key={n.id} data-device={n.id}>
@@ -523,6 +529,9 @@ function TelemetrySection() {
                       <td style={{ color: "var(--ink-3)" }}>{n.class || t("Compute node")}</td>
                       <td className="num" style={{ textAlign: "right", color: has ? "var(--ink)" : "var(--ink-4)" }}>
                         {has ? w.toFixed(0) + " W" : "—"}
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: kwh != null ? "var(--ink)" : "var(--ink-4)" }}>
+                        {kwh != null ? kwh.toFixed(2) + " kWh" : "—"}
                       </td>
                       <td>
                         {has ? (
@@ -542,6 +551,9 @@ function TelemetrySection() {
                     <td style={{ color: "var(--ink-3)" }}>{t("Cabinet HVAC")}</td>
                     <td className="num" style={{ textAlign: "right" }}>
                       {en.acW != null ? en.acW.toFixed(0) + " W" : "—"}
+                    </td>
+                    <td className="num" style={{ textAlign: "right", color: en.acKwh != null ? "var(--ink)" : "var(--ink-4)" }}>
+                      {en.acKwh != null ? en.acKwh.toFixed(2) + " kWh" : "—"}
                     </td>
                     <td>
                       <span className={"dot " + (en.acOn === true ? "ok" : en.acOn === false ? "bad" : "")} style={{ marginRight: 6 }} />
