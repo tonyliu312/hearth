@@ -440,6 +440,11 @@ function modelBtn(primary) {
 }
 
 // ── TELEMETRY ──────────────────────────────────────────────────────────
+function _trendCell(v, suffix = "", digits = 1) {
+  if (v == null) return "—";
+  return (typeof v === "number" ? v.toFixed(digits) : String(v)) + suffix;
+}
+
 function TelemetrySection() {
   useLive();
   const { t } = useLang();
@@ -586,6 +591,71 @@ function TelemetrySection() {
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {_live.energyTrends && (
+        <div className="card" style={{ marginBottom: 18 }} data-metric="energy-trends">
+          <div className="card-head">
+            <div>
+              <div className="card-title">{t("Energy trends · A/B for physical changes")}</div>
+              <div className="card-sub">
+                {t("Day = 06:00–18:00 local · same-window comparison reveals what changes (AC setpoint, sunshade, sensor move) actually moved the bill")}
+              </div>
+            </div>
+          </div>
+          <div className="card-body" style={{ padding: "8px 22px 16px" }}>
+            <table className="tm-devices">
+              <thead>
+                <tr>
+                  <th style={{ width: "32%" }}>{t("Metric")}</th>
+                  <th style={{ width: "22%", textAlign: "right" }}>{t("24h")}</th>
+                  <th style={{ width: "22%", textAlign: "right" }}>{t("7d")}</th>
+                  <th style={{ width: "24%", textAlign: "right" }}>{t("30d")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* AC */}
+                <tr><td><b style={{ color: "var(--ink)" }}>{t("AC energy")}</b></td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.ac?.last24h?.kwh, " kWh", 2)}</td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.ac?.last7d?.kwh, " kWh", 2)}</td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.ac?.last30d?.kwh, " kWh", 2)}</td></tr>
+                <tr><td style={{ paddingLeft: 22, color: "var(--ink-3)" }}>{t("avg power")}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>{_trendCell(_live.energyTrends.ac?.last24h?.avgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>{_trendCell(_live.energyTrends.ac?.last7d?.avgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>{_trendCell(_live.energyTrends.ac?.last30d?.avgW, " W", 0)}</td></tr>
+                <tr><td style={{ paddingLeft: 22, color: "var(--ink-3)" }}>↳ {t("day")} (06-18)</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last24h?.dayAvgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last7d?.dayAvgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last30d?.dayAvgW, " W", 0)}</td></tr>
+                <tr><td style={{ paddingLeft: 22, color: "var(--ink-3)" }}>↳ {t("night")} (18-06)</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last24h?.nightAvgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last7d?.nightAvgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last30d?.nightAvgW, " W", 0)}</td></tr>
+                {/* Wall */}
+                <tr><td><b style={{ color: "var(--ink)" }}>{t("Wall avg")}</b></td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.wall?.last24h?.avgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.wall?.last7d?.avgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.wall?.last30d?.avgW, " W", 0)}</td></tr>
+                {/* Cabinet */}
+                <tr><td><b style={{ color: "var(--ink)" }}>{t("Cabinet mean")}</b></td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.cabinet?.last24h?.meanC, " °C", 1)}</td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.cabinet?.last7d?.meanC, " °C", 1)}</td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.cabinet?.last30d?.meanC, " °C", 1)}</td></tr>
+                <tr><td style={{ paddingLeft: 22, color: "var(--ink-3)" }}>{t("min / max")}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.cabinet?.last24h?.minC, "", 1)} / {_trendCell(_live.energyTrends.cabinet?.last24h?.maxC, " °C", 1)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.cabinet?.last7d?.minC, "", 1)} / {_trendCell(_live.energyTrends.cabinet?.last7d?.maxC, " °C", 1)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.cabinet?.last30d?.minC, "", 1)} / {_trendCell(_live.energyTrends.cabinet?.last30d?.maxC, " °C", 1)}</td></tr>
+                <tr><td style={{ paddingLeft: 22, color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{t("samples")}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.ac?.last24h?.samples || 0} / 96</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.ac?.last7d?.samples || 0} / 672</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.ac?.last30d?.samples || 0} / 2880</td></tr>
+              </tbody>
+            </table>
+            <div style={{ fontSize: 10, color: "var(--ink-4)", marginTop: 8, fontFamily: "var(--mono)", letterSpacing: ".06em" }}>
+              {t("samples = real data points actually in the window (full = window fully filled). Same value across windows means the series is younger than 24h.")}
+            </div>
           </div>
         </div>
       )}

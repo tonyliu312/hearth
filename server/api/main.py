@@ -1415,6 +1415,102 @@ async def config():
             "timezone": (d.get("timezone") or "").strip() or None}
 
 
+# ── Energy trends ─────────────────────────────────────────────────────
+# Day/night split + multi-window rollups so the operator can see whether a
+# physical change (AC setpoint adjustment, sunshade, sensor relocation,
+# workload shift) actually moved the energy bill — without having to write
+# PromQL by hand. The split is Hearth-side because PromQL has no clean way
+# to bucket samples by local-timezone hour; we pull the raw range and
+# partition in Python using display.timezone (falls back to UTC).
+#
+# Windows: 24h (immediate feedback), 7d (weekly baseline), 30d (monthly
+# trend). On a freshly-deployed exporter these windows will be partially
+# filled — the rollup honestly reflects only the seconds we actually have,
+# the same convention as the per-node kWh figures.
+def _local_hour(ts_unix: float, tz_name: str | None) -> int:
+    if not tz_name:
+        return datetime.utcfromtimestamp(ts_unix).hour
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(ts_unix, tz=ZoneInfo(tz_name)).hour
+    except Exception:
+        return datetime.utcfromtimestamp(ts_unix).hour
+
+
+def _split_day_night(series, tz_name: str | None, day_start=6, day_end=18):
+    """series = [(ts, value), ...]. Returns (day_vals, night_vals)."""
+    day, night = [], []
+    for ts, v in series:
+        h = _local_hour(ts, tz_name)
+        (day if day_start <= h < day_end else night).append(v)
+    return day, night
+
+
+def _agg(series, tz_name, step_seconds=900):
+    """Returns dict of avgW / kwh / dayAvgW / nightAvgW / samples for a series.
+    step_seconds = query_range step, so sum × step / 3600 / 1000 = kWh."""
+    if not series:
+        return {"avgW": None, "kwh": None, "dayAvgW": None,
+                "nightAvgW": None, "samples": 0}
+    vals = [v for _, v in series]
+    day, night = _split_day_night(series, tz_name)
+    kwh = sum(vals) * step_seconds / 3600 / 1000
+    return {
+        "avgW":      round(sum(vals) / len(vals), 1),
+        "kwh":       round(kwh, 2),
+        "dayAvgW":   round(sum(day) / len(day), 1) if day else None,
+        "nightAvgW": round(sum(night) / len(night), 1) if night else None,
+        "samples":   len(vals),
+    }
+
+
+async def _window_series(promql_str: str, minutes: int, step: int = 900):
+    """Pull a single-series range, return [(ts, value)]."""
+    raw = await promql_range(promql_str, minutes=minutes, step=step)
+    if not raw or not raw[0].get("values"):
+        return []
+    return [(t, v) for t, v in raw[0]["values"]]
+
+
+@app.get("/api/energy/trends")
+async def energy_trends():
+    """Day/night × 24h/7d/30d rollups for AC + total wall power + cabinet temp.
+    Lets operators A/B physical changes (e.g. sunshade) by comparing same-
+    window-same-period-of-day numbers rather than hand-eyeballing graphs."""
+    tz = (HEARTH_CFG.get("display") or {}).get("timezone") or None
+    # Step 15min is plenty for trend (we don't need second-level here).
+    STEP = 900
+    windows = [("last24h", 24 * 60), ("last7d", 7 * 24 * 60), ("last30d", 30 * 24 * 60)]
+
+    out = {"timezone": tz or "UTC",
+           "dayDef": "06:00–18:00 local",
+           "ac": {}, "wall": {}, "cabinet": {}}
+
+    for name, mins in windows:
+        ac_series   = await _window_series("ha_rack_ac_power_watts", mins, STEP)
+        wall_series = await _window_series("sum(ha_node_wall_power_watts)", mins, STEP)
+        cab_series  = await _window_series("avg(ha_node_plug_temp_celsius)", mins, STEP)
+        out["ac"][name]   = _agg(ac_series, tz, STEP)
+        out["wall"][name] = _agg(wall_series, tz, STEP)
+        # Cabinet temp is a °C measurement, not power — only mean/day/night
+        # are meaningful (no "kWh of temperature").
+        if cab_series:
+            day, night = _split_day_night(cab_series, tz)
+            vals = [v for _, v in cab_series]
+            out["cabinet"][name] = {
+                "meanC":     round(sum(vals) / len(vals), 1),
+                "minC":      round(min(vals), 1),
+                "maxC":      round(max(vals), 1),
+                "dayMeanC":  round(sum(day) / len(day), 1) if day else None,
+                "nightMeanC": round(sum(night) / len(night), 1) if night else None,
+                "samples":   len(vals),
+            }
+        else:
+            out["cabinet"][name] = {"meanC": None, "minC": None, "maxC": None,
+                                    "dayMeanC": None, "nightMeanC": None, "samples": 0}
+    return out
+
+
 # ── Topology ───────────────────────────────────────────────────────
 @app.get("/api/topology")
 async def topology():

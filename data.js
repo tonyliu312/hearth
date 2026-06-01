@@ -534,6 +534,17 @@
       { weekday: "short", month: "short", day: "numeric", ..._tzOpt() });
   }
 
+  // ── Energy trends (24h / 7d / 30d, day-vs-night) ─────────────────
+  // Refreshed every 60s — these are aggregates that don't move in
+  // sub-minute scale, no point hammering the endpoint at SSE cadence.
+  async function loadEnergyTrends() {
+    try {
+      const r = await fetch("/api/energy/trends", { cache: "no-store",
+        signal: AbortSignal.timeout(8000) });
+      if (r.ok) { live.energyTrends = await r.json(); emit(); }
+    } catch (e) { /* keep last successful snapshot */ }
+  }
+
   // ── Public API ──────────────────────────────────────────────────────
   window.AIData = {
     NODES, MODELS, live, totals, subscribe,
@@ -554,6 +565,8 @@
   // Boot
   seedMock();
   loadConfig();   // fire-and-forget; first render uses defaults, ~250ms later switches
+  loadEnergyTrends();
+  setInterval(loadEnergyTrends, 60_000);
   pickMode().then((m) => {
     if (m === "live") startLive(); else startMock();
   });
