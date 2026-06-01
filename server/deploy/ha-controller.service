@@ -1,0 +1,29 @@
+[Unit]
+Description=Hearth · Layer-2 AC controller (GPU-temperature driven)
+After=network-online.target ha-exporter.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tony
+WorkingDirectory=/home/tony/dev/hearth
+Environment=HEARTH_CONFIG=/home/tony/dev/hearth/config/hearth.yaml
+Environment=HA_URL=http://homeassistant.local:8123
+Environment=PROMETHEUS_URL=http://127.0.0.1:9090
+Environment=HA_CONTROLLER_PORT=9106
+Environment=HEARTH_CONTROLLER_STATE=/var/lib/hearth/ac-controller.json
+# HA_TOKEN comes from the SAME root-only drop-in as ha-exporter.service:
+#   /etc/systemd/system/ha-exporter.service.d/token.conf
+# We symlink or copy it into a drop-in for this unit too.  Never put the
+# token in this file (it's in git).
+ExecStart=/home/tony/dev/hearth/.venv/bin/python /home/tony/dev/hearth/server/integration/ha-controller.py
+Restart=on-failure
+RestartSec=5
+# Limit restart loops — if the controller dies 5 times in 5 minutes,
+# something is wrong; stop and let watchdog + Layer 1 take over rather
+# than thrashing.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

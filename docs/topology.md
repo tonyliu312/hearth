@@ -178,3 +178,59 @@ The reasons are deliberate and structural:
 4. **Hearth's number is the one you can defend.** It's computed from a single, verifiable input (the live wall-W series), with one trivially-checkable formula. If Hearth says 4.30 kWh, you can replay the underlying Prometheus series and arrive at the same number deterministically. The vendor cloud's number can't be replayed.
 
 **Bottom line for OSS users**: don't try to make Hearth match your phone app. Use Hearth to monitor your *cluster's* energy reality (which is what you can act on), and use the phone app or the utility meter for the bill.
+
+## `ha.controller` — Layer-2 GPU-driven AC override (opt-in)
+
+When the AC plug is wired through HA and Hearth knows the GPU temperatures, you can let Hearth opportunistically de-energize the AC plug when GPUs are demonstrably cool, saving compressor cycles the AC's own thermostat would have spent on over-cooling. This is **strictly additive**: every off-second is a win versus the AC running standalone, and the AC's built-in controller (F01/F02 setpoints) remains the safety baseline whenever the plug is energized.
+
+### Architecture
+
+Two control layers, with explicit roles:
+
+- **Layer 1** — the AC's internal F01/F02/F05 thermostat. Must be configured to safely run the rack on its own; Hearth never modifies these.
+- **Layer 2** — `ha-controller` systemd service. Reads `max(DCGM_FI_DEV_GPU_TEMP{node=~"spark.+"})` and toggles the AC plug via HA REST. Default-on (Layer 1 runs); turns plug off only when all of: GPU ≤ close threshold, ≥ 5 min since last switch, not in emergency.
+
+### Three watchdog layers (any L2 failure → L1 takes over within minutes)
+
+1. **Controller fail-safe**: any missing signal (Prometheus down, HA down, GPU temp metric absent) → if plug is off, force on.
+2. **Max-OFF-duration cap**: plug cannot stay off longer than `max_off_duration_s` (default 600 s). Bounds L2's blast radius if its logic ever goes wrong.
+3. **External watchdog** (`server/deploy/ha-controller-watchdog.sh`, runs from cron every 5 min): if controller's last-decision metric is stale > 120 s and plug is off, force plug on via HA REST. Single-file bash + curl — has zero dependency on Python or Hearth's runtime, so it works even if everything else is broken.
+
+### Schema
+
+```yaml
+ha:
+  controller:
+    enabled: false                  # opt in by setting true
+    target_plug_id: "2027457700"    # AC plug only — NOT a node plug
+    decision_interval_s: 30
+    gpu_open_threshold: 65          # max-GPU ≥ this → plug ON
+    gpu_close_threshold: 55         # max-GPU ≤ this → plug may turn OFF
+    min_switch_interval_s: 300      # compressor protection
+    max_off_duration_s: 600         # safety cap (10 min)
+    emergency_open_threshold: 75    # max-GPU ≥ this for 30s → force ON
+    emergency_open_dur_s: 30
+    fail_safe: "on"                 # default to ON on any failure
+```
+
+### Hard safety rails
+
+- `target_plug_id` must **not** be in `ha.blocklist` (operator-defined) or in `HARD_BLOCKLIST` (`2051674991` MT6000 router — hardcoded, cannot be overridden).
+- Controller refuses to start if `enabled` is false or if `target_plug_id` is missing.
+- The install script (`install-ha-controller.sh`) re-validates all of the above before touching systemd.
+
+### Deployment
+
+```bash
+# 0) Set controller.enabled: true and target_plug_id in hearth.yaml
+# 1) Install (idempotent)
+sudo TOKEN_FILE=/home/$USER/.config/ha/token \
+    bash server/deploy/install-ha-controller.sh
+# 2) Watch first 24h via Hearth Telemetry → Energy trends card
+# 3) Disable any time
+sudo systemctl stop ha-controller && sudo systemctl disable ha-controller
+```
+
+### Operator's mental model
+
+"Layer 1 is the AC doing its normal job. Layer 2 is Hearth saying 'hey, GPUs are cool, take a short break.'  If Hearth gets confused, Layer 1 takes over within 10 minutes max."
