@@ -1125,6 +1125,22 @@ async def _alerts(nodes=None, log=None):
         out.append({"key": "gateway:errors", "sev": "warn",
                     "msg": f"gateway errors · {err}/40",
                     "sub": "LiteLLM 5xx rate elevated recently", "when": "last 40 reqs"})
+
+    # L2 AC controller sensor health: any thermometer the controller is
+    # supposed to monitor that is currently missing forces fail-safe ON
+    # (see ha-controller.py).  Surface each missing sensor as a critical
+    # alert so the operator gets a push.
+    try:
+        miss = await promql("hearth_ac_controller_sensor_health == 0")
+        for r in miss:
+            sensor = r.get("metric", {}).get("sensor", "?")
+            out.append({"key": f"l2:sensor_missing:{sensor}", "sev": "bad",
+                        "msg": f"L2 sensor missing: {sensor}",
+                        "sub": "controller forced AC ON; thermal coverage incomplete",
+                        "when": "live"})
+    except Exception:
+        pass
+
     up = sum(1 for n in nodes if n.get("up"))
     if not out:
         out.append({"key": None, "sev": "ok",

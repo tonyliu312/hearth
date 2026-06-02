@@ -90,6 +90,9 @@ c_maxoff     = Counter("hearth_ac_controller_max_off_forced_total",
                        "Times max-OFF-duration forced the plug back on")
 g_last_dec_ts = Gauge("hearth_ac_controller_last_decision_ts",
                       "Unix timestamp of last successful decide() loop")
+g_sensor_hp  = Gauge("hearth_ac_controller_sensor_health",
+                     "Per-sensor health: 1=present, 0=missing/stale. Any 0 "
+                     "causes fail-safe ON.", ["sensor"])
 
 
 def _load_config() -> dict:
@@ -122,7 +125,7 @@ def _write_state(state: dict) -> None:
 
 
 class Controller:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, nodes: list[dict] | None = None):
         self.target_plug = cfg["target_plug_id"]
         # Whitelist of cuco IDs Hearth is allowed to ever write to.  Hard
         # blocklist always wins over any operator configuration.
@@ -153,17 +156,69 @@ class Controller:
             headers={"Authorization": f"Bearer {HA_TOKEN}"}, timeout=10.0)
         self.state = _read_state()
 
-    async def _max_gpu(self) -> float | None:
+        # ── Expected temperature sensors ────────────────────────────────
+        # Build the full list of temperature signals we expect to read on
+        # every decide() loop.  ANY ONE missing → fail-safe ON.  Reflects
+        # the operator's request: "如果任意一个温度传感器无法获取到数据,
+        # 都要强制启动空调, 并告警通知我".
+        #
+        # The set is derived from hearth.yaml's node list + the AC plug
+        # itself, so it stays consistent with the rest of Hearth as nodes
+        # are added/removed — no separate registry to keep in sync.
+        self.expected_sensors: list[tuple[str, str]] = []
+        for n in (nodes or []):
+            nid = n.get("id", "")
+            src = n.get("sources") or {}
+            # ha_node_plug_temp_celsius is emitted by ha-exporter with the
+            # Hearth internal node id as label — query with the same id.
+            if src.get("ha_plug_id"):
+                self.expected_sensors.append(
+                    (f"plug_temp_{nid}",
+                     f'ha_node_plug_temp_celsius{{node="{nid}"}}'))
+            # DCGM uses the host's REAL hostname as the `node` label (e.g.
+            # "spark-34d3"), not Hearth's internal id (e.g. "spark-01") —
+            # so the query has to go through obs_node_label.  Skip nodes
+            # that have no DCGM coverage configured.
+            if nid.startswith("spark-") and src.get("obs_node_label"):
+                obs = src["obs_node_label"]
+                self.expected_sensors.append(
+                    (f"gpu_{nid}",
+                     f'DCGM_FI_DEV_GPU_TEMP{{node="{obs}"}}'))
+        # The rack AC's own internal temperature (cuco _temperature_p_12_2)
+        # — present any time the AC plug is monitored.
+        self.expected_sensors.append(
+            ("rack_ac_plug_temp", "ha_rack_ac_plug_temp_celsius"))
+        log.info("Health-monitoring %d temperature sensors: %s",
+                 len(self.expected_sensors),
+                 ", ".join(n for n, _ in self.expected_sensors))
+
+    async def _query_value(self, promql_str: str) -> float | None:
         try:
             r = await self.client.get(f"{PROM_URL}/api/v1/query",
-                params={"query": 'max(DCGM_FI_DEV_GPU_TEMP{node=~"spark.+"})'})
+                                       params={"query": promql_str})
             r.raise_for_status()
             d = r.json()
             if d.get("status") == "success" and d["data"]["result"]:
                 return float(d["data"]["result"][0]["value"][1])
-        except Exception as e:
-            log.warning("max_gpu query failed: %s", e)
+        except Exception:
+            pass
         return None
+
+    async def _max_gpu(self) -> float | None:
+        return await self._query_value(
+            'max(DCGM_FI_DEV_GPU_TEMP{node=~"spark.+"})')
+
+    async def _check_sensors(self) -> list[str]:
+        """Returns names of sensors that are missing/stale right now.
+        Updates the per-sensor health gauge for visibility / alerting."""
+        missing: list[str] = []
+        for name, query in self.expected_sensors:
+            v = await self._query_value(query)
+            present = v is not None
+            g_sensor_hp.labels(sensor=name).set(1 if present else 0)
+            if not present:
+                missing.append(name)
+        return missing
 
     async def _plug_state(self) -> str | None:
         """Read the plug's actual state from HA REST (not Prometheus —
@@ -191,26 +246,49 @@ class Controller:
             return False
 
     async def decide(self) -> None:
-        max_gpu = await self._max_gpu()
+        # ── 1. Comprehensive sensor health check ────────────────────────
+        # Every expected temperature sensor must be readable.  Any one
+        # missing means we don't have full thermal coverage of the rack
+        # and must default to L1 control (plug ON).
+        missing = await self._check_sensors()
         actual  = await self._plug_state()
         now = time.time()
         in_state_for = now - self.state.get("last_switch_ts", 0.0)
         g_in_state_s.set(in_state_for)
 
-        # ── Fail-safe: missing signal ───────────────────────────────────
-        # Either GPU temp or plug state unreadable → controller cannot
-        # safely decide. Default-on policy: if plug is currently off, force
-        # it on. If it's already on, leave it.  Never let a sensor outage
-        # silently strand the rack without cooling.
-        if max_gpu is None or actual is None:
+        # ── Fail-safe: ANY missing sensor or unreadable plug state ──────
+        # Operator-stated requirement: "如果任意一个温度传感器无法获取到
+        # 数据, 都要强制启动空调, 并告警通知我".  The per-sensor health
+        # gauges (g_sensor_hp) carry the alarm signal — main.py _alerts()
+        # picks them up and dispatches through hearth.yaml > alerts.channels.
+        if missing or actual is None:
             c_failsafe.inc()
-            log.warning("FAIL-SAFE: missing signal (max_gpu=%s actual=%s) → "
-                        "policy=%s", max_gpu, actual, self.fail_safe)
+            log.warning(
+                "FAIL-SAFE: missing=%s plug_state=%s → policy=%s "
+                "(per-sensor health visible at hearth_ac_controller_sensor_health)",
+                missing, actual, self.fail_safe)
             if self.fail_safe == "on" and actual == "off":
                 ok = await self._set_plug(True)
                 if ok:
                     self.state["last_switch_ts"] = now
-                    self.state["last_decision"] = "ON (fail-safe)"
+                    self.state["last_decision"] = f"ON (fail-safe: {','.join(missing) or 'plug_state'})"
+                    c_switches.labels(direction="failsafe_on").inc()
+                    _write_state(self.state)
+            return
+
+        # Sensors all healthy — now we can read the decision input.
+        max_gpu = await self._max_gpu()
+        if max_gpu is None:
+            # Defensive: max_gpu aggregate failed even though individual
+            # GPU sensors are healthy.  Treat as fail-safe.
+            c_failsafe.inc()
+            log.warning("FAIL-SAFE: max_gpu aggregate unreadable despite "
+                        "individual sensor health — Prometheus / network issue")
+            if self.fail_safe == "on" and actual == "off":
+                ok = await self._set_plug(True)
+                if ok:
+                    self.state["last_switch_ts"] = now
+                    self.state["last_decision"] = "ON (fail-safe: max_gpu agg)"
                     c_switches.labels(direction="failsafe_on").inc()
                     _write_state(self.state)
             return
@@ -348,8 +426,9 @@ def main() -> None:
         log.error("ha.controller.target_plug_id is required")
         sys.exit(2)
     ctrl_cfg["blocklist"] = ha_cfg.get("blocklist") or []
+    nodes = cfg.get("nodes") or []
     start_http_server(PORT)
-    asyncio.run(Controller(ctrl_cfg).run())
+    asyncio.run(Controller(ctrl_cfg, nodes=nodes).run())
 
 
 if __name__ == "__main__":
