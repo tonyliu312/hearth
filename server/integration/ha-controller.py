@@ -292,6 +292,25 @@ class Controller:
                      "→ON" if should_on else "→OFF", max_gpu, in_state_for)
             _write_state(self.state)
 
+    async def _heartbeat(self) -> None:
+        """Write a unix-timestamp heartbeat to HA so peer hosts can detect
+        when this controller (or the whole Atlas) is dead.  Any number of
+        cross-host failover watchdogs can poll the same sensor entity and
+        unconditionally turn the AC on if the heartbeat goes stale.
+
+        Uses the REST-only state API (POST /api/states/<entity>); the
+        sensor doesn't need to be pre-declared in HA configuration.yaml."""
+        try:
+            await self.client.post(
+                f"{HA_URL}/api/states/sensor.hearth_atlas_heartbeat",
+                json={"state": str(int(time.time())),
+                      "attributes": {
+                          "friendly_name": "Hearth Atlas controller heartbeat",
+                          "device_class": "timestamp_unix",
+                          "unit_of_measurement": "s"}})
+        except Exception as e:
+            log.debug("heartbeat write failed (non-fatal): %s", e)
+
     async def run(self) -> None:
         log.info("Controller START | target=%s gpu_open=%.0f°C gpu_close=%.0f°C "
                  "min_interval=%.0fs max_off=%.0fs emergency=%.0f°C(%.0fs) "
@@ -304,6 +323,10 @@ class Controller:
                 await self.decide()
                 g_alive.set(1)
                 g_last_dec_ts.set(time.time())
+                # Write cross-host heartbeat AFTER a successful decide(),
+                # so a stale heartbeat means the controller has actually
+                # failed (not just slow or starting up).
+                await self._heartbeat()
             except Exception as e:
                 g_alive.set(0)
                 log.exception("decide() crashed: %s", e)
