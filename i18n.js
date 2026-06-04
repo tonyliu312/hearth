@@ -27,13 +27,13 @@
       "Telemetry · alerts": "遥测 · 告警", "Fabric · network": "网络 · 拓扑",
       // section h2 (拆分 普通 + <em> 两段)
       "Real-time pulse of the ": "实时脉搏 · ", "entire fabric.": "整个集群",
-      "Five machines. ": "五台机器 · ", "Each a citizen.": "各为一员",
+      "{n} machines. ": "{n} 台机器 · ", "Each a citizen.": "各为一员",
       "One endpoint. ": "一个入口 · ", "Every model.": "所有模型",
       "Signal, not ": "只见信号 · ", "noise.": "不见噪声",
       "The wires ": "万物 · ", "between everything.": "互联之线",
       // ledes
-      "Aggregated utilization, throughput, and thermals across all five nodes — sampled at 1.2 s, retained for 7 days in Prometheus, surfaced here as a single coherent picture.":
-        "五节点的利用率、吞吐与热数据聚合 —— 1.2 秒采样，Prometheus 留存 7 天，在此汇成一张连贯全景。",
+      "Aggregated utilization, throughput, and thermals across all {n} nodes — sampled at 1.2 s, retained for 7 days in Prometheus, surfaced here as a single coherent picture.":
+        "{n} 节点的利用率、吞吐与热数据聚合 —— 1.2 秒采样，Prometheus 留存 7 天，在此汇成一张连贯全景。",
       "Each host runs the LiteLLM gateway, an inference engine, or both. Click a node for the full forensic view.":
         "每台主机跑 LiteLLM 网关、推理引擎,或两者皆有。点击任一节点查看完整取证视图。",
       "The gateway host peers with every inference node — link intensity & pulse are driven by real node-exporter throughput. Inter-node fabric (RDMA/InfiniBand) is physical topology only (throughput not instrumented by default).":
@@ -59,11 +59,12 @@
       "KV-cache pressure": "KV 缓存压力", "% utilization, weighted mean": "% 利用率 · 加权均值",
       // node detail
       "forensic view": "取证视图", "Accelerator activity · 60 ticks": "加速器活跃度 · 近 60 拍",
-      "GPU temp": "GPU 温度", "Power draw": "功耗", "Disk usage": "磁盘占用",
+      "GPU temp": "GPU 温度", "NIC temp": "网卡温度", "Power draw": "功耗", "Disk usage": "磁盘占用",
       "Net In": "入向流量", "Net Out": "出向流量",
       "Hosted models": "承载模型", "Running services": "运行服务",
       "Kernel": "内核", "Driver": "驱动", "Net": "网络",
       "Hardware temps": "硬件温度",
+      "Hardware sensors": "硬件传感器", "Fans": "风扇", "+{n} more": "还有 {n} 项",
       "— no temperature data (node unmanaged) —": "— 无温度数据（节点未纳管）—",
       "GPU pending · maintenance window": "GPU 待维护窗口纳管",
       "Open SSH session": "打开 SSH 会话", "Drain & cordon": "排空并隔离",
@@ -101,7 +102,7 @@
       "Search nodes, models, sections…": "搜索节点、模型、板块…",
       "Section · top of page": "板块 · 页面顶部",
       "Section · aggregate telemetry": "板块 · 聚合遥测",
-      "Section · five machines": "板块 · 五台机器",
+      "Section · {n} machines": "板块 · {n} 台机器",
       "Section · LiteLLM gateway": "板块 · LiteLLM 网关",
       "Section · alerts & log stream": "板块 · 告警与日志流",
       "Section · network topology": "板块 · 网络拓扑",
@@ -146,12 +147,12 @@
       "Models · LiteLLM gateway": "模型 · LiteLLM 閘道",
       "Telemetry · alerts": "遙測 · 告警", "Fabric · network": "網路 · 拓撲",
       "Real-time pulse of the ": "即時脈搏 · ", "entire fabric.": "整個叢集",
-      "Five machines. ": "五台機器 · ", "Each a citizen.": "各為一員",
+      "{n} machines. ": "{n} 台機器 · ", "Each a citizen.": "各為一員",
       "One endpoint. ": "一個入口 · ", "Every model.": "所有模型",
       "Signal, not ": "只見訊號 · ", "noise.": "不見雜訊",
       "The wires ": "萬物 · ", "between everything.": "互聯之線",
-      "Aggregated utilization, throughput, and thermals across all five nodes — sampled at 1.2 s, retained for 7 days in Prometheus, surfaced here as a single coherent picture.":
-        "五節點的利用率、吞吐與熱數據聚合 —— 1.2 秒取樣，Prometheus 留存 7 天，在此匯成一張連貫全景。",
+      "Aggregated utilization, throughput, and thermals across all {n} nodes — sampled at 1.2 s, retained for 7 days in Prometheus, surfaced here as a single coherent picture.":
+        "{n} 節點的利用率、吞吐與熱數據聚合 —— 1.2 秒取樣，Prometheus 留存 7 天，在此匯成一張連貫全景。",
       "Each host runs the LiteLLM gateway, an inference engine, or both. Click a node for the full forensic view.":
         "每台主機跑 LiteLLM 閘道、推論引擎,或兩者皆有。點擊任一節點查看完整取證視圖。",
       "The gateway host peers with every inference node — link intensity & pulse are driven by real node-exporter throughput. Inter-node fabric (RDMA/InfiniBand) is physical topology only (throughput not instrumented by default).":
@@ -172,11 +173,12 @@
       "Cluster power draw": "叢集功耗", "watts · all PSUs": "瓦特 · 全部電源",
       "KV-cache pressure": "KV 快取壓力", "% utilization, weighted mean": "% 使用率 · 加權均值",
       "forensic view": "取證視圖", "Accelerator activity · 60 ticks": "加速器活躍度 · 近 60 拍",
-      "GPU temp": "GPU 溫度", "Power draw": "功耗", "Disk usage": "磁碟佔用",
+      "GPU temp": "GPU 溫度", "NIC temp": "網卡溫度", "Power draw": "功耗", "Disk usage": "磁碟佔用",
       "Net In": "入向流量", "Net Out": "出向流量",
       "Hosted models": "承載模型", "Running services": "執行服務",
       "Kernel": "核心", "Driver": "驅動", "Net": "網路",
       "Hardware temps": "硬體溫度",
+      "Hardware sensors": "硬體感測器", "Fans": "風扇", "+{n} more": "還有 {n} 項",
       "— no temperature data (node unmanaged) —": "— 無溫度資料（節點未納管）—",
       "GPU pending · maintenance window": "GPU 待維護窗口納管",
       "Open SSH session": "開啟 SSH 工作階段", "Drain & cordon": "排空並隔離",
@@ -210,7 +212,7 @@
       "Search nodes, models, sections…": "搜尋節點、模型、區塊…",
       "Section · top of page": "區塊 · 頁面頂部",
       "Section · aggregate telemetry": "區塊 · 聚合遙測",
-      "Section · five machines": "區塊 · 五台機器",
+      "Section · {n} machines": "區塊 · {n} 台機器",
       "Section · LiteLLM gateway": "區塊 · LiteLLM 閘道",
       "Section · alerts & log stream": "區塊 · 告警與日誌流",
       "Section · network topology": "區塊 · 網路拓撲",
@@ -248,10 +250,15 @@
   if (!LANGS.some((l) => l.code === lang)) lang = "en";
 
   const subs = new Set();
-  function t(s) {
-    if (lang === "en" || s == null) return s;
-    const m = DICT[lang];
-    return (m && m[s] !== undefined) ? m[s] : s;  // 缺失回退英文原串
+  function t(s, vars) {
+    if (s == null) return s;
+    let str = (lang === "en") ? s : (DICT[lang] && DICT[lang][s] !== undefined ? DICT[lang][s] : s);
+    if (vars) {
+      for (const k in vars) {
+        str = str.replace(new RegExp("\\{" + k + "\\}", "g"), vars[k]);
+      }
+    }
+    return str;
   }
   function setLang(code) {
     if (!LANGS.some((l) => l.code === code) || code === lang) return;

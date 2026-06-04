@@ -154,7 +154,15 @@ function Hero() {
           unit="GB"
           spark={cluster.kv}
           color="var(--violet)"
-          sub={<>{NODES.length} GPUs · 1× consumer + 4× datacenter</>}
+          sub={(() => {
+            // 按 hearth.yaml `kind` 字段动态分类: discrete = 消费级独显, 其他 = 数据中心 SoC (Spark/Apple Silicon 等)
+            const discrete = NODES.filter((n) => (n.kind || "discrete") === "discrete").length;
+            const datacenter = NODES.length - discrete;
+            const parts = [];
+            if (discrete > 0) parts.push(`${discrete}× consumer`);
+            if (datacenter > 0) parts.push(`${datacenter}× datacenter`);
+            return <>{NODES.length} GPUs{parts.length ? " · " + parts.join(" + ") : ""}</>;
+          })()}
         />
         <HeroStat
           label="CPU Cores"
@@ -252,7 +260,7 @@ function Cluster() {
       <div className="eyebrow"><span className="num">02</span>{t("Cluster · live telemetry")}</div>
       <h2>{t("Real-time pulse of the ")}<em>{t("entire fabric.")}</em></h2>
       <p className="lede">
-        {t("Aggregated utilization, throughput, and thermals across all five nodes — sampled at 1.2 s, retained for 7 days in Prometheus, surfaced here as a single coherent picture.")}
+        {t("Aggregated utilization, throughput, and thermals across all {n} nodes — sampled at 1.2 s, retained for 7 days in Prometheus, surfaced here as a single coherent picture.", { n: NODES.length })}
       </p>
 
       <div className="grid g-3" style={{ marginBottom: 16 }}>

@@ -190,11 +190,12 @@ Two control layers, with explicit roles:
 - **Layer 1** — the AC's internal F01/F02/F05 thermostat. Must be configured to safely run the rack on its own; Hearth never modifies these.
 - **Layer 2** — `ha-controller` systemd service. Reads `max(DCGM_FI_DEV_GPU_TEMP{node=~"spark.+"})` and toggles the AC plug via HA REST. Default-on (Layer 1 runs); turns plug off only when all of: GPU ≤ close threshold, ≥ 5 min since last switch, not in emergency.
 
-### Three watchdog layers (any L2 failure → L1 takes over within minutes)
+### Four watchdog layers (any L2 failure → L1 takes over within minutes)
 
 1. **Controller fail-safe**: any missing signal (Prometheus down, HA down, GPU temp metric absent) → if plug is off, force on.
 2. **Max-OFF-duration cap**: plug cannot stay off longer than `max_off_duration_s` (default 600 s). Bounds L2's blast radius if its logic ever goes wrong.
-3. **External watchdog** (`server/deploy/ha-controller-watchdog.sh`, runs from cron every 5 min): if controller's last-decision metric is stale > 120 s and plug is off, force plug on via HA REST. Single-file bash + curl — has zero dependency on Python or Hearth's runtime, so it works even if everything else is broken.
+3. **In-host watchdog** (`server/deploy/ha-controller-watchdog.sh`, runs from cron every 5 min **on the controller host**): if controller's last-decision metric is stale > 120 s and plug is off, force plug on via HA REST. Single-file bash + curl — has zero dependency on Python or Hearth's runtime, so it works even if everything else on the host is broken.
+4. **Cross-host failover watchdog** (`server/deploy/ha-failover-watchdog.sh`, runs from cron every 5 min **on a peer host** — a Spark, the NAS, anywhere with HA REST access): covers the harder failure mode that layer 3 cannot — the controller host **itself** dies (kernel hardlockup, PSU drop, motherboard fault), taking the controller AND its in-host watchdog with it. The cross-host script polls Atlas's `sensor.hearth_atlas_heartbeat` (which `ha-controller` writes every ~30 s); if it's stale beyond `STALE_SECONDS` (default 300) AND the plug is OFF, it unconditionally turns the plug ON via HA REST, returning control to Layer 1. Zero dependency on Atlas's runtime — survives Atlas being literally unplugged. Token loads from peer's `~/.config/ha/token` (chmod 600). Install: copy the script + a long-lived HA token to a peer, add a `*/5 * * * *` crontab entry. Recommended for any deployment where the controller host is itself the most-likely-to-die node.
 
 ### Schema
 
@@ -230,6 +231,24 @@ sudo TOKEN_FILE=/home/$USER/.config/ha/token \
 # 3) Disable any time
 sudo systemctl stop ha-controller && sudo systemctl disable ha-controller
 ```
+
+**Recommended**: install the cross-host failover watchdog on at least one peer node (a Spark, the NAS — any always-on host that can reach HA REST and is independent of the controller host's hardware):
+
+```bash
+# On the peer host (e.g. spark-01), as the owning user:
+mkdir -p ~/.config/ha && chmod 700 ~/.config/ha
+# Paste your HA long-lived token (Bearer ...) into this file:
+echo "YOUR_HA_LONG_LIVED_TOKEN" > ~/.config/ha/token && chmod 600 ~/.config/ha/token
+
+# Copy the watchdog (from your Hearth checkout or scp from the controller host)
+cp server/deploy/ha-failover-watchdog.sh ~/ha-failover-watchdog.sh
+chmod +x ~/ha-failover-watchdog.sh
+
+# Add to crontab — every 5 min
+( crontab -l 2>/dev/null; echo "*/5 * * * * HA_URL=http://homeassistant.local:8123 \$HOME/ha-failover-watchdog.sh >> \$HOME/hearth-failover-watchdog.log 2>&1" ) | crontab -
+```
+
+`HA_URL` defaults to `http://homeassistant.local:8123`; override to your LAN IP if mDNS isn't reachable from the peer. Logs accumulate in `~/hearth-failover-watchdog.log` — each cron run logs "Atlas alive" silently or "Atlas DOWN AND plug OFF — UNCONDITIONAL TURN ON" when it rescues.
 
 ### Operator's mental model
 
