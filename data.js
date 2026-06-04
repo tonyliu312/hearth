@@ -109,7 +109,7 @@
     for (const k of Object.keys(live.nodes))    delete live.nodes[k];
     for (const k of Object.keys(live.models))   delete live.models[k];
     for (const k of Object.keys(live.nodeMeta)) delete live.nodeMeta[k];
-    NODES.forEach((n)  => { live.nodes[n.id]  = makeNodeMetrics(); live.nodeMeta[n.id] = { temps: [] }; });
+    NODES.forEach((n)  => { live.nodes[n.id]  = makeNodeMetrics(); live.nodeMeta[n.id] = { temps: [], fans: [] }; });
     MODELS.forEach((m) => { live.models[m.id] = makeModelMetrics(); });
     Object.assign(live.cluster, {
       tps: [], rps: [], kv: [], pow: [], temp: [],
@@ -149,7 +149,7 @@
   let running    = true;
 
   // First-time structure init
-  NODES.forEach((n)  => { live.nodes[n.id]  = makeNodeMetrics(); live.nodeMeta[n.id] = { temps: [] }; });
+  NODES.forEach((n)  => { live.nodes[n.id]  = makeNodeMetrics(); live.nodeMeta[n.id] = { temps: [], fans: [] }; });
   MODELS.forEach((m) => { live.models[m.id] = makeModelMetrics(); });
 
   // ── Mock simulator (same logic as the original v0 prototype) ────────
@@ -172,12 +172,24 @@
       seed("power", s.power); seed("tempGpu", s.tempGpu); seed("tempCpu", s.tempCpu);
       seed("fan", s.fan); seed("disk", s.disk); seed("netIn", s.netIn); seed("netOut", s.netOut);
       seed("smActivity", s.gpu * 0.92); seed("pcie", s.netIn * 0.45);
+      const jit = (b, spread) => Math.round(b + (Math.random() - 0.5) * spread);
       live.nodeMeta[n.id].temps = [
-        { module: "CPU",  label: "Package",         chip: "coretemp", celsius: Math.round(s.tempCpu) },
-        { module: "NVMe", label: "Composite nvme0", chip: "nvme0",    celsius: Math.round(s.tempCpu - 6 + Math.random() * 4) },
-        { module: "NVMe", label: "Composite nvme1", chip: "nvme1",    celsius: Math.round(s.tempCpu - 5 + Math.random() * 4) },
-        { module: "网卡", label: "ConnectX MAC",    chip: "mlx5",     celsius: Math.round(s.tempGpu - 8 + Math.random() * 3) },
-        { module: "水冷", label: "Coolant temp",    chip: "aio",      celsius: Math.round(s.tempCpu - 12 + Math.random() * 3) },
+        { module: "CPU",  label: "Package",         chip: "coretemp", celsius: jit(s.tempCpu, 2) },
+        { module: "CPU",  label: "Core 0",          chip: "coretemp", celsius: jit(s.tempCpu - 1, 4) },
+        { module: "CPU",  label: "Core 4",          chip: "coretemp", celsius: jit(s.tempCpu - 2, 4) },
+        { module: "CPU",  label: "Core 8",          chip: "coretemp", celsius: jit(s.tempCpu - 1, 4) },
+        { module: "NVMe", label: "Composite nvme0", chip: "nvme0",    celsius: jit(s.tempCpu - 6, 4) },
+        { module: "NVMe", label: "Composite nvme1", chip: "nvme1",    celsius: jit(s.tempCpu - 5, 4) },
+        { module: "网卡", label: "PHY Temperature", chip: "mlx5",     celsius: jit(s.tempGpu + 12, 3) },
+        { module: "网卡", label: "MAC Temperature", chip: "mlx5",     celsius: jit(s.tempGpu + 12, 3) },
+        { module: "水冷", label: "Coolant temp",    chip: "aio",      celsius: jit(s.tempCpu - 12, 3) },
+        { module: "平台", label: "ACPI zone 0",     chip: "acpitz",   celsius: jit(s.tempCpu - 14, 3) },
+      ].sort((a, b) => b.celsius - a.celsius);
+      live.nodeMeta[n.id].fans = [
+        { label: "Pump speed",     chip: "aio", rpm: jit(2900, 200) },
+        { label: "Internal fan",   chip: "aio", rpm: jit(1900, 240) },
+        { label: "Chassis fan 1",  chip: "aio", rpm: jit(s.fan * 28, 200) },
+        { label: "Controller fan", chip: "aio", rpm: 0 },
       ];
     });
     MODELS.forEach((m) => {
@@ -369,7 +381,7 @@
         e.gpuPending = !!n.gpuPending;
         if (e.os === undefined) { e.os = "—"; e.kernel = "—"; e.driver = "NVIDIA —"; e.cuda = "—"; }
         if (!live.nodes[n.id]) live.nodes[n.id] = makeNodeMetrics();
-        if (!live.nodeMeta[n.id]) live.nodeMeta[n.id] = { temps: [] };
+        if (!live.nodeMeta[n.id]) live.nodeMeta[n.id] = { temps: [], fans: [] };
         const ns = live.nodes[n.id];
         ns.up = n.up !== false;          // 后端权威 up → 诚实显示在线/离线
         const upd = (k, v) => { if (v === undefined || v === null) return;
@@ -381,6 +393,7 @@
         upd("netIn", lv.netIn); upd("netOut", lv.netOut);
         upd("rdmaIn", lv.rdmaIn); upd("rdmaOut", lv.rdmaOut);
         live.nodeMeta[n.id].temps = Array.isArray(lv.temps) ? lv.temps : [];
+        live.nodeMeta[n.id].fans  = Array.isArray(lv.fans)  ? lv.fans  : [];
         next.push(e);
       });
       const keep = new Set(next.map((x) => x.id));

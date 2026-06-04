@@ -239,6 +239,8 @@ def _classify_temp(chip: str, label: str) -> str:
         return "网卡"
     if "soc" in l or "gpu" in l:
         return "SoC"
+    if "thermal_zone" in c or "acpitz" in c or "pch" in l or "systin" in l or "board" in l:
+        return "平台"
     return "其他"
 
 
@@ -260,6 +262,25 @@ def _atlas_temps(scrape: dict) -> list[dict]:
                       "celsius": round(x["value"], 1)})
     # 按模块聚合给一个代表值（取最高）+ 保留明细
     return sorted(temps, key=lambda t: (-t["celsius"]))
+
+
+def _atlas_fans(scrape: dict) -> list[dict]:
+    """从宿主 node-exporter 抽出风扇转速（带人话 label，按转速降序）。"""
+    labels_idx = {}
+    for x in scrape.get("node_hwmon_sensor_label", []):
+        lb = x["labels"]
+        labels_idx[(lb.get("chip", ""), lb.get("sensor", ""))] = lb.get("label", "")
+    fans = []
+    for x in scrape.get("node_hwmon_fan_rpm", []):
+        lb = x["labels"]
+        chip, sensor = lb.get("chip", ""), lb.get("sensor", "")
+        human = labels_idx.get((chip, sensor))
+        # 跳过既无 label 又 0 转的幽灵通道（主板上未接的风扇头）
+        if human is None and x["value"] <= 0:
+            continue
+        fans.append({"label": human or sensor, "chip": chip,
+                     "rpm": int(round(x["value"]))})
+    return sorted(fans, key=lambda f: -f["rpm"])
 
 
 # CPU% / network rates need two-sample diff
@@ -297,11 +318,12 @@ async def _atlas_node_live() -> dict:
           net(s1, "node_network_transmit_bytes_total")) / 0.4 / 1024 / 1024
 
     temps = _atlas_temps(s2)
+    fans = _atlas_fans(s2)
     cpu_t = next((t["celsius"] for t in temps if t["module"] == "CPU"), 0)
     boot = _sum(s2.get("node_boot_time_seconds", []))
     return {"cpu": round(cpu, 1), "mem": round(mem, 1), "disk": round(disk, 1),
             "netIn": round(max(0, rx), 2), "netOut": round(max(0, tx), 2),
-            "tempCpu": cpu_t, "temps": temps,
+            "tempCpu": cpu_t, "temps": temps, "fans": fans,
             "uptimeSec": int(time.time() - boot) if boot else 0}
 
 
@@ -411,14 +433,14 @@ async def _node_payload() -> list[dict]:
         live = {"gpu": 0, "vram": 0, "vramKind": "discrete", "tempGpu": 0,
                 "tempMem": 0, "tempCpu": 0, "power": 0, "cpu": 0, "mem": 0,
                 "disk": 0, "netIn": 0, "netOut": 0, "rdmaIn": 0,
-                "rdmaOut": 0, "temps": []}
+                "rdmaOut": 0, "temps": [], "fans": []}
         if n.get("node_source") == "direct":
             live.update({k: discrete_gpu.get(k, 0)
                          for k in ("gpu", "vram", "tempGpu", "tempMem", "power")})
             live["vramKind"] = discrete_gpu.get("vramKind", "discrete")
             if direct:
                 live.update({k: direct[k] for k in ("cpu", "mem", "disk", "netIn",
-                                                    "netOut", "tempCpu", "temps")
+                                                    "netOut", "tempCpu", "temps", "fans")
                              if k in direct})
             up = bool(direct) or bool(discrete_gpu)
         elif n["obs_node"] and n["obs_node"] in obs_live:
