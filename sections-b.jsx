@@ -13,7 +13,7 @@ function NodesSection() {
       <div className="eyebrow"><span className="num">03</span>{t("Nodes")}</div>
       <div className="sect-head">
         <div>
-          <h2 style={{ margin: 0 }}>{t("Five machines. ")}<em>{t("Each a citizen.")}</em></h2>
+          <h2 style={{ margin: 0 }}>{t("{n} machines. ", { n: _NODES.length })}<em>{t("Each a citizen.")}</em></h2>
           <p className="lede" style={{ margin: "14px 0 0" }}>
             {t("Each host runs the LiteLLM gateway, an inference engine, or both. Click a node for the full forensic view.")}
           </p>
@@ -25,12 +25,10 @@ function NodesSection() {
         </div>
       </div>
 
-      {/* 固定 5 列(.g-5 = repeat(5, minmax(0,1fr))): 5 台设备一行平铺,
-          不用 auto-fit——auto-fit 在 ~1414px 以下放不下第 5 张就折成 4+1,
-          很丑。卡片随列宽自适应变窄, 环已收紧到 56px(+gap10/pad18)保证
-          窄卡也不被 .node overflow:hidden 截。响应式塌缩交给 .g-5 的媒体
-          查询(≤1180→3 列, ≤820→2 列, 手机→1 列)。 */}
-      <div className="grid g-5">
+      {/* 列数随 hearth.yaml nodes 数量动态: 1-6 节点对应 .g-1 ~ .g-6;
+          7+ 节点用 .g-auto (auto-fill minmax 220px) 自动换行。
+          响应式塌缩交给 CSS 媒体查询(≤1180→3 列, ≤820→2 列, 手机→1 列)。 */}
+      <div className={"grid " + (_NODES.length <= 6 ? "g-" + _NODES.length : "g-auto")}>
         {_NODES.filter((n) => nfilter === "All" ? true
               : nfilter === "RTX" ? (n.kind || "discrete") === "discrete"
               : nfilter === "DGX" ? (n.kind || "discrete") !== "discrete"
@@ -105,6 +103,7 @@ function NodeCard({ node, onClick }) {
 function NodeDetail({ node, onClose }) {
   const { t } = useLang();
   const ns = _live.nodes[node.id];
+  const nicTemp = (_live.nodeMeta?.[node.id]?.temps || []).find((x) => x.module === "网卡" || x.module === "NIC")?.celsius || 0;
   const hostedModels = _MODELS.filter((m) => m.nodes.includes(node.id));
   return (
     <div className="card" style={{ marginTop: 22 }}>
@@ -123,7 +122,7 @@ function NodeDetail({ node, onClose }) {
         }}>Close ✕</button>
       </div>
 
-      <div style={{ padding: 22, display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr", gap: 22 }}>
+      <div className="nd-grid nd-grid-top" style={{ padding: 22 }}>
         <div>
           <div className="metric-l" style={{ marginBottom: 12 }}>{t("Accelerator activity · 60 ticks")}</div>
           <AreaChart
@@ -142,6 +141,9 @@ function NodeDetail({ node, onClose }) {
           <DetailMetric label={t("GPU")}            value={ns.gpu.now.toFixed(0)} unit="%" bar={ns.gpu.now} />
           <DetailMetric label={t("VRAM")}           value={(node.gpu.mem * ns.vram.now / 100).toFixed(1)} unit={` / ${node.gpu.mem} GB`} bar={ns.vram.now} color="violet" />
           <DetailMetric label={t("GPU temp")}       value={ns.tempGpu.now.toFixed(0)} unit=" °C" bar={ns.tempGpu.now} color={ns.tempGpu.now > 80 ? "hot" : "ok"} />
+          {nicTemp > 0 && (
+            <DetailMetric label={t("NIC temp")}     value={nicTemp.toFixed(0)} unit=" °C" bar={Math.min(100, nicTemp)} color={nicTemp > 85 ? "hot" : nicTemp > 70 ? "warn" : "ok"} />
+          )}
           <DetailMetric label={t("Power draw")}     value={ns.power.now.toFixed(0)} unit=" W"  bar={Math.min(100, ns.power.now / (/gateway/i.test(node.role || "") ? 4.5 : 2.5))} color="hot" />
         </div>
 
@@ -154,7 +156,7 @@ function NodeDetail({ node, onClose }) {
         </div>
       </div>
 
-      <div style={{ borderTop: "0.5px solid var(--line)", padding: 22, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 22 }}>
+      <div className="nd-grid nd-grid-bottom" style={{ borderTop: "0.5px solid var(--line)", padding: 22 }}>
         <div>
           <div className="metric-l" style={{ marginBottom: 10 }}>{t("Hosted models")}</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -187,21 +189,6 @@ function NodeDetail({ node, onClose }) {
             <span style={{ color: "var(--ink-3)" }}>CUDA</span><span>{node.cuda}</span>
             <span style={{ color: "var(--ink-3)" }}>{t("Net")}</span><span>{node.net}</span>
           </div>
-          <div className="metric-l" style={{ marginTop: 18, marginBottom: 10 }}>{t("Hardware temps")}</div>
-          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: "6px 14px", fontFamily: "var(--mono)", fontSize: 11.5 }}>
-            {(() => {
-              const ts = (_live.nodeMeta[node.id] && _live.nodeMeta[node.id].temps) || [];
-              if (!ts.length) return <span style={{ color: "var(--ink-3)", gridColumn: "1 / -1" }}>{t("— no temperature data (node unmanaged) —")}</span>;
-              return ts.flatMap((t, i) => {
-                const c = t.celsius >= 80 ? "var(--hot)" : t.celsius >= 70 ? "var(--warn)" : "var(--ink)";
-                return [
-                  <span key={i + "m"} style={{ color: "var(--ink-3)" }}>{t.module}</span>,
-                  <span key={i + "l"} style={{ color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.label}</span>,
-                  <span key={i + "v"} className="num" style={{ color: c, textAlign: "right" }}>{Math.round(t.celsius)} °C</span>,
-                ];
-              });
-            })()}
-          </div>
         </div>
 
         <div>
@@ -221,6 +208,78 @@ function NodeDetail({ node, onClose }) {
             ))}
           </div>
         </div>
+      </div>
+
+      <div style={{ borderTop: "0.5px solid var(--line)", padding: 22 }}>
+        <div className="metric-l" style={{ marginBottom: 12 }}>{t("Hardware sensors")}</div>
+        <SensorPanel nodeId={node.id} />
+      </div>
+    </div>
+  );
+}
+
+// 按硬件模块分组的可展开传感器面板（温度各组 + 风扇组）。
+// 后端 live.{temps,fans} 已全量直采；此处只负责"应看尽看"的分组呈现。
+function SensorPanel({ nodeId }) {
+  const { t } = useLang();
+  const meta = _live.nodeMeta[nodeId] || {};
+  const temps = meta.temps || [];
+  const fans = meta.fans || [];
+  const [open, setOpen] = useState({});
+  if (!temps.length && !fans.length)
+    return <div style={{ fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--ink-3)" }}>{t("— no temperature data (node unmanaged) —")}</div>;
+
+  const tc = (c) => (c >= 80 ? "var(--hot)" : c >= 70 ? "var(--warn)" : "var(--ink)");
+  const moreRow = (n) => ({ label: t("+{n} more").replace("{n}", n), value: "", color: "var(--ink-3)" });
+  const order = ["CPU", "水冷", "网卡", "NVMe", "SoC", "平台", "其他"];
+  const rank = (m) => { const i = order.indexOf(m); return i < 0 ? 99 : i; };
+
+  const groups = {};
+  temps.forEach((x) => { (groups[x.module] = groups[x.module] || []).push(x); });
+  const cards = Object.keys(groups).sort((a, b) => rank(a) - rank(b)).map((mod) => {
+    const list = groups[mod];                         // already hottest-first (global desc sort)
+    const expanded = !!open[mod];
+    const rows = (expanded ? list : list.slice(0, 3)).map((x) => ({
+      label: x.label, value: `${Math.round(x.celsius)} °C`, color: tc(x.celsius),
+    }));
+    if (!expanded && list.length > 3) rows.push(moreRow(list.length - 3));
+    return <SensorGroup key={mod} title={mod} rep={`${Math.round(list[0].celsius)} °C`}
+      repColor={tc(list[0].celsius)} rows={rows} expandable={list.length > 3}
+      expanded={expanded} onToggle={() => setOpen((o) => ({ ...o, [mod]: !o[mod] }))} />;
+  });
+
+  if (fans.length) {
+    const expanded = !!open.__fans;
+    const repRpm = Math.max(...fans.map((f) => f.rpm));
+    const rows = (expanded ? fans : fans.slice(0, 3)).map((f) => ({
+      label: f.label, value: f.rpm > 0 ? `${f.rpm} RPM` : t("stopped"),
+      color: f.rpm > 0 ? "var(--ink)" : "var(--ink-3)",
+    }));
+    if (!expanded && fans.length > 3) rows.push(moreRow(fans.length - 3));
+    cards.push(<SensorGroup key="__fans" title={t("Fans")} rep={`${repRpm} RPM`} repColor="var(--ink)"
+      rows={rows} expandable={fans.length > 3} expanded={expanded}
+      onToggle={() => setOpen((o) => ({ ...o, __fans: !o.__fans }))} />);
+  }
+
+  return <div className="sensor-grid">{cards}</div>;
+}
+
+function SensorGroup({ title, rep, repColor, rows, expandable, expanded, onToggle }) {
+  return (
+    <div className="sensor-card">
+      <button type="button" className="sensor-card-head" onClick={expandable ? onToggle : undefined}
+        style={{ cursor: expandable ? "pointer" : "default" }}>
+        <span className="sensor-card-title">{title}</span>
+        <span className="sensor-card-rep num" style={{ color: repColor }}>{rep}</span>
+        {expandable && <span className="sensor-chev" style={{ transform: expanded ? "rotate(90deg)" : "none" }}>›</span>}
+      </button>
+      <div className="sensor-rows">
+        {rows.map((r, i) => (
+          <div className="sensor-row" key={i}>
+            <span className="sensor-row-l">{r.label}</span>
+            <span className="num" style={{ color: r.color }}>{r.value}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -272,7 +331,7 @@ function ModelsSection() {
 
       {/* Gateway header strip */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div style={{ padding: 22, display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 1fr 1fr", gap: 22, alignItems: "center" }}>
+        <div className="gw-strip" style={{ padding: 22, alignItems: "center" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <span style={{ width: 28, height: 28, borderRadius: 8, background: "linear-gradient(135deg, #0a84ff, #bf5af2)", display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#fff", font: "600 11px var(--mono)" }}>LL</span>
@@ -853,7 +912,7 @@ function CmdK({ open, onClose }) {
       ..._MODELS.map((m) => ({ kind: "model", label: m.display, sub: `${m.framework} · ${m.params} · ${m.state}`, href: "#models" })),
       { kind: "view", label: "Overview", sub: "Section · top of page", href: "#overview" },
       { kind: "view", label: "Cluster", sub: "Section · aggregate telemetry", href: "#cluster" },
-      { kind: "view", label: "Nodes", sub: "Section · five machines", href: "#nodes" },
+      { kind: "view", label: "Nodes", sub: t("Section · {n} machines", { n: _NODES.length }), href: "#nodes" },
       { kind: "view", label: "Models", sub: "Section · LiteLLM gateway", href: "#models" },
       { kind: "view", label: "Telemetry", sub: "Section · alerts & log stream", href: "#telemetry" },
       { kind: "view", label: "Fabric", sub: "Section · network topology", href: "#fabric" },

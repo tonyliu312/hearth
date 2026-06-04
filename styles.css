@@ -408,11 +408,13 @@ section.page > .lede {
 
 /* ── Grids ────────────────────────────────────────────────────────────── */
 .grid { display: grid; gap: var(--gap); }
+.g-1 { grid-template-columns: minmax(0, 1fr); }
 .g-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
 .g-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
 .g-4 { grid-template-columns: repeat(4, minmax(0,1fr)); }
 .g-5 { grid-template-columns: repeat(5, minmax(0,1fr)); }
 .g-6 { grid-template-columns: repeat(6, minmax(0,1fr)); }
+.g-auto { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }  /* 7+ 节点自动换行 */
 @media (max-width: 1180px) {
   .g-4, .g-5, .g-6 { grid-template-columns: repeat(3, minmax(0,1fr)); }
 }
@@ -1113,3 +1115,98 @@ section.page > .lede {
 }
 .tm-devices tr:hover td { background: rgba(255,255,255,.025); }
 [data-theme="light"] .tm-devices tr:hover td { background: rgba(0,0,0,.025); }
+
+/* ── Hardware sensors · grouped expandable panel (NodeDetail) ───────── */
+/* auto-fit 让分组卡片在窄屏自然重排为单列，是移动端响应式的一部分 */
+.sensor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.sensor-card {
+  border: 0.5px solid var(--line);
+  border-radius: var(--r-sm, 8px);
+  background: rgba(255,255,255,.02);
+  overflow: hidden;
+}
+.sensor-card-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  background: none;
+  border: 0;
+  border-bottom: 0.5px solid var(--line);
+  color: var(--ink);
+  text-align: left;
+}
+.sensor-card-title {
+  font-family: var(--display);
+  font-size: 12px;
+  font-weight: 590;
+  letter-spacing: -.005em;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sensor-card-rep {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.sensor-chev {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink-3);
+  transition: transform .15s ease;
+  width: 10px;
+  text-align: center;
+}
+.sensor-rows {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 11px 8px;
+  gap: 5px;
+}
+.sensor-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.sensor-row-l {
+  color: var(--ink-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── NodeDetail / Gateway grids — was inline (media 改不动), now reflowable ── */
+.nd-grid { display: grid; gap: 22px; }
+.nd-grid-top    { grid-template-columns: 1.4fr 1fr 1fr; }
+.nd-grid-bottom { grid-template-columns: 1fr 1fr 1fr; }
+.gw-strip { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr 1fr; gap: 22px; }
+
+@media (max-width: 1180px) {
+  .gw-strip { grid-template-columns: repeat(3, minmax(0,1fr)); }
+}
+@media (max-width: 820px) {
+  /* 节点详情两块网格在窄屏重排单列 —— 修"卡片死宽只看到前几列" */
+  .nd-grid-top, .nd-grid-bottom { grid-template-columns: 1fr; }
+  .gw-strip { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  /* 仅强制"带内联 grid-template-columns"的 .grid 单列（media 改不动内联，需 !important）。
+     用属性选择器精准命中，避免误伤靠 .g-N 类做 2 列平板布局的网格(节点卡/脉冲卡)。 */
+  .grid[style*="grid-template-columns"] { grid-template-columns: 1fr !important; }
+}
+@media (max-width: 640px) {
+  .gw-strip { grid-template-columns: 1fr; }
+  /* 宽表格按需横滑：不截断、可滑动看全列 */
+  .tm-devices { display: block; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
+}
