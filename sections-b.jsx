@@ -371,6 +371,14 @@ function ModelsSection() {
                   <>
                     <div className="model-bigmetric">{_live.models[m.id].tps.now.toFixed(0)}<small>t/s</small></div>
                     <div className="model-spark"><Sparkline data={_live.models[m.id].tps.hist} color="var(--accent)" height={20} /></div>
+                    {/* 并发: tok/s 不带并发数解读不了 (单并发 50t/s vs 4并发 200t/s 截然不同).
+                        vLLM/SGLang 暴露 num_requests_running + waiting; llama.cpp 只有 running. */}
+                    <div style={{ marginTop: 4, fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--ink-3)" }}>
+                      <span style={{ color: "var(--ink-2)" }}>{_live.models[m.id].running.now.toFixed(0)}</span> {t("running")}
+                      {_live.models[m.id].waiting.now > 0 && (
+                        <> · <span style={{ color: "var(--warn)" }}>{_live.models[m.id].waiting.now.toFixed(0)} {t("queued")}</span></>
+                      )}
+                    </div>
                   </>
                 ) : <div style={{ fontFamily: "var(--mono)", color: "var(--ink-4)", fontSize: 11 }}>{t("no live metrics source")}<br />· {m.framework} ·</div>}
               </div>
@@ -453,11 +461,13 @@ function ModelDetail({ model }) {
         {(model.metricsSource === "vllm" || model.metricsSource === "sglang") ? <>
           <DetailMetric label={t("TTFT (first token)")} value={ms.ttft.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.ttft.now / 8)} color="violet" />
           <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
+          <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 10)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
           <DetailMetric label={t("Requests / sec")}     value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
           <DetailMetric label={t("KV-cache")}           value={ms.kv.now.toFixed(1)} unit="%" bar={Math.min(100, ms.kv.now)} color={ms.kv.now > 80 ? "bad" : ms.kv.now > 65 ? "hot" : "violet"} />
         </> : model.metricsSource === "llamacpp" ? <>
           {/* llama.cpp /metrics 暴露 TPOT/throughput/running, 不暴露 TTFT/KV/e2e */}
           <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
+          <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit="" bar={Math.min(100, ms.running.now * 10)} color="ok" />
           <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)", lineHeight: 1.7 }}>
             {t("llama.cpp /metrics does not expose TTFT / KV% / e2e histograms · shown as — honestly")}
           </div>

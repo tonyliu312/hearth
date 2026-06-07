@@ -102,7 +102,8 @@
   }
   function makeModelMetrics() {
     const empty = () => ({ now: 0, hist: Array(SPARK).fill(0) });
-    return { tps: empty(), ttft: empty(), tpot: empty(), rps: empty(), kv: empty() };
+    return { tps: empty(), ttft: empty(), tpot: empty(), rps: empty(), kv: empty(),
+             running: empty(), waiting: empty() };
   }
   function resetLive() {
     // wipe & reinitialize all keys in place — preserves the `live` reference
@@ -439,6 +440,7 @@
           ms[k].now = v; ms[k].hist.shift(); ms[k].hist.push(v); };
         upd("tps", lv.tps); upd("rps", lv.rps); upd("kv", lv.kv);
         upd("ttft", lv.ttft); upd("tpot", lv.tpot);
+        upd("running", lv.running); upd("waiting", lv.waiting);  // 并发(执行中)+ 排队
         next.push(e);
       });
       const keep = new Set(next.map((x) => x.id));
