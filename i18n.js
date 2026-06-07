@@ -73,6 +73,7 @@
       // model detail / table
       "Throughput · last 32 ticks": "吞吐 · 近 32 拍",
       "TTFT (first token)": "TTFT（首 token）", "TPOT (per token)": "TPOT（每 token）",
+      "Concurrency · running": "并发 · 执行中", "running": "执行中", "queued": "排队中",
       "Requests / sec": "请求/秒",
       "Route · ": "路由 · ",
       "TTFT / TPOT": "TTFT / TPOT", "KV-cache": "KV 缓存",
@@ -186,6 +187,7 @@
       "Run nvidia-smi dmon": "執行 nvidia-smi dmon", "Reboot": "重啟節點",
       "Throughput · last 32 ticks": "吞吐 · 近 32 拍",
       "TTFT (first token)": "TTFT（首 token）", "TPOT (per token)": "TPOT（每 token）",
+      "Concurrency · running": "並發 · 執行中", "running": "執行中", "queued": "排隊中",
       "Requests / sec": "請求/秒",
       "Route · ": "路由 · ",
       "TTFT / TPOT": "TTFT / TPOT", "KV-cache": "KV 快取",
