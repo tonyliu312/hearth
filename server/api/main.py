@@ -29,6 +29,10 @@ from fastapi.responses import StreamingResponse
 # ── Config ─────────────────────────────────────────────────────────
 PROM_URL    = os.environ.get("PROMETHEUS_URL",    "http://host.docker.internal:9090")
 NODEEXP_URL = os.environ.get("NODE_EXPORTER_URL", "http://host.docker.internal:9100")
+# Atlas 这块 ASUS ROG 板 hwmon collector(asus WMI/EC + nct6798 走 ACPI 串行读)
+# 单次 scrape 稳定 3-5s,EC 偶发争用会更久。直采超时必须远高于此,否则后台
+# 双采(_atlas_node_live)任一次超时即把 Atlas 误判为 offline。
+NODEEXP_TIMEOUT = float(os.environ.get("NODE_EXPORTER_TIMEOUT", "12.0"))
 AM_URL      = os.environ.get("ALERTMANAGER_URL",  "http://host.docker.internal:9093")
 LITELLM_URL = os.environ.get("LITELLM_URL",       "http://host.docker.internal:4000")
 LITELLM_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
@@ -200,7 +204,7 @@ async def _scrape_node_exporter() -> dict[str, list[dict]]:
     """抓一次宿主 node-exporter，按指标名归并 [{labels, value}]。"""
     out: dict[str, list[dict]] = {}
     try:
-        r = await client.get(f"{NODEEXP_URL}/metrics", timeout=5.0)
+        r = await client.get(f"{NODEEXP_URL}/metrics", timeout=NODEEXP_TIMEOUT)
         r.raise_for_status()
         for line in r.text.splitlines():
             if not line or line[0] == "#":
@@ -990,6 +994,22 @@ def _merge_scrape(dicts: list[dict]) -> dict:
     return acc
 
 
+def _rate(a: dict, b: dict, key: str, dt: float) -> float:
+    """counter→rate。首采样缺失(scrape 失败 → 空 dict)或 counter reset 时返回 0,
+    绝不把整段生命周期累计值当作单个 0.5s 窗口的吞吐——否则 tps 会炸成
+    `累计token/0.5` 的天文数字(实测 6798/0.5≈13.6k 的幽灵峰值)。"""
+    pa, pb = a.get(key), b.get(key)
+    if pa is None or pb is None or pb < pa:
+        return 0.0
+    return (pb - pa) / dt
+
+
+def _gauge(a: dict, b: dict, key: str) -> float:
+    """瞬时 gauge(并发/排队):取两次采样的峰值,降低短请求落在采样间隙
+    被整体漏成 0 的概率(单点采一个每 ~2.5s 才刷的瞬时值代表性差)。"""
+    return max(a.get(key, 0.0), b.get(key, 0.0))
+
+
 @app.get("/api/models")
 async def models_list():
     disco = await _disco_cached()
@@ -1016,10 +1036,8 @@ async def models_list():
             a = _merge_scrape([s1.get(b) or {} for b in vb])
             b = _merge_scrape([s2.get(b) or {} for b in vb])
             dt = 0.5
-            tps = max(0.0, (b.get("vllm:generation_tokens_total", 0)
-                            - a.get("vllm:generation_tokens_total", 0)) / dt)
-            rps = max(0.0, (b.get("vllm:request_success_total", 0)
-                            - a.get("vllm:request_success_total", 0)) / dt)
+            tps = _rate(a, b, "vllm:generation_tokens_total", dt)
+            rps = _rate(a, b, "vllm:request_success_total", dt)
             tcnt = b.get("vllm:time_to_first_token_seconds_count", 0)
             tsum = b.get("vllm:time_to_first_token_seconds_sum", 0)
             ttft = (tsum / tcnt * 1000) if tcnt else 0
@@ -1028,8 +1046,8 @@ async def models_list():
             tpot = (psum / pcnt * 1000) if pcnt else 0
             kv = b.get("vllm:kv_cache_usage_perc", 0) * 100 / max(1, len(vb))
             e2e_b = b.get("__e2e_buckets") or {}
-            running = b.get("vllm:num_requests_running", 0)
-            waiting = b.get("vllm:num_requests_waiting", 0)
+            running = _gauge(a, b, "vllm:num_requests_running")
+            waiting = _gauge(a, b, "vllm:num_requests_waiting")
             state = "serving" if running > 0 or tps > 0 else "idle"
             live = {"tps": round(tps, 1), "rps": round(rps, 3),
                     "ttft": round(ttft, 1), "tpot": round(tpot, 1),
@@ -1044,16 +1062,13 @@ async def models_list():
             a = _merge_scrape([l1.get(b) or {} for b in lb])
             b = _merge_scrape([l2.get(b) or {} for b in lb])
             dt = 0.5
-            tps = max(0.0, (b.get("llamacpp:tokens_predicted_total", 0)
-                            - a.get("llamacpp:tokens_predicted_total", 0)) / dt)
-            # tpot: 解码耗时差 / 解码 token 差 → ms/token
-            d_tok = max(0.0, b.get("llamacpp:tokens_predicted_total", 0)
-                            - a.get("llamacpp:tokens_predicted_total", 0))
-            d_sec = max(0.0, b.get("llamacpp:tokens_predicted_seconds_total", 0)
-                            - a.get("llamacpp:tokens_predicted_seconds_total", 0))
+            tps = _rate(a, b, "llamacpp:tokens_predicted_total", dt)
+            # tpot: 解码耗时差 / 解码 token 差 → ms/token(两采样齐备才算,缺则留 0)
+            d_tok = _rate(a, b, "llamacpp:tokens_predicted_total", 1.0)
+            d_sec = _rate(a, b, "llamacpp:tokens_predicted_seconds_total", 1.0)
             tpot = (d_sec / d_tok * 1000) if d_tok > 0 else 0
-            running = b.get("llamacpp:requests_processing", 0)
-            waiting = b.get("llamacpp:requests_deferred", 0)
+            running = _gauge(a, b, "llamacpp:requests_processing")
+            waiting = _gauge(a, b, "llamacpp:requests_deferred")
             state = "serving" if running > 0 or tps > 0 else "idle"
             # llama.cpp /metrics 不暴露 TTFT/e2e 直方图/KV% → 留 0 诚实标"未测",
             # 不伪造；rps 同理(无 request_success_total)。前端 metrics=llamacpp 可
@@ -1068,8 +1083,7 @@ async def models_list():
             a = _merge_scrape([g1.get(b) or {} for b in gb])
             b = _merge_scrape([g2.get(b) or {} for b in gb])
             dt = 0.5
-            tps = max(0.0, (b.get("sglang:generation_tokens_total", 0)
-                            - a.get("sglang:generation_tokens_total", 0)) / dt)
+            tps = _rate(a, b, "sglang:generation_tokens_total", dt)
             tcnt = b.get("sglang:time_to_first_token_seconds_count", 0)
             tsum = b.get("sglang:time_to_first_token_seconds_sum", 0)
             ttft = (tsum / tcnt * 1000) if tcnt else 0
@@ -1078,8 +1092,8 @@ async def models_list():
             tpot = (isum / icnt * 1000) if icnt else 0
             kv = b.get("sglang:token_usage", 0) * 100 / max(1, len(gb))
             e2e_b = b.get("__e2e_buckets") or {}
-            running = b.get("sglang:num_running_reqs", 0)
-            waiting = b.get("sglang:num_queue_reqs", 0)
+            running = _gauge(a, b, "sglang:num_running_reqs")
+            waiting = _gauge(a, b, "sglang:num_queue_reqs")
             state = "serving" if running > 0 or tps > 0 else "idle"
             live = {"tps": round(tps, 1), "rps": 0,
                     "ttft": round(ttft, 1), "tpot": round(tpot, 1),
