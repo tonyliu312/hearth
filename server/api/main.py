@@ -694,6 +694,20 @@ async def _ctx_of(base: str) -> int:
         return 0
 
 
+async def _served_name(base: str) -> str:
+    """后端(vLLM/OpenAI 兼容)自报的 served-model-name = /v1/models .data[0].id。
+    这是该 endpoint 真正加载的权重身份,优先于网关上可能过时的路由别名——
+    运维换载模型时常只新增网关路由、忘删旧路由,导致一个 base 挂多名,
+    若按字母序挑主名会显错(实测 .156:8000 已换 minimax-m3,旧 deepseek-v4-flash
+    路由仍在 → 字母序误选 deepseek)。"""
+    try:
+        r = await client.get(f"{base}/v1/models", timeout=3.0)
+        r.raise_for_status()
+        return str(r.json()["data"][0].get("id") or "")
+    except Exception:
+        return ""
+
+
 _DISCO = {"ts": 0.0, "models": None}
 _DISCO_TTL = 25.0          # 部署拓扑变化慢；富指标(tps/kv)仍每 snapshot 直采
 _DISCO_TASK = None
@@ -722,14 +736,18 @@ async def _discover() -> list[dict]:
     for rt, bs in route_bases.items():
         for b in bs:
             base_routes.setdefault(b, set()).add(rt)
+    # 后端自报的 served-model-name 是"实际加载了什么"的真相,优先于网关别名
+    served = {b: await _served_name(b) for b in base_routes}
 
-    def _primary(routes: set) -> str:
+    def _primary(routes: set, sv: str) -> str:
+        if sv and sv in routes:          # 后端实际加载的模型名优先(抗网关路由漂移)
+            return sv
         non_alias = sorted(r for r in routes if r not in _ALIAS_ROUTES)
         return non_alias[0] if non_alias else sorted(routes)[0]
 
     models: dict[str, dict] = {}
     for b, routes in base_routes.items():
-        prt = _primary(routes)
+        prt = _primary(routes, served.get(b, ""))
         meta = _meta_for(prt)
         mm = models.setdefault(prt, {
             "id": prt, "route": f"litellm/{prt}", "display": meta["display"],
