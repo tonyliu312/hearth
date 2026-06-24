@@ -740,8 +740,19 @@ async def _discover() -> list[dict]:
     served = {b: await _served_name(b) for b in base_routes}
 
     def _primary(routes: set, sv: str) -> str:
-        if sv and sv in routes:          # 后端实际加载的模型名优先(抗网关路由漂移)
-            return sv
+        # 后端实际加载的模型名优先(抗网关路由漂移)。后端 served-name 常带量化
+        # 后缀(minimax-m3-awq)而网关路由不带(minimax-m3),故精确匹配之外再做
+        # 边界前缀容错:取与 served-name 在 `-` 段边界上互为前缀、且最长的路由。
+        if sv:
+            nsv = sv.lower().replace("_", "-")
+            best = None
+            for r in routes:
+                nr = r.lower().replace("_", "-")
+                if nsv == nr or nsv.startswith(nr + "-") or nr.startswith(nsv + "-"):
+                    if best is None or len(nr) > len(best.lower()):
+                        best = r
+            if best:
+                return best
         non_alias = sorted(r for r in routes if r not in _ALIAS_ROUTES)
         return non_alias[0] if non_alias else sorted(routes)[0]
 
