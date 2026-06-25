@@ -65,7 +65,7 @@ function App() {
 
   // Active nav-link tracking on scroll
   useEffect(() => {
-    const ids = ["overview","cluster","nodes","models","telemetry","fabric"];
+    const ids = ["overview","cluster","nodes","models","training","telemetry","fabric"];
     const links = Array.from(document.querySelectorAll(".nav-links a"));
     const sections = ids.map((id) => document.getElementById(id)).filter(Boolean);
     const onScroll = () => {
@@ -93,6 +93,7 @@ function App() {
         <Cluster />
         <NodesSection />
         <ModelsSection />
+        <TrainingSection />
         <TelemetrySection />
         <FabricSection />
         <footer className="foot">
