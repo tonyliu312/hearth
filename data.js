@@ -87,6 +87,9 @@
       reqTotal: 0, tokTotal: 0, latP50: 0, latP95: 0, uptimeSec: 0,
     },
     log: [], alerts: [],
+    // 训练可观测性(Phase 1 纯 obs 底座);trainingHist 驱动 sparkline
+    training: { nodes: [], summary: {} },
+    trainingHist: { util: [], roce: [] },
   };
 
   function makeNodeMetrics() {
@@ -359,6 +362,18 @@
       // absent or sensor stale); the UI treats null as "—", not 0.
       live.power = p.cluster.power || null;
       live.env   = p.cluster.env   || null;
+    }
+    // ── training(Phase 1 纯 obs 底座)──
+    if (p.training) {
+      live.training = p.training;
+      const s = p.training.summary || {};
+      const rollT = (key, v) => {
+        const a = live.trainingHist[key];
+        if (a.length < HIST) { while (a.length < HIST) a.push(v); }
+        else { a.push(v); a.shift(); }
+      };
+      rollT("util", s.utilAvg || 0);
+      rollT("roce", (s.roceRxMBps || 0) + (s.roceTxMBps || 0));
     }
     // ── nodes：后端是运行时权威全集。前端动态对齐——后端发什么节点就显
     //    什么(id 任意, 不要求匹配前端静态目录)。静态 NODES 仅 mock 模式用;

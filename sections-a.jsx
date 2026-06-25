@@ -61,6 +61,7 @@ function Nav({ onOpenCmd }) {
         <a href="#cluster" onClick={close}>{t("Cluster")}</a>
         <a href="#nodes" onClick={close}>{t("Nodes")}</a>
         <a href="#models" onClick={close}>{t("Models")}</a>
+        <a href="#training" onClick={close}>{t("Training")}</a>
         <a href="#telemetry" onClick={close}>{t("Telemetry")}</a>
         <a href="#fabric" onClick={close}>{t("Fabric")}</a>
       </nav>

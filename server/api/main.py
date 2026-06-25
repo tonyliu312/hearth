@@ -26,6 +26,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tfevents  # 零依赖 tfevents 标量解析(训练信号 Phase 2)
+
 # ── Config ─────────────────────────────────────────────────────────
 PROM_URL    = os.environ.get("PROMETHEUS_URL",    "http://host.docker.internal:9090")
 NODEEXP_URL = os.environ.get("NODE_EXPORTER_URL", "http://host.docker.internal:9100")
@@ -545,6 +548,203 @@ async def cluster():
         "power": await _ha_power(),
         "env":   await _ha_env(),
     }
+
+
+# ── Training observability (Phase 1: 纯 obs 只读底座, 对训练零影响) ──────
+# 训练节点 = kind "unified-arm-soc"(GB10). 全部指标来自已在采的 DCGM(L1, ~0% GPU
+# 开销)+ node-exporter, 经 obs-prometheus 联邦只读 PromQL —— 不碰 Spark 节点、不改
+# DCGM、不开 profiling。覆盖体系 Layer C(GPU 健康)/D(RoCE 互联)/E(静默 stall 检测)。
+# Layer A/B(loss/grad-norm/step/ETA/MFU)需训练框架信号源, 见 docs/training-observability.md Phase 2。
+_GB10_OBS = [n["obs_node"] for n in NODES
+             if n.get("kind") == "unified-arm-soc" and n.get("obs_node")]
+
+# ── Phase 2: 训练框架信号(loss/grad-norm/step/ETA/acceptance)──────────
+# 源 = leader rank-0 写的 TensorBoard tfevents(SpecForge --report-to tensorboard)。
+# Hearth(Atlas)经免密 SSH 只读 cat 最新 tfevents → 零依赖解析 → 派生。对训练零影响
+# (只读一个每 ~50 步更新的小文件,不碰 GPU/作业)。文件不存在时优雅返回 present=False。
+# tag 约定(见 docs/training-observability.md / 训练记录 §4.5):train/ploss_* · grad_norm
+# · lr · acceptance_rate_* · acc_*;step = Event.step。下一轮训练起才有 tfevents。
+TRAIN_TFEVENTS_HOST = os.environ.get("TRAIN_TFEVENTS_HOST", "tony@192.168.1.156")
+TRAIN_TFEVENTS_GLOB = os.environ.get("TRAIN_TFEVENTS_GLOB",
+                                     "/home/tony/m3-train-out/runs/*.tfevents.*")
+TRAIN_TOTAL_STEPS   = int(os.environ.get("TRAIN_TOTAL_STEPS", "6240"))  # 20ep×312(batch4)
+_TRAIN_SIG = {"ts": 0.0, "data": {"present": False}}
+_TRAIN_SIG_TTL = 20.0      # tfevents 每 ~50 步(分钟级)更新, 无需频繁拉
+
+
+async def _fetch_tfevents() -> bytes:
+    """免密 SSH 从 leader 节点 cat 最新 tfevents(二进制安全)。失败/无文件 → b''。"""
+    host = TRAIN_TFEVENTS_HOST
+    if host in ("", "local"):                       # 本地路径模式(文件已在 Atlas)
+        import glob
+        fs = sorted(glob.glob(TRAIN_TFEVENTS_GLOB), key=os.path.getmtime)
+        if not fs:
+            return b""
+        try:
+            return Path(fs[-1]).read_bytes()
+        except Exception:
+            return b""
+    remote = (f'f=$(ls -t {TRAIN_TFEVENTS_GLOB} 2>/dev/null | head -1); '
+              f'[ -n "$f" ] && cat "$f"')
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", host, remote,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+        return out or b""
+    except Exception:
+        return b""
+
+
+def _mean_latest(series: dict, prefix: str):
+    """对一组 prefix* 的 tag, 取各自最后值的均值(忽略缺失)。返回 (mean|None, step|None)。"""
+    vals, step = [], None
+    for tag, pts in series.items():
+        if tag.startswith(prefix) and pts:
+            vals.append(pts[-1][2]); step = max(step or 0, pts[-1][0])
+    return (sum(vals) / len(vals) if vals else None), step
+
+
+def _mean_curve(series: dict, prefix: str, cap: int = 80):
+    """对 prefix* 各 tag 按 step 对齐求均值 → 降采样到 ≤cap 点的曲线。"""
+    by_step = {}
+    for tag, pts in series.items():
+        if not tag.startswith(prefix):
+            continue
+        for step, _w, val in pts:
+            by_step.setdefault(step, []).append(val)
+    if not by_step:
+        return []
+    steps = sorted(by_step)
+    curve = [sum(by_step[s]) / len(by_step[s]) for s in steps]
+    if len(curve) > cap:                            # 均匀降采样保留趋势
+        idx = [round(i * (len(curve) - 1) / (cap - 1)) for i in range(cap)]
+        curve = [curve[i] for i in idx]
+    return [round(v, 4) for v in curve]
+
+
+async def _train_signal() -> dict:
+    now = time.time()
+    if now - _TRAIN_SIG["ts"] < _TRAIN_SIG_TTL:
+        return _TRAIN_SIG["data"]
+    _TRAIN_SIG["ts"] = now
+    raw = await _fetch_tfevents()
+    if not raw:
+        _TRAIN_SIG["data"] = {"present": False}
+        return _TRAIN_SIG["data"]
+    try:
+        s = tfevents.series(raw)
+    except Exception:
+        _TRAIN_SIG["data"] = {"present": False}
+        return _TRAIN_SIG["data"]
+    if not s:
+        _TRAIN_SIG["data"] = {"present": False}
+        return _TRAIN_SIG["data"]
+    loss, step_l = _mean_latest(s, "train/ploss")
+    acc, step_a = _mean_latest(s, "train/acceptance_rate")
+    gn = (s.get("train/grad_norm") or [(0, 0, None)])[-1][2]
+    lr = (s.get("train/lr") or [(0, 0, None)])[-1][2]
+    step = max([p[-1][0] for p in s.values() if p] or [0])
+    # per-step 时间 = 最近两个不同 step 的 Δwall/Δstep(取 grad_norm 或任一密集 tag)
+    ref = s.get("train/grad_norm") or s.get("train/ploss_0") or next(iter(s.values()), [])
+    per_step = None
+    if len(ref) >= 2 and ref[-1][0] > ref[-2][0]:
+        dw, ds = ref[-1][1] - ref[-2][1], ref[-1][0] - ref[-2][0]
+        if ds > 0 and dw > 0:
+            per_step = dw / ds
+    eta = ((TRAIN_TOTAL_STEPS - step) * per_step) if (per_step and step < TRAIN_TOTAL_STEPS) else None
+    last_wall = max([p[-1][1] for p in s.values() if p] or [0])
+    _TRAIN_SIG["data"] = {
+        "present": True,
+        "step": int(step), "totalSteps": TRAIN_TOTAL_STEPS,
+        "progress": round(step / TRAIN_TOTAL_STEPS, 4) if TRAIN_TOTAL_STEPS else 0,
+        "loss": round(loss, 4) if loss is not None else None,
+        "lossSeries": _mean_curve(s, "train/ploss"),
+        "gradNorm": round(gn, 3) if gn is not None else None,
+        "lr": lr,
+        "acceptanceRate": round(acc, 4) if acc is not None else None,
+        "accSeries": _mean_curve(s, "train/acceptance_rate"),
+        "perStepSec": round(per_step, 2) if per_step else None,
+        "etaSec": int(eta) if eta else None,
+        "staleSec": int(now - last_wall) if last_wall else None,  # 距最近写入(卡死侦测)
+        "mfu": None,    # 框架不计算; 需 GB10 bf16 峰值, 待填(见训练记录 §4.5)
+    }
+    return _TRAIN_SIG["data"]
+
+
+async def _training_payload() -> dict:
+    if not _GB10_OBS:
+        return {"nodes": [], "summary": {}}
+    # obs_node 标签均为安全字符(spark-34d3 等);不用 re.escape——它会把 `-` 转成 `\-`,
+    # 而 Prometheus RE2 拒绝该转义 → 查询报错变空值(踩过)。
+    sel = "|".join(_GB10_OBS)
+    nf = f'{{node=~"{sel}"}}'
+    (util, power, gtemp, mtemp, fb_used, fb_free, xid, ecc_sbe, ecc_dbe,
+     mem_pct, roce_rx, roce_tx, ib_down) = await asyncio.gather(
+        promql(f"DCGM_FI_DEV_GPU_UTIL{nf}"),
+        promql(f"DCGM_FI_DEV_POWER_USAGE{nf}"),
+        promql(f"DCGM_FI_DEV_GPU_TEMP{nf}"),
+        promql(f"DCGM_FI_DEV_MEMORY_TEMP{nf}"),
+        promql(f"DCGM_FI_DEV_FB_USED{nf}"),
+        promql(f"DCGM_FI_DEV_FB_FREE{nf}"),
+        promql(f"DCGM_FI_DEV_XID_ERRORS{nf}"),
+        promql(f"DCGM_FI_DEV_ECC_SBE_VOL_TOTAL{nf}"),
+        promql(f"DCGM_FI_DEV_ECC_DBE_VOL_TOTAL{nf}"),
+        # GB10 统一内存占用%(OOM 关键 —— 训练贴内存上限跑, 实测 OOM 会硬重启节点)
+        promql(f'(1 - node_memory_MemAvailable_bytes{nf} / node_memory_MemTotal_bytes{nf}) * 100'),
+        # 东西向 CX-7 RoCE 真实吞吐(IB port_data 计数, ×4 lanes→bytes 约定 → MB/s)
+        promql(f"sum by (node) (rate(node_infiniband_port_data_received_bytes_total{nf}[1m])) * 4 / 1048576"),
+        promql(f"sum by (node) (rate(node_infiniband_port_data_transmitted_bytes_total{nf}[1m])) * 4 / 1048576"),
+        promql(f"sum by (node) (node_infiniband_link_downed_total{nf})"),
+    )
+    U, P, GT, MT, FU, FF, XID, ES, ED, MEM, RX, TX, IBD = (
+        _by(x, "node") for x in (util, power, gtemp, mtemp, fb_used, fb_free,
+                                 xid, ecc_sbe, ecc_dbe, mem_pct, roce_rx, roce_tx, ib_down))
+    nodes = []
+    for o in _GB10_OBS:
+        fbu, fbf = FU.get(o, 0), FF.get(o, 0)
+        fbt = fbu + fbf
+        nodes.append({
+            "id": OBS_TO_ID.get(o, o), "obs": o,
+            "util": round(U.get(o, 0), 1), "power": round(P.get(o, 0), 1),
+            "tempGpu": round(GT.get(o, 0), 1), "tempMem": round(MT.get(o, 0), 1),
+            "memPct": round(MEM.get(o, 0), 1),                       # 统一内存占用%(OOM)
+            "fbUsedPct": round(fbu / fbt * 100, 1) if fbt else 0,    # GPU framebuffer 占用%
+            "xid": int(XID.get(o, 0)), "eccSbe": int(ES.get(o, 0)), "eccDbe": int(ED.get(o, 0)),
+            "roceRxMBps": round(RX.get(o, 0), 1), "roceTxMBps": round(TX.get(o, 0), 1),
+            "ibLinkDowned": int(IBD.get(o, 0)),
+        })
+    if not nodes:
+        return {"ts": time.time(), "nodes": [], "summary": {}}
+    utils = [n["util"] for n in nodes]
+    powers = [n["power"] for n in nodes]
+    med_p = sorted(powers)[len(powers) // 2]
+    # 静默 stall 启发(NCCL 卡死特征: GPU util 满载但功率塌、RoCE 归零, 仪表盘"全绿"却零进度):
+    # 高 util + 东西向带宽近零 + 功率显著低于活跃中位 → 嫌疑(保守阈值, 仅提示非硬告警;
+    # 精确判活性须 Layer A 步进, 见 Phase 2)。
+    for n in nodes:
+        n["stallSuspect"] = bool(
+            n["util"] >= 90 and (n["roceRxMBps"] + n["roceTxMBps"]) < 2
+            and med_p > 0 and n["power"] < med_p * 0.6)
+    summary = {
+        "nodes": len(nodes),
+        "active": sum(1 for u in utils if u >= 50),       # util≥50 视为参与训练
+        "utilAvg": round(sum(utils) / len(utils), 1),
+        "utilSkew": round(max(utils) - min(utils), 1),    # straggler 粗信号(底座近似)
+        "powerTotal": round(sum(powers), 1),
+        "roceRxMBps": round(sum(n["roceRxMBps"] for n in nodes), 1),
+        "roceTxMBps": round(sum(n["roceTxMBps"] for n in nodes), 1),
+        "anyXid": any(n["xid"] for n in nodes),
+        "anyEccDbe": any(n["eccDbe"] for n in nodes),
+        "stallSuspect": any(n["stallSuspect"] for n in nodes),
+    }
+    signal = await _train_signal()                 # Phase 2 训练框架信号(缺则 present=False)
+    return {"ts": time.time(), "nodes": nodes, "summary": summary, "signal": signal}
+
+
+@app.get("/api/training")
+async def training():
+    return await _training_payload()
 
 
 # ── HA-derived cluster fields (gracefully null when HA exporter absent) ─
@@ -1344,11 +1544,11 @@ _SNAP_TTL = 2.5
 async def _build_snapshot() -> dict:
     nodes = await _node_payload()                 # 贵, 只算一次
     log = await _litellm_request_log(40)
-    cl, models = await asyncio.gather(cluster(), models_list())
+    cl, models, training = await asyncio.gather(cluster(), models_list(), _training_payload())
     al = await _alerts(nodes, log)                # 复用 nodes/log, 不重复跑
     await _notify_alerts(al)                       # 推送渠道(跳变才发, 不阻塞失败)
     return {"ts": time.time(), "cluster": cl, "nodes": nodes,
-            "models": models, "alerts": al, "log": log}
+            "models": models, "alerts": al, "log": log, "training": training}
 
 
 _SNAP_TASK = None
