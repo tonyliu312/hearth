@@ -83,18 +83,40 @@ Hearth 只读 PromQL,**不碰 Spark 节点、不改 DCGM、不开 profiling**:
   大概率 NCCL 卡死。**不需训练框架任何数据,DCGM 现有信号即可算** → Tier-1 告警
 - **straggler 提示**:跨 4 节点的 util/功率/带宽偏斜(底座近似;精确值需 Layer A 步进)
 
-### Phase 2 — 需一个只读训练信号源(需用户指定,不碰作业)
-Loss / grad-norm / step / LR / MFU / ETA 必须从训练框架已有日志读。只读接法:
-- TensorBoard event 文件 / wandb export / JSON-lines 日志 → Hearth 加解析器
-- 或训练框架暴露 prometheus endpoint → Hearth 直采
-- MFU 从 step-time + 模型 FLOPs/step 推算(给常数)
+### Phase 2 — 训练框架信号:可插拔多源适配器(已实现)
+> 开源项目 / 用户场景多样 → **不绑定单一框架**。Hearth 把不同来源归一化到一套规范 schema,
+> 经免密 SSH 只读 cat / 本地读(对训练零影响),`TRAIN_SOURCE=auto` 按 json→prom→tfevents 探测。
 
-> 只需用户告知"训练把指标写到哪",不翻作业配置、不改训练。
+**支持的源(`server/api/main.py` `_TRAIN_READERS`)**:
+| 源 | 适用 | 读取 | 字段映射 |
+|---|---|---|---|
+| `json` | 训练侧 exporter 写的 metrics JSON(原子替换)| `TRAIN_METRICS_JSON` | `_norm_snapshot` 别名表 |
+| `prom` | Prometheus textfile / endpoint(node_exporter textfile,任何 prom 框架)| `TRAIN_METRICS_PROM`,剥 `TRAIN_PROM_PREFIXES` | 同上 |
+| `tfevents` | TensorBoard event(PyTorch/HF/Lightning/Keras 通用)| `TRAIN_TFEVENTS_GLOB` | `tfevents.py` 零依赖解析 |
+
+**规范 schema**(`/api/training.signal`,缺字段→null,缺源→`present:false` 优雅降级):
+`source · step · totalSteps · progress · epoch · loss · lossSeries · lossParts ·
+gradNorm · lr · acceptance(0–1) · accSeries · meanAccept(≥1, 投机解码核心) ·
+meanAcceptSeries · perStepSec · etaSec · staleSec · mfu`
+
+**字段别名容错**(`_g()` / `_norm_snapshot`):跨框架字段名归一,例:
+`global_step|step|iteration` → step;`loss|train_loss|total_loss` → loss;
+`cond_acc_0|acceptance_rate_0|acceptance` → acceptance;`mean_accept_est|accept_length` → meanAccept;
+`steps_per_sec|it_per_sec`、`eta_seconds|eta`、`progress_pct|progress`。
+
+**自派生**(源省略时补全):`perStepSec` 用累积 (step,ts) 自算;`totalSteps` 从带 progress 的样本反推并锁定缓存;`etaSec=(total−step)×perStepSec`;`staleSec=now−ts`(写入停滞侦测)。
+**快照源历史**:json/prom 只给当前值 → Hearth 按 step 跨轮累积 loss/acc/meanAccept 曲线(`_TRAIN_HIST`)。
+
+**加新框架** = 给字段补别名,或在 `_TRAIN_READERS` 加一个返回规范 schema 的 reader。
+**MFU** 仍 null:框架多不计算,需各自峰值 FLOPs(GB10 bf16 待填)。
+
+> 只读"训练把指标写到哪"(env 配源/路径/HOST,`HOST=local` 走本地),不翻作业配置、不改训练。
 
 ## 5. 路线
 
-先上 **Phase 1**(本仓已实现:`/api/training` + Training section,纯 obs 只读,训练零影响)。
-待用户给出训练信号源,叠 **Phase 2** 补全 loss/ETA/MFU。
+- **Phase 1 已上线**:`/api/training` + Training section,纯 obs 只读底座(GPU/RoCE/stall/straggler)。
+- **Phase 2 已上线**:多源训练信号适配器(json/prom/tfevents auto 探测)→ loss/step/ETA/acceptance/meanAccept。
+- 待补:**MFU**(需 GB10 bf16 峰值 FLOPs);grad-norm(部分框架未记录则显 —)。
 
 ---
 ## 参考
