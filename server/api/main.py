@@ -558,37 +558,50 @@ async def cluster():
 _GB10_OBS = [n["obs_node"] for n in NODES
              if n.get("kind") == "unified-arm-soc" and n.get("obs_node")]
 
-# ── Phase 2: 训练框架信号(loss/grad-norm/step/ETA/acceptance)──────────
-# 源 = leader rank-0 写的 TensorBoard tfevents(SpecForge --report-to tensorboard)。
-# Hearth(Atlas)经免密 SSH 只读 cat 最新 tfevents → 零依赖解析 → 派生。对训练零影响
-# (只读一个每 ~50 步更新的小文件,不碰 GPU/作业)。文件不存在时优雅返回 present=False。
-# tag 约定(见 docs/training-observability.md / 训练记录 §4.5):train/ploss_* · grad_norm
-# · lr · acceptance_rate_* · acc_*;step = Event.step。下一轮训练起才有 tfevents。
-TRAIN_TFEVENTS_HOST = os.environ.get("TRAIN_TFEVENTS_HOST", "tony@192.168.1.156")
+# ── Phase 2: 训练框架信号 —— 可插拔多源适配器 ──────────────────────────
+# 开源项目 / 用户场景多样 → 不绑定单一框架。三类通用来源归一化到一套规范 schema:
+#   1) json     — 训练侧 exporter 写的 metrics JSON(原子替换)。最通用的自定义格式。
+#   2) prom     — Prometheus textfile / endpoint(node_exporter textfile,任何 prom 兼容框架)。
+#   3) tfevents — TensorBoard event 文件(PyTorch/HF/Lightning/Keras 通用)。零依赖解析。
+# 全部经免密 SSH 只读 cat / 本地读,对训练零影响。`auto` 按 json→prom→tfevents 顺序探测。
+# 字段映射在 _norm_snapshot/_signal_from_tfevents 内做(别名容错),新框架只需补别名或加一个 reader。
+# 规范 schema 见 docs/training-observability.md「Phase 2 多源」。
+TRAIN_SOURCE = os.environ.get("TRAIN_SOURCE", "auto")          # auto|json|prom|tfevents|off
+TRAIN_HOST   = os.environ.get("TRAIN_METRICS_HOST", "tony@192.168.1.156")  # ""/"local"=本地
+TRAIN_JSON   = os.environ.get("TRAIN_METRICS_JSON", "/home/tony/m3-spec-out/train_metrics.json")
+TRAIN_PROM   = os.environ.get("TRAIN_METRICS_PROM", "/home/tony/m3-spec-out/train_metrics.prom")
 TRAIN_TFEVENTS_GLOB = os.environ.get("TRAIN_TFEVENTS_GLOB",
                                      "/home/tony/m3-train-out/runs/*.tfevents.*")
-TRAIN_TOTAL_STEPS   = int(os.environ.get("TRAIN_TOTAL_STEPS", "6240"))  # 20ep×312(batch4)
+# prom 指标前缀(剥离后映射到规范字段);多框架前缀都列上, 命中即剥
+TRAIN_PROM_PREFIXES = tuple(p for p in os.environ.get(
+    "TRAIN_PROM_PREFIXES", "speculators_train_,train_,train/").split(",") if p)
+TRAIN_TOTAL_STEPS = int(os.environ.get("TRAIN_TOTAL_STEPS", "0")) or None  # 0=从 progress 自动推
 _TRAIN_SIG = {"ts": 0.0, "data": {"present": False}}
-_TRAIN_SIG_TTL = 20.0      # tfevents 每 ~50 步(分钟级)更新, 无需频繁拉
+_TRAIN_SIG_TTL = 12.0      # exporter ~10s 刷新; 同步节拍
+_TRAIN_HIST = {}           # 快照源(json/prom 只给当前值)→ 跨轮累积历史驱动曲线
+_TRAIN_TOTAL_CACHE = None  # 一旦某样本带 progress_pct → 反推 total 锁定, 供后续无 progress 样本复用
 
 
-async def _fetch_tfevents() -> bytes:
-    """免密 SSH 从 leader 节点 cat 最新 tfevents(二进制安全)。失败/无文件 → b''。"""
-    host = TRAIN_TFEVENTS_HOST
-    if host in ("", "local"):                       # 本地路径模式(文件已在 Atlas)
-        import glob
-        fs = sorted(glob.glob(TRAIN_TFEVENTS_GLOB), key=os.path.getmtime)
-        if not fs:
+async def _read_bytes(spec: str, is_glob: bool = False) -> bytes:
+    """读训练侧文件(免密 SSH cat 或本地)。失败/不存在 → b''。二进制安全(tfevents)。"""
+    host = TRAIN_HOST
+    if host in ("", "local"):
+        import glob as _glob
+        path = spec
+        if is_glob:
+            fs = sorted(_glob.glob(spec), key=os.path.getmtime)
+            path = fs[-1] if fs else None
+        if not path or not os.path.exists(path):
             return b""
         try:
-            return Path(fs[-1]).read_bytes()
+            return Path(path).read_bytes()
         except Exception:
             return b""
-    remote = (f'f=$(ls -t {TRAIN_TFEVENTS_GLOB} 2>/dev/null | head -1); '
-              f'[ -n "$f" ] && cat "$f"')
+    cmd = (f'f=$(ls -t {spec} 2>/dev/null | head -1); [ -n "$f" ] && cat "$f"'
+           if is_glob else f'cat {spec} 2>/dev/null')
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", host, remote,
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", host, cmd,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
         return out or b""
@@ -596,8 +609,116 @@ async def _fetch_tfevents() -> bytes:
         return b""
 
 
+def _accum(key: str, step, val, cap: int = 120):
+    """快照源历史累积:按 step 去重追加;step 回退(新 run)→ 重置该 key。"""
+    if val is None or step is None:
+        return
+    buf = _TRAIN_HIST.setdefault(key, [])
+    if buf and step < buf[0][0]:
+        buf.clear()
+    if buf and buf[-1][0] == step:
+        buf[-1] = (step, val)
+    elif not buf or step > buf[-1][0]:
+        buf.append((step, val))
+    if len(buf) > cap:
+        del buf[:len(buf) - cap]
+
+
+def _hist_series(key: str, cap: int = 80):
+    vals = [v for _s, v in _TRAIN_HIST.get(key, [])]
+    if len(vals) > cap:
+        idx = [round(i * (len(vals) - 1) / (cap - 1)) for i in range(cap)]
+        vals = [vals[i] for i in idx]
+    return [round(v, 4) for v in vals]
+
+
+def _g(flat: dict, *names):
+    """别名容错取值:返回首个存在且非 None 的字段。"""
+    for n in names:
+        v = flat.get(n)
+        if v is not None:
+            return v
+    return None
+
+
+def _norm_snapshot(flat: dict, source: str, now: float):
+    """json / prom 快照(当前值)→ 规范 schema。字段名做跨框架别名映射。"""
+    step = _g(flat, "global_step", "step", "iteration")
+    if step is None:
+        return None
+    step = int(step)
+    loss = _g(flat, "loss", "train_loss", "total_loss")
+    acc = _g(flat, "cond_acc_0", "acceptance_rate_0", "acceptance", "accept_rate")
+    mean_accept = _g(flat, "mean_accept_est", "mean_accept", "accept_length", "avg_accept_len")
+    lr = _g(flat, "lr", "learning_rate")
+    gn = _g(flat, "grad_norm", "gradnorm", "grad_norm_clip")
+    epoch = _g(flat, "epoch")
+    sps = _g(flat, "steps_per_sec", "it_per_sec", "iter_per_sec")
+    eta = _g(flat, "eta_seconds", "eta", "eta_sec")
+    prog = _g(flat, "progress_pct", "progress")
+    ts = _g(flat, "ts", "timestamp", "time")
+    global _TRAIN_TOTAL_CACHE
+    total = TRAIN_TOTAL_STEPS or _TRAIN_TOTAL_CACHE
+    if prog and prog > 0:                       # 带 progress 的样本 → 反推并锁定 total
+        total = round(step / (prog / 100.0))
+        _TRAIN_TOTAL_CACHE = total
+    progress = (prog / 100.0) if prog is not None else (step / total if total else None)
+    # per-step:优先用源给的 steps_per_sec;否则用累积 (step,ts) 自派生(exporter 常省略)
+    per_step = (1.0 / sps) if sps else None
+    if per_step is None and ts:
+        _accum("_ts", step, ts)
+        b = _TRAIN_HIST.get("_ts", [])
+        if len(b) >= 2 and b[-1][0] > b[-2][0] and b[-1][1] > b[-2][1]:
+            per_step = (b[-1][1] - b[-2][1]) / (b[-1][0] - b[-2][0])
+    if eta is None and per_step and total and step < total:
+        eta = (total - step) * per_step
+    _accum("loss", step, loss)
+    _accum("acc", step, acc)
+    _accum("meanAccept", step, mean_accept)
+    parts = {k.split("_", 1)[1]: round(float(v), 4)
+             for k, v in flat.items() if k.startswith("loss_")}
+    return {
+        "present": True, "source": source,
+        "step": step, "totalSteps": int(total) if total else None,
+        "progress": round(progress, 4) if progress is not None else None,
+        "epoch": int(epoch) if epoch is not None else None,
+        "loss": round(loss, 4) if loss is not None else None,
+        "lossSeries": _hist_series("loss"),
+        "lossParts": parts or None,
+        "gradNorm": round(gn, 3) if gn is not None else None,
+        "lr": lr,
+        "acceptance": round(acc, 4) if acc is not None else None,
+        "accSeries": _hist_series("acc"),
+        "meanAccept": round(mean_accept, 3) if mean_accept is not None else None,
+        "meanAcceptSeries": _hist_series("meanAccept"),
+        "perStepSec": round(per_step, 2) if per_step else None,
+        "etaSec": int(eta) if eta else None,
+        "staleSec": int(now - ts) if ts else None,
+        "mfu": _g(flat, "mfu"),
+    }
+
+
+def _parse_prom_text(text: str) -> dict:
+    """Prometheus 文本 → {规范字段: float}(剥离 TRAIN_PROM_PREFIXES 前缀)。"""
+    flat = {}
+    for line in text.splitlines():
+        if not line or line[0] == "#":
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0].split("{")[0]
+        for p in TRAIN_PROM_PREFIXES:
+            if name.startswith(p):
+                name = name[len(p):]; break
+        try:
+            flat[name] = float(parts[1])
+        except ValueError:
+            pass
+    return flat
+
+
 def _mean_latest(series: dict, prefix: str):
-    """对一组 prefix* 的 tag, 取各自最后值的均值(忽略缺失)。返回 (mean|None, step|None)。"""
     vals, step = [], None
     for tag, pts in series.items():
         if tag.startswith(prefix) and pts:
@@ -606,7 +727,6 @@ def _mean_latest(series: dict, prefix: str):
 
 
 def _mean_curve(series: dict, prefix: str, cap: int = 80):
-    """对 prefix* 各 tag 按 step 对齐求均值 → 降采样到 ≤cap 点的曲线。"""
     by_step = {}
     for tag, pts in series.items():
         if not tag.startswith(prefix):
@@ -617,58 +737,105 @@ def _mean_curve(series: dict, prefix: str, cap: int = 80):
         return []
     steps = sorted(by_step)
     curve = [sum(by_step[s]) / len(by_step[s]) for s in steps]
-    if len(curve) > cap:                            # 均匀降采样保留趋势
+    if len(curve) > cap:
         idx = [round(i * (len(curve) - 1) / (cap - 1)) for i in range(cap)]
         curve = [curve[i] for i in idx]
     return [round(v, 4) for v in curve]
 
 
-async def _train_signal() -> dict:
-    now = time.time()
-    if now - _TRAIN_SIG["ts"] < _TRAIN_SIG_TTL:
-        return _TRAIN_SIG["data"]
-    _TRAIN_SIG["ts"] = now
-    raw = await _fetch_tfevents()
-    if not raw:
-        _TRAIN_SIG["data"] = {"present": False}
-        return _TRAIN_SIG["data"]
+def _signal_from_tfevents(raw: bytes, now: float):
+    """TensorBoard tfevents → 规范 schema(有完整历史)。EAGLE 接受率 tag = acceptance_rate_*。"""
     try:
         s = tfevents.series(raw)
     except Exception:
-        _TRAIN_SIG["data"] = {"present": False}
-        return _TRAIN_SIG["data"]
+        return None
     if not s:
-        _TRAIN_SIG["data"] = {"present": False}
-        return _TRAIN_SIG["data"]
-    loss, step_l = _mean_latest(s, "train/ploss")
-    acc, step_a = _mean_latest(s, "train/acceptance_rate")
+        return None
+    loss, _ = _mean_latest(s, "train/ploss")
+    if loss is None:
+        loss, _ = _mean_latest(s, "train/loss")
+    acc, _ = _mean_latest(s, "train/acceptance_rate")
     gn = (s.get("train/grad_norm") or [(0, 0, None)])[-1][2]
     lr = (s.get("train/lr") or [(0, 0, None)])[-1][2]
     step = max([p[-1][0] for p in s.values() if p] or [0])
-    # per-step 时间 = 最近两个不同 step 的 Δwall/Δstep(取 grad_norm 或任一密集 tag)
     ref = s.get("train/grad_norm") or s.get("train/ploss_0") or next(iter(s.values()), [])
     per_step = None
     if len(ref) >= 2 and ref[-1][0] > ref[-2][0]:
         dw, ds = ref[-1][1] - ref[-2][1], ref[-1][0] - ref[-2][0]
         if ds > 0 and dw > 0:
             per_step = dw / ds
-    eta = ((TRAIN_TOTAL_STEPS - step) * per_step) if (per_step and step < TRAIN_TOTAL_STEPS) else None
+    total = TRAIN_TOTAL_STEPS
+    eta = ((total - step) * per_step) if (per_step and total and step < total) else None
     last_wall = max([p[-1][1] for p in s.values() if p] or [0])
-    _TRAIN_SIG["data"] = {
-        "present": True,
-        "step": int(step), "totalSteps": TRAIN_TOTAL_STEPS,
-        "progress": round(step / TRAIN_TOTAL_STEPS, 4) if TRAIN_TOTAL_STEPS else 0,
+    loss_curve = _mean_curve(s, "train/ploss") or _mean_curve(s, "train/loss")
+    return {
+        "present": True, "source": "tfevents",
+        "step": int(step), "totalSteps": int(total) if total else None,
+        "progress": round(step / total, 4) if total else None,
+        "epoch": None,
         "loss": round(loss, 4) if loss is not None else None,
-        "lossSeries": _mean_curve(s, "train/ploss"),
-        "gradNorm": round(gn, 3) if gn is not None else None,
-        "lr": lr,
-        "acceptanceRate": round(acc, 4) if acc is not None else None,
+        "lossSeries": loss_curve, "lossParts": None,
+        "gradNorm": round(gn, 3) if gn is not None else None, "lr": lr,
+        "acceptance": round(acc, 4) if acc is not None else None,
         "accSeries": _mean_curve(s, "train/acceptance_rate"),
+        "meanAccept": None, "meanAcceptSeries": [],
         "perStepSec": round(per_step, 2) if per_step else None,
         "etaSec": int(eta) if eta else None,
-        "staleSec": int(now - last_wall) if last_wall else None,  # 距最近写入(卡死侦测)
-        "mfu": None,    # 框架不计算; 需 GB10 bf16 峰值, 待填(见训练记录 §4.5)
+        "staleSec": int(now - last_wall) if last_wall else None,
+        "mfu": None,
     }
+
+
+async def _reader_json(now):
+    raw = await _read_bytes(TRAIN_JSON)
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw.decode("utf-8", "replace"))
+    except Exception:
+        return None
+    return _norm_snapshot(d, "json", now) if isinstance(d, dict) else None
+
+
+async def _reader_prom(now):
+    raw = await _read_bytes(TRAIN_PROM)
+    if not raw:
+        return None
+    flat = _parse_prom_text(raw.decode("utf-8", "replace"))
+    return _norm_snapshot(flat, "prom", now) if flat else None
+
+
+async def _reader_tfevents(now):
+    raw = await _read_bytes(TRAIN_TFEVENTS_GLOB, is_glob=True)
+    if not raw:
+        return None
+    return _signal_from_tfevents(raw, now)
+
+
+_TRAIN_READERS = [("json", _reader_json), ("prom", _reader_prom),
+                  ("tfevents", _reader_tfevents)]
+
+
+async def _train_signal() -> dict:
+    """多源探测训练信号。auto = 按序首个产出数据者胜;否则用指定源。缺失 → present:False。"""
+    now = time.time()
+    if now - _TRAIN_SIG["ts"] < _TRAIN_SIG_TTL:
+        return _TRAIN_SIG["data"]
+    _TRAIN_SIG["ts"] = now
+    if TRAIN_SOURCE == "off":
+        _TRAIN_SIG["data"] = {"present": False}
+        return _TRAIN_SIG["data"]
+    order = (_TRAIN_READERS if TRAIN_SOURCE == "auto"
+             else [(n, f) for n, f in _TRAIN_READERS if n == TRAIN_SOURCE])
+    for _name, fn in order:
+        try:
+            sig = await fn(now)
+        except Exception:
+            sig = None
+        if sig and sig.get("present"):
+            _TRAIN_SIG["data"] = sig
+            return sig
+    _TRAIN_SIG["data"] = {"present": False}
     return _TRAIN_SIG["data"]
 
 

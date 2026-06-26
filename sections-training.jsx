@@ -24,7 +24,11 @@ function _SignalBlock({ sig }) {
   const { t } = useLang();
   const loss = sig.lossSeries || [];
   const acc = sig.accSeries || [];
+  const macc = sig.meanAcceptSeries || [];
   const lossDelta = loss.length >= 2 ? loss[loss.length - 1] - loss[0] : 0;
+  // mean accept length 是 EAGLE/投机解码核心 KPI:≥2.3 达标(对应单流 ≥50 t/s),1.0=无效
+  const ma = sig.meanAccept;
+  const maTone = ma == null ? "var(--ink-3)" : ma >= 2.3 ? "var(--ok)" : ma >= 1.6 ? "var(--warn)" : "var(--bad)";
   const stale = sig.staleSec != null && sig.staleSec > 600;   // >10min 无写入 = 疑似停
   const pct = Math.round((sig.progress || 0) * 100);
   return (
@@ -41,24 +45,29 @@ function _SignalBlock({ sig }) {
           <div className="num" style={{ fontSize: 26 }}>{sig.loss != null ? sig.loss.toFixed(3) : "—"}</div>
           <Sparkline data={loss} height={56} color="var(--accent)" />
         </div>
-        {/* step + progress + ETA */}
+        {/* step + epoch + progress + ETA */}
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>{t("step")}</div>
-          <div className="num" style={{ fontSize: 20 }}>{sig.step}<small style={{ fontSize: 12, opacity: .5 }}> / {sig.totalSteps}</small></div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>
+            {t("step")}{sig.epoch != null ? ` · ep ${sig.epoch}` : ""}
+          </div>
+          <div className="num" style={{ fontSize: 20 }}>{sig.step}<small style={{ fontSize: 12, opacity: .5 }}>{sig.totalSteps ? ` / ${sig.totalSteps}` : ""}</small></div>
           <div style={{ height: 4, background: "rgba(255,255,255,.08)", borderRadius: 3, margin: "6px 0" }}>
             <div style={{ width: `${pct}%`, height: "100%", background: "var(--accent)", borderRadius: 3 }} />
           </div>
           <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-2)" }}>
-            {t("ETA")} {_fmtEta(sig.etaSec)} · {sig.perStepSec != null ? sig.perStepSec.toFixed(1) + "s/it" : "—"}
+            {t("ETA")} {_fmtEta(sig.etaSec)} · {sig.perStepSec != null ? sig.perStepSec.toFixed(2) + "s/it" : "—"}
           </div>
         </div>
-        {/* acceptance rate — EAGLE3 核心指标 */}
+        {/* mean accept length — EAGLE/投机解码核心 KPI(≥2.3 达标);acceptance% 作辅 */}
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>{t("acceptance")}</div>
-          <div className="num" style={{ fontSize: 20, color: "var(--violet)" }}>
-            {sig.acceptanceRate != null ? (sig.acceptanceRate * 100).toFixed(1) + "%" : "—"}
+          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>
+            {t("mean accept")} <small style={{ opacity: .55 }}>{t("≥2.3")}</small>
           </div>
-          <Sparkline data={acc} height={28} color="var(--violet)" />
+          <div className="num" style={{ fontSize: 20, color: maTone }}>
+            {ma != null ? ma.toFixed(2) + "×" : "—"}
+            {sig.acceptance != null && <small style={{ fontSize: 11, opacity: .6, color: "var(--ink-3)" }}> · {(sig.acceptance * 100).toFixed(0)}% acc</small>}
+          </div>
+          <Sparkline data={macc.length ? macc : acc} height={28} color="var(--violet)" />
         </div>
         {/* grad-norm + lr + 状态 */}
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -208,14 +217,14 @@ function TrainingSection() {
         {nodes.map((n) => <_RankCard key={n.id} n={n} slowest={slowest} />)}
       </div>
 
-      {/* signal 缺失时的诚实提示;有信号时改提示 MFU 仍待接 */}
+      {/* signal 缺失时的诚实提示;有信号时标注来源 + MFU 仍待接 */}
       {!sig.present ? (
         <div style={{ marginTop: 16, fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)", lineHeight: 1.6 }}>
-          {t("Loss · grad-norm · step / ETA · acceptance — awaiting tfevents from the training leader (appears once the next run writes to runs/*.tfevents). Not fabricated. See docs/training-observability.md.")}
+          {t("Loss · step / ETA · accept rate — awaiting a training signal source (auto-detects JSON / Prometheus / TensorBoard from the leader). Not fabricated. See docs/training-observability.md.")}
         </div>
       ) : (
         <div style={{ marginTop: 16, fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--ink-3)" }}>
-          {t("MFU pending GB10 bf16 peak FLOPs. Signal from leader tfevents · refresh ~20s.")}
+          {t("source")}: {sig.source} · {t("refresh ~12s")} · {t("MFU pending GB10 bf16 peak FLOPs.")}
         </div>
       )}
     </section>
