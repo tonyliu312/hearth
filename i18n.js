@@ -134,6 +134,23 @@
       "Home AI Compute Monitor": "家庭 AI 算力监控",
       // lang switcher
       "Language": "语言",
+      // ── Training section ──
+      "Training": "训练",
+      "Training · distributed": "训练 · 分布式",
+      "The long ": "漫长的", "run.": "训练。",
+      "Substrate health for the 4×GB10 training cluster — per-rank GPU, unified-memory headroom, CX-7 RoCE collective bandwidth, and a silent-stall heuristic. Read-only from obs; zero training impact.":
+        "4×GB10 训练集群的底座健康 —— 逐卡 GPU、统一内存余量、CX-7 RoCE 集合通信带宽,以及静默卡死启发式检测。只读自 obs,对训练零影响。",
+      "Ranks active": "活跃 rank", "util ≥ 50%": "利用率 ≥ 50%", "avg util": "平均利用率",
+      "RoCE Σ rx+tx": "RoCE Σ 收+发", "GPU power Σ": "GPU 功率 Σ",
+      "healthy": "健康", "idle": "空闲", "GPU fault": "GPU 故障",
+      "stall suspected": "疑似卡死", "skew": "偏斜", "util": "利用率",
+      "straggler": "落后节点", "stall?": "卡死?", "mem": "内存", "comm stalled?": "通信卡死?",
+      "train loss": "训练 loss", "step": "步", "mean accept": "平均接受",
+      "grad norm": "梯度范数", "lr": "学习率", "logging": "记录中", "write stalled?": "写入停滞?",
+      "source": "来源", "refresh ~12s": "刷新 ~12s",
+      "MFU pending GB10 bf16 peak FLOPs.": "MFU 待 GB10 bf16 峰值 FLOPs。",
+      "Loss · step / ETA · accept rate — awaiting a training signal source (auto-detects JSON / Prometheus / TensorBoard from the leader). Not fabricated. See docs/training-observability.md.":
+        "Loss · 步 / ETA · 接受率 —— 等待训练信号源(从 leader 自动探测 JSON / Prometheus / TensorBoard)。不伪造。见 docs/training-observability.md。",
     },
     "zh-TW": {
       "Overview": "總覽", "Cluster": "叢集", "Nodes": "節點", "Models": "模型",
@@ -243,6 +260,23 @@
       "Home AI Compute Center": "家庭智算中心",
       "Home AI Compute Monitor": "家庭 AI 算力監控",
       "Language": "語言",
+      // ── Training section ──
+      "Training": "訓練",
+      "Training · distributed": "訓練 · 分散式",
+      "The long ": "漫長的", "run.": "訓練。",
+      "Substrate health for the 4×GB10 training cluster — per-rank GPU, unified-memory headroom, CX-7 RoCE collective bandwidth, and a silent-stall heuristic. Read-only from obs; zero training impact.":
+        "4×GB10 訓練叢集的底座健康 —— 逐卡 GPU、統一記憶體餘量、CX-7 RoCE 集合通訊頻寬,以及靜默卡死啟發式偵測。唯讀自 obs,對訓練零影響。",
+      "Ranks active": "活躍 rank", "util ≥ 50%": "利用率 ≥ 50%", "avg util": "平均利用率",
+      "RoCE Σ rx+tx": "RoCE Σ 收+發", "GPU power Σ": "GPU 功率 Σ",
+      "healthy": "健康", "idle": "空閒", "GPU fault": "GPU 故障",
+      "stall suspected": "疑似卡死", "skew": "偏斜", "util": "利用率",
+      "straggler": "落後節點", "stall?": "卡死?", "mem": "記憶體", "comm stalled?": "通訊卡死?",
+      "train loss": "訓練 loss", "step": "步", "mean accept": "平均接受",
+      "grad norm": "梯度範數", "lr": "學習率", "logging": "記錄中", "write stalled?": "寫入停滯?",
+      "source": "來源", "refresh ~12s": "刷新 ~12s",
+      "MFU pending GB10 bf16 peak FLOPs.": "MFU 待 GB10 bf16 峰值 FLOPs。",
+      "Loss · step / ETA · accept rate — awaiting a training signal source (auto-detects JSON / Prometheus / TensorBoard from the leader). Not fabricated. See docs/training-observability.md.":
+        "Loss · 步 / ETA · 接受率 —— 等待訓練訊號源(從 leader 自動偵測 JSON / Prometheus / TensorBoard)。不偽造。見 docs/training-observability.md。",
     },
   };
 
