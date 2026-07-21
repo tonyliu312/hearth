@@ -33,6 +33,7 @@ Hearth 在一个面板里给你看:
 - **节点状态**——GPU / 显存 / CPU / 内存 / 温度 / 功率,实时刷新
 - **模型状态**——哪些在服务、吞吐(t/s)、TTFT、TPOT、KV-cache 占用、p50/p95/p99,**自动从 LiteLLM 网关 / vLLM / llama.cpp 的 `/metrics` 发现**
 - **网关流量**——最近请求、错误、延迟(**直接读 LiteLLM 开源版自带的 Postgres `SpendLogs`,不需要企业版**)
+- **训练任务**——loss 曲线、步数 / ETA、吞吐,外加逐 rank GPU、集合通信互联带宽、straggler 偏斜,以及**静默卡死**(hung-collective)启发式检测。训练信号从 TensorBoard event 文件 / Prometheus textfile·endpoint / 指标 JSON **自动探测**——只读,对训练零影响
 - **诚实标注空缺**——后端不暴露的指标(比如 llama.cpp 没有 TTFT 直方图),界面显示 `—`,**绝不伪造数字**
 
 **目标场景**:家庭算力集群,1 到 ~10 节点,异构 GPU,可能跑多种推理框架,可能挂在 LiteLLM 网关后。**单机也能跑**。
@@ -63,6 +64,7 @@ open http://localhost:8080
 
 - 📊 **真实指标,绝不伪造**——每一个数字都源自真实后端;缺失的数据诚实标注
 - 🔌 **自动发现**——模型、后端、up/down 状态从 LiteLLM 网关 `/health` + 直接探测各后端获得(网关抽风时也不会误判全停)
+- 🏋️ **训练可观测性**——不只推理,还看分布式训练:loss / 梯度范数 / 步数→ETA、逐 rank 偏斜、集合通信互联吞吐,以及**静默卡死检测**(典型的 hung-collective:GPU 利用率满格却零进度)。信号源在 TensorBoard / Prometheus / JSON 之间自动探测,任何写其中一种的训练框架都能接——见 [`docs/training-observability.md`](docs/training-observability.md)
 - 🌍 **多语言**——English、简体中文、繁體中文(欢迎 PR 加更多语言)
 - 📱 **移动端友好**——响应式布局、移动端汉堡菜单
 - 🎨 **Apple 风格审美**——深色主题、等宽数字、细边框
@@ -80,7 +82,9 @@ open http://localhost:8080
 | **node_exporter + dcgm-exporter** (Prometheus) | ✅ 走你的 obs 栈 | CPU · 内存 · GPU 利用率 · 显存 · 网络 · 磁盘 · 温度 · 功率 | 🟢 开箱即用 |
 | **SGLang** `sglang:*` | ✅ 完整 *(未对 live 实测)* | tps · TTFT · TPOT · KV% · p50/p95/p99 · 运行/等待 | 🟢 开箱即用 — 指标名不符请反馈 |
 | **Ollama** 原生 | 🟡 仅 OS 层 | 模型级指标缺失(Ollama 默认不暴露 `/metrics`) | 🟡 v0.2.0 适配器或把 Ollama 挂在 LiteLLM 后面 |
-| **告警推送**(Telegram / LINE / ntfy / Slack…) | 🔴 尚未 | 告警规则触发到 UI,无推送渠道 | 🔴 v0.2.0 |
+| **训练信号** — TensorBoard `*.tfevents` · Prometheus textfile/endpoint · 指标 JSON | ✅ 自动探测,零依赖解析 | loss · 梯度范数 · lr · step/总步 · epoch · ETA · s-it — 三种源归一化为同一 schema | 🟢 开箱即用 — 任何写其中一种的训练框架(PyTorch / HF / Lightning / Keras / 自写 exporter) |
+| **分布式训练底座**(DCGM + node_exporter) | ✅ 走你的 obs 栈 | 逐 rank GPU · 统一内存余量 · RoCE/InfiniBand 集合通信带宽 · straggler 偏斜 · 静默卡死启发式 | 🟢 开箱即用 |
+| **告警推送**(ntfy / Telegram / Discord / Slack / webhook) | ✅ 触发 + 恢复 | 节点掉线 / 过热 / 内存 / 磁盘 / 网关错误 → 推到手机,仅状态跳变时发(不刷屏) | 🟢 开箱即用 · 见 [`docs/alerts.md`](docs/alerts.md) |
 
 > **alpha 现实期望值**:今天最佳组合是 *LiteLLM 网关 + vLLM 与/或 llama.cpp + node_exporter + dcgm-exporter*。Hearth 就是在这套组合上开发和测过的。其他配置能用,但有上面注的 caveat。
 

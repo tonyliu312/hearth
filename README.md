@@ -33,6 +33,7 @@ Hearth shows you, in one place:
 - **Your nodes** — GPU / VRAM / CPU / RAM / temps / power, real-time
 - **Your models** — which are serving, throughput (t/s), TTFT, TPOT, KV-cache, p50/p95/p99 — auto-discovered from your LiteLLM gateway, vLLM, or llama.cpp `/metrics`
 - **Your gateway traffic** — recent requests, errors, latencies (reads LiteLLM's OSS Postgres `SpendLogs` directly — no enterprise license needed)
+- **Your training runs** — loss curve, step / ETA, throughput, plus per-rank GPU, collective-interconnect bandwidth, straggler skew, and a silent-stall (hung-collective) heuristic. The training signal is auto-detected from TensorBoard event files, a Prometheus textfile/endpoint, or a metrics JSON — read-only, zero impact on the run
 - **Honest gaps** — when a backend doesn't expose a metric (e.g. llama.cpp has no TTFT histogram), it shows `—`, not a fake number
 
 Designed for the **home compute cluster** target: 1 to ~10 nodes, mixed GPUs, mixed serving frameworks, possibly behind a LiteLLM gateway. Single-machine setup works too.
@@ -63,6 +64,7 @@ For multi-node configuration, see [`docs/topology.md`](docs/topology.md) (coming
 
 - 📊 **Real metrics, no fakes** — every number shown is sourced from a real backend; missing data is honestly labeled
 - 🔌 **Auto-discovery** — models, backends, and their up/down state are discovered from the LiteLLM gateway `/health` + direct backend probes (resilient if gateway flaps)
+- 🏋️ **Training observability** — distributed runs, not just inference: loss / grad-norm / step→ETA, per-rank skew, collective-interconnect throughput, and silent-stall detection (the classic hung-collective failure where GPUs read 100% util while making zero progress). Signal source is auto-detected across TensorBoard / Prometheus / JSON, so any trainer that writes one of them works — see [`docs/training-observability.md`](docs/training-observability.md)
 - 🌍 **Multi-language** — English, 简体中文, 繁體中文 (PRs welcome for more)
 - 📱 **Mobile-friendly** — responsive layout, mobile hamburger nav
 - 🎨 **Apple-style aesthetic** — dark theme, tabular numerals, subtle borders
@@ -80,6 +82,8 @@ For multi-node configuration, see [`docs/topology.md`](docs/topology.md) (coming
 | **node_exporter + dcgm-exporter** (Prometheus) | ✅ Via your obs stack | CPU · RAM · GPU util · VRAM · network · disk · temps · power | 🟢 Drop-in |
 | **SGLang** `sglang:*` | ✅ Full *(untested-live)* | tps · TTFT · TPOT · KV% · p50/p95/p99 · running · waiting | 🟢 Drop-in — report if metric names differ in your version |
 | **Ollama** native | 🟡 OS-level only | Per-model metrics absent (Ollama doesn't ship `/metrics`) | 🟡 v0.2.0 adapter OR put Ollama behind LiteLLM |
+| **Training signal** — TensorBoard `*.tfevents` · Prometheus textfile/endpoint · metrics JSON | ✅ Auto-detect, zero-dep parser | loss · grad-norm · lr · step/total · epoch · ETA · s-it — normalized across all three sources | 🟢 Drop-in — any trainer that writes one of the three (PyTorch / HF / Lightning / Keras / custom exporter) |
+| **Distributed-training substrate** (DCGM + node_exporter) | ✅ Via your obs stack | Per-rank GPU · unified-memory headroom · RoCE/InfiniBand collective bandwidth · straggler skew · silent-stall heuristic | 🟢 Drop-in |
 | **Alert push** (ntfy / Telegram / Discord / Slack / webhook) | ✅ fire + resolve | node-down / overheat / mem / disk / gateway-errors → your phone, transition-only (no spam) | 🟢 Drop-in · see [`docs/alerts.md`](docs/alerts.md) |
 
 > **alpha reality check**: best fit today is *LiteLLM gateway + vLLM and/or llama.cpp + node_exporter + dcgm-exporter*. That's how Hearth was developed and tested. Other configurations work but with the caveats above.
