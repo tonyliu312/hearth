@@ -33,6 +33,7 @@ Hearth 在一個面板裡呈現:
 - **節點狀態**——GPU / 顯記憶體 / CPU / 記憶體 / 溫度 / 功率,即時更新
 - **模型狀態**——哪些在服務、吞吐(t/s)、TTFT、TPOT、KV-cache 佔用、p50/p95/p99,**自動從 LiteLLM 閘道 / vLLM / llama.cpp 的 `/metrics` 探得**
 - **閘道流量**——近期請求、錯誤、延遲(**直接讀 LiteLLM 開源版自帶的 Postgres `SpendLogs`,不需要企業版**)
+- **訓練任務**——loss 曲線、步數 / ETA、吞吐,外加逐 rank GPU、集合通訊互聯頻寬、straggler 偏斜,以及**靜默卡死**(hung-collective)啟發式偵測。訓練訊號從 TensorBoard event 檔 / Prometheus textfile·endpoint / 指標 JSON **自動偵測**——唯讀,對訓練零影響
 - **誠實標註空缺**——後端不暴露的指標(例如 llama.cpp 沒有 TTFT 直方圖),介面顯示 `—`,**絕不偽造數字**
 
 **目標場景**:家庭算力叢集,1 到 ~10 節點,異構 GPU,可能跑多種推論框架,可能掛在 LiteLLM 閘道後。**單機也能跑**。
@@ -63,6 +64,7 @@ open http://localhost:8080
 
 - 📊 **真實指標,絕不偽造**——每一個數字都源自真實後端;缺失的資料誠實標註
 - 🔌 **自動發現**——模型、後端、up/down 狀態由 LiteLLM 閘道 `/health` + 直接探測各後端取得(閘道偶發抽風時也不會誤判全部下線)
+- 🏋️ **訓練可觀測性**——不只推理,還看分散式訓練:loss / 梯度範數 / 步數→ETA、逐 rank 偏斜、集合通訊互聯吞吐,以及**靜默卡死偵測**(典型的 hung-collective:GPU 使用率滿格卻零進度)。訊號源在 TensorBoard / Prometheus / JSON 之間自動偵測,任何寫其中一種的訓練框架都能接——見 [`docs/training-observability.md`](docs/training-observability.md)
 - 🌍 **多語言**——English、简体中文、繁體中文(歡迎 PR 增加其他語言)
 - 📱 **行動裝置友善**——響應式佈局、行動端漢堡選單
 - 🎨 **Apple 風格美學**——深色主題、等寬數字、細邊框
@@ -80,7 +82,9 @@ open http://localhost:8080
 | **node_exporter + dcgm-exporter** (Prometheus) | ✅ 走你的 obs 棧 | CPU · 記憶體 · GPU 使用率 · 顯記憶體 · 網路 · 磁碟 · 溫度 · 功率 | 🟢 開箱即用 |
 | **SGLang** `sglang:*` | ✅ 完整 *(未對 live 實測)* | tps · TTFT · TPOT · KV% · p50/p95/p99 · 運行/等待 | 🟢 開箱即用 — 指標名不符請反饋 |
 | **Ollama** 原生 | 🟡 僅 OS 層 | 模型層指標缺失(Ollama 預設不暴露 `/metrics`) | 🟡 v0.2.0 轉接器或把 Ollama 掛在 LiteLLM 後面 |
-| **告警推送**(Telegram / LINE / ntfy / Slack…) | 🔴 尚未 | 告警規則觸發到 UI,無推送通道 | 🔴 v0.2.0 |
+| **訓練訊號** — TensorBoard `*.tfevents` · Prometheus textfile/endpoint · 指標 JSON | ✅ 自動偵測,零依賴解析 | loss · 梯度範數 · lr · step/總步 · epoch · ETA · s-it — 三種源歸一化為同一 schema | 🟢 開箱即用 — 任何寫其中一種的訓練框架(PyTorch / HF / Lightning / Keras / 自寫 exporter) |
+| **分散式訓練底座**(DCGM + node_exporter) | ✅ 走你的 obs 堆疊 | 逐 rank GPU · 統一記憶體餘量 · RoCE/InfiniBand 集合通訊頻寬 · straggler 偏斜 · 靜默卡死啟發式 | 🟢 開箱即用 |
+| **告警推送**(ntfy / Telegram / Discord / Slack / webhook) | ✅ 觸發 + 恢復 | 節點掉線 / 過熱 / 記憶體 / 磁碟 / 閘道錯誤 → 推到手機,僅狀態跳變時發(不洗版) | 🟢 開箱即用 · 見 [`docs/alerts.md`](docs/alerts.md) |
 
 > **alpha 現實預期**:今天最佳組合是 *LiteLLM 閘道 + vLLM 與/或 llama.cpp + node_exporter + dcgm-exporter*。Hearth 就是在這套組合上開發與測試的。其他配置能用,但有上面註的 caveat。
 
