@@ -260,7 +260,11 @@
       ns.netOut.now = Math.max(0, ns.netOut.now + (Math.random() - 0.48) * 80);
       ns.smActivity.now = drift(ns.smActivity.now, ns.gpu.now * 0.95, 5);
       ns.pcie.now = Math.max(0, ns.pcie.now + (Math.random() - 0.5) * 40);
-      Object.keys(ns).forEach((k) => { ns[k].hist.shift(); ns[k].hist.push(ns[k].now); });
+      // 只滚动指标对象 — makeNodeMetrics 里还有 up(布尔) 这类非指标字段,
+      // 无脑遍历会 `true.hist.shift()` 抛异常, 整个 mock tick 死掉(含后端挂掉
+      // 时的 mock-fallback 路径)。
+      Object.keys(ns).forEach((k) => { const v = ns[k]; if (!v || !v.hist) return;
+        v.hist.shift(); v.hist.push(v.now); });
     });
     MODELS.forEach((m) => {
       if (m.state !== "serving") return;
@@ -271,7 +275,8 @@
       ms.tpot.now = drift(ms.tpot.now, m.tpot, m.tpot * 0.18);
       ms.rps.now = drift(ms.rps.now, m.rps, m.rps * 0.22);
       ms.kv.now = drift(ms.kv.now, m.kv, 1.8);
-      Object.keys(ms).forEach((k) => { ms[k].hist.shift(); ms[k].hist.push(ms[k].now); });
+      Object.keys(ms).forEach((k) => { const v = ms[k]; if (!v || !v.hist) return;
+        v.hist.shift(); v.hist.push(v.now); });
     });
     const totalTps = MODELS.reduce((a, m) => a + (m.state === "serving" ? live.models[m.id].tps.now : 0), 0);
     const totalRps = MODELS.reduce((a, m) => a + (m.state === "serving" ? live.models[m.id].rps.now : 0), 0);
@@ -296,7 +301,14 @@
 
   function startMock() {
     stopMock(); stopSSE();
-    if (mode !== "mock") seedMock();
+    if (mode !== "mock") {
+      // 从 live 切回来：live 期间 MODELS 被后端列表原地替换(且 startLive 会清空)，
+      // 这里把演示目录装回去，否则 mock 模式下模型区空白/带着上个真实列表。
+      // 深拷贝：live 合并会原地改 MODELS 里的对象，必须隔离演示目录母本。
+      MODELS.length = 0;
+      Array.prototype.push.apply(MODELS, MODELS_CATALOG.map((m) => ({ ...m })));
+      seedMock();
+    }
     mode = "mock"; connStatus = "mock";
     mockTimer = setInterval(mockTick, intervalMs);
     mockTick(); // seed cluster aggregates
@@ -309,6 +321,11 @@
   function startLive() {
     stopMock(); stopSSE();
     mode = "live"; connStatus = "connecting";
+    // 演示目录(MODELS_CATALOG)只属于 mock。live 一进门就清空，宁可显"发现中"
+    // 空态也绝不让演示模型冒充真实部署——踩过的坑：网关(litellm 容器+postgres)
+    // 重启后 30~90s 未就绪时 /api/models 返回 []，而 /api/health 已 ok，
+    // 页面徽章 LIVE、节点真实，模型区却挂着演示目录里的 qwen3-coder/deepseek。
+    MODELS.length = 0;
     resetLive();
     const url = "/api/stream";
     sse = new EventSource(url);
@@ -422,7 +439,10 @@
     //    前端动态对齐——后端返回什么就显什么(新模型自动建条目+live槽，
     //    消失的删掉)，顺序随后端(运行中+vLLM 优先)。不再依赖前端静态目录，
     //    部署怎么变监控自动跟，不漏显也不显错。
-    if (Array.isArray(p.models) && p.models.length) {
+    //    空数组同样是权威答案("网关没有可发现的模型")，必须照单清空 —— 旧版
+    //    多一个 `&& p.models.length` 守卫，把"后端说没有"当成"这拍没数据"而
+    //    保留上一份列表，页面初始那份就是演示目录 → 幽灵模型。
+    if (Array.isArray(p.models)) {
       const byId = new Map(MODELS.map((x) => [x.id, x]));
       const next = [];
       p.models.forEach((m) => {
@@ -443,6 +463,10 @@
         e.tags = Array.isArray(m.tags) ? m.tags : [];
         e.state = m.state;                       // serving|idle|online|stopped
         e.resident = !!lv.resident;              // 真实驻留探针(后端权威)
+        // 后端探不到 served-model-name 且该 endpoint 挂了多条候选路由 → 名字是
+        // 猜的(字母序)，UI 必须标出来，不能拿废弃别名冒充当前部署。
+        e.identityUnverified = !!m.identityUnverified;
+        e.identityCandidates = Array.isArray(m.identityCandidates) ? m.identityCandidates : [];
         e.metricsSource = lv.metrics || "none";
         if (lv.p50 !== undefined) {
           e.p50 = Math.round(lv.p50);

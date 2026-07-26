@@ -363,7 +363,17 @@ function ModelsSection() {
           <React.Fragment key={m.id}>
             <div className="model" data-active={active === m.id ? "1" : "0"} onClick={() => setActive(active === m.id ? null : m.id)}>
               <div className="model-name">
-                <b>{m.display}</b>
+                {/* 后端探不到 served-name 且网关同一 endpoint 挂多条候选路由 →
+                    名字是按字母序猜的(历史上把 minimax-m3 显成 DeepSeek)。标出来。 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <b>{m.display}</b>
+                  {m.identityUnverified && (
+                    <span className="chip warn" style={{ fontFamily: "var(--mono)", fontSize: 9.5, padding: "2px 6px" }}
+                          title={`${t("Backend unreachable — name guessed from gateway routes")}: ${(m.identityCandidates || []).join(" / ")}`}>
+                      {t("identity unverified")}
+                    </span>
+                  )}
+                </div>
                 <span>{m.vendor} · {m.params} · {m.quant} · ctx&nbsp;{m.ctx === 0 ? "—" : m.ctx >= 1e6 ? `${(m.ctx/1e6).toFixed(0)}M` : `${(m.ctx/1024).toFixed(0)}K`}</span>
               </div>
               <div>
@@ -433,6 +443,15 @@ function ModelsSection() {
             )}
           </React.Fragment>
         ))}
+        {/* 空态：网关没返回任何路由(刚重启/网关未就绪)。诚实显空，不拿演示目录顶包。 */}
+        {visible.length === 0 && (
+          <div style={{ padding: "34px 22px", textAlign: "center", fontFamily: "var(--mono)", fontSize: 12, color: "var(--ink-3)" }}>
+            {_MODELS.length === 0
+              ? <>{t("No models discovered — gateway returned no routes.")}<br />
+                  <span style={{ color: "var(--ink-4)", fontSize: 11 }}>{t("Auto-retrying every 25s · nothing is faked while empty")}</span></>
+              : t("No model matches this filter.")}
+          </div>
+        )}
       </div>
     </section>
   );

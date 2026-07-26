@@ -1106,10 +1106,12 @@ async def _discover() -> list[dict]:
     # 后端自报的 served-model-name 是"实际加载了什么"的真相,优先于网关别名
     served = {b: await _served_name(b) for b in base_routes}
 
-    def _primary(routes: set, sv: str) -> str:
+    def _primary(routes: set, sv: str) -> tuple[str, bool, list]:
+        # 返回 (主名, 身份是否已核实, 歧义候选)。
         # 后端实际加载的模型名优先(抗网关路由漂移)。后端 served-name 常带量化
         # 后缀(minimax-m3-awq)而网关路由不带(minimax-m3),故精确匹配之外再做
         # 边界前缀容错:取与 served-name 在 `-` 段边界上互为前缀、且最长的路由。
+        non_alias = sorted(r for r in routes if r not in _ALIAS_ROUTES)
         if sv:
             nsv = sv.lower().replace("_", "-")
             best = None
@@ -1119,21 +1121,29 @@ async def _discover() -> list[dict]:
                     if best is None or len(nr) > len(best.lower()):
                         best = r
             if best:
-                return best
-        non_alias = sorted(r for r in routes if r not in _ALIAS_ROUTES)
-        return non_alias[0] if non_alias else sorted(routes)[0]
+                return best, True, []
+        # 后端不可达(模型没拉起 / 刚重启) → 拿不到 served-name。此时若该 endpoint
+        # 只挂了一条非别名路由,名字无歧义;挂了多条(运维换载只加路由不删旧的)就
+        # 只能按字母序猜,历史上因此把 minimax-m3 显成 DeepSeek。猜可以,但必须
+        # 标记 unverified 让 UI 说清楚,不能拿废弃别名冒充当前部署。
+        fallback = non_alias[0] if non_alias else sorted(routes)[0]
+        return fallback, len(non_alias) <= 1, (non_alias if len(non_alias) > 1 else [])
 
     models: dict[str, dict] = {}
     for b, routes in base_routes.items():
-        prt = _primary(routes, served.get(b, ""))
+        prt, verified, cands = _primary(routes, served.get(b, ""))
         meta = _meta_for(prt)
         mm = models.setdefault(prt, {
             "id": prt, "route": f"litellm/{prt}", "display": meta["display"],
             "vendor": meta["vendor"], "kind": meta["kind"],
             "tags": list(meta["tags"]), "params": "—", "quant": "—",
             "framework": "—", "vram": 0, "ctx": 0,
+            "identityUnverified": False, "identityCandidates": [],
             "_nodes": set(), "_aliases": set(), "_bases": [],
             "up": False, "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": []})
+        if not verified:
+            mm["identityUnverified"] = True
+            mm["identityCandidates"] = sorted(set(mm["identityCandidates"]) | set(cands))
         mm["_bases"].append(b)
         host = _host_of(b)
         if host in IP_TO_ID:
@@ -1426,8 +1436,9 @@ async def models_list():
         lb = m.get("llamacpp_bases") or []
         gb = m.get("sglang_bases") or []
         base_keys = ("id", "display", "vendor", "kind", "params", "quant",
-                     "ctx", "framework", "nodes", "vram", "route", "tags")
-        card = {k: m[k] for k in base_keys}
+                     "ctx", "framework", "nodes", "vram", "route", "tags",
+                     "identityUnverified", "identityCandidates")
+        card = {k: m.get(k) for k in base_keys}
         if vb:                                  # 真实 vLLM 指标（可能多副本汇总）
             a = _merge_scrape([s1.get(b) or {} for b in vb])
             b = _merge_scrape([s2.get(b) or {} for b in vb])
