@@ -49,8 +49,13 @@ function App() {
   }, []);
 
   // Scroll reveal — only for sections; hero is already in.
+  //
+  // ⚠️ 首帧扫一次 DOM 是不够的。数据驱动的 section(Infra/Training)在 live 数据
+  // 到达前返回 null,挂载那一刻不在 DOM 里;等 SSE 首帧到了才插进来。若只在
+  // mount 时 querySelectorAll 一次,这些迟到的 section 永远没人观察 → 卡在
+  // `.reveal { opacity: 0 }` 上,数据全对但页面上看不见(2026-08-09 实际踩到)。
+  // 所以再挂一个 MutationObserver,后来出现的 .reveal 一律补登记。
   useEffect(() => {
-    const els = document.querySelectorAll(".reveal:not(.in)");
     const io = new IntersectionObserver((entries) => {
       entries.forEach((e) => {
         if (e.isIntersecting) {
@@ -59,8 +64,20 @@ function App() {
         }
       });
     }, { threshold: 0.08, rootMargin: "0px 0px -8% 0px" });
-    els.forEach((el) => io.observe(el));
-    return () => io.disconnect();
+
+    const observeAll = (root) => {
+      if (!(root instanceof Element)) return;
+      if (root.classList.contains("reveal") && !root.classList.contains("in")) io.observe(root);
+      root.querySelectorAll(".reveal:not(.in)").forEach((el) => io.observe(el));
+    };
+    observeAll(document.body);
+
+    const mo = new MutationObserver((muts) => {
+      muts.forEach((m) => m.addedNodes.forEach(observeAll));
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+
+    return () => { mo.disconnect(); io.disconnect(); };
   }, []);
 
   // Active nav-link tracking on scroll
@@ -96,6 +113,7 @@ function App() {
         <TrainingSection />
         <TelemetrySection />
         <FabricSection />
+        <InfraSection />
         <footer className="foot">
           <span>{tr("Home AI Compute Monitor")}</span>
           <span>{tr("Prometheus 2.55 · DCGM 3.3 · LiteLLM 1.52 · scrape 15 s · retention 7 d")}</span>

@@ -64,6 +64,7 @@ function Nav({ onOpenCmd }) {
         <a href="#training" onClick={close}>{t("Training")}</a>
         <a href="#telemetry" onClick={close}>{t("Telemetry")}</a>
         <a href="#fabric" onClick={close}>{t("Fabric")}</a>
+        <a href="#infra" onClick={close}>{t("Infra")}</a>
       </nav>
       <div className="nav-right">
         <span className={"dot" + (isReconnect || (isLive && _degraded) ? " warn" : "")} />

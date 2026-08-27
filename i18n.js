@@ -157,6 +157,17 @@
       "MFU pending GB10 bf16 peak FLOPs.": "MFU 待 GB10 bf16 峰值 FLOPs。",
       "Loss · step / ETA · accept rate — awaiting a training signal source (auto-detects JSON / Prometheus / TensorBoard from the leader). Not fabricated. See docs/training-observability.md.":
         "Loss · 步 / ETA · 接受率 —— 等待训练信号源(从 leader 自动探测 JSON / Prometheus / TensorBoard)。不伪造。见 docs/training-observability.md。",
+      // infra
+      "Infra": "基础设施",
+      "Infrastructure · environment": "基础设施 · 环境",
+      "Everything else that ": "其余一切 · ", "can overheat.": "皆会过热",
+      "The switch, the storage, the gateway — the boxes that carry the cluster but don't compute. Temperatures, fans, redundant PSUs and per-disk health, read straight off each device. No control path here; observation only.":
+        "交换机、存储与出口网关 —— 承载集群但不参与计算的那些设备。温度、风扇、冗余电源与逐盘健康,从各设备直接只读采集。此处无控制通路,只做观测。",
+      "single point": "单点", "unreachable": "不可达", "hottest": "最热点",
+      "Temperature": "温度", "Disks": "硬盘", "Power": "电源",
+      "peak": "峰值", "up": "运行",
+      "Scrape failed — values withheld rather than shown stale.":
+        "抓取失败 —— 宁可留空也不显示陈旧值。",
     },
     "zh-TW": {
       "Overview": "總覽", "Cluster": "叢集", "Nodes": "節點", "Models": "模型",
@@ -288,6 +299,17 @@
       "MFU pending GB10 bf16 peak FLOPs.": "MFU 待 GB10 bf16 峰值 FLOPs。",
       "Loss · step / ETA · accept rate — awaiting a training signal source (auto-detects JSON / Prometheus / TensorBoard from the leader). Not fabricated. See docs/training-observability.md.":
         "Loss · 步 / ETA · 接受率 —— 等待訓練訊號源(從 leader 自動偵測 JSON / Prometheus / TensorBoard)。不偽造。見 docs/training-observability.md。",
+      // infra
+      "Infra": "基礎設施",
+      "Infrastructure · environment": "基礎設施 · 環境",
+      "Everything else that ": "其餘一切 · ", "can overheat.": "皆會過熱",
+      "The switch, the storage, the gateway — the boxes that carry the cluster but don't compute. Temperatures, fans, redundant PSUs and per-disk health, read straight off each device. No control path here; observation only.":
+        "交換機、儲存與出口閘道 —— 承載叢集但不參與運算的那些設備。溫度、風扇、冗餘電源與逐碟健康,從各設備直接唯讀採集。此處無控制通路,只做觀測。",
+      "single point": "單點", "unreachable": "不可達", "hottest": "最熱點",
+      "Temperature": "溫度", "Disks": "硬碟", "Power": "電源",
+      "peak": "峰值", "up": "運行",
+      "Scrape failed — values withheld rather than shown stale.":
+        "抓取失敗 —— 寧可留空也不顯示陳舊值。",
     },
   };
 

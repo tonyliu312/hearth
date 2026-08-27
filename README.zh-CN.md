@@ -34,6 +34,7 @@ Hearth 在一个面板里给你看:
 - **模型状态**——哪些在服务、吞吐(t/s)、TTFT、TPOT、KV-cache 占用、p50/p95/p99,**自动从 LiteLLM 网关 / vLLM / llama.cpp 的 `/metrics` 发现**
 - **网关流量**——最近请求、错误、延迟(**直接读 LiteLLM 开源版自带的 Postgres `SpendLogs`,不需要企业版**)
 - **训练任务**——loss 曲线、步数 / ETA、吞吐,外加逐 rank GPU、集合通信互联带宽、straggler 偏斜,以及**静默卡死**(hung-collective)启发式检测。训练信号从 TensorBoard event 文件 / Prometheus textfile·endpoint / 指标 JSON **自动探测**——只读,对训练零影响
+- **你的基础设施**——交换机、NAS、出口路由的温度、风扇、冗余电源、逐盘健康。这些设备不参与计算,却在过热时把整个集群一起带走
 - **诚实标注空缺**——后端不暴露的指标(比如 llama.cpp 没有 TTFT 直方图),界面显示 `—`,**绝不伪造数字**
 
 **目标场景**:家庭算力集群,1 到 ~10 节点,异构 GPU,可能跑多种推理框架,可能挂在 LiteLLM 网关后。**单机也能跑**。
@@ -84,6 +85,7 @@ open http://localhost:8080
 | **Ollama** 原生 | 🟡 仅 OS 层 | 模型级指标缺失(Ollama 默认不暴露 `/metrics`) | 🟡 v0.2.0 适配器或把 Ollama 挂在 LiteLLM 后面 |
 | **训练信号** — TensorBoard `*.tfevents` · Prometheus textfile/endpoint · 指标 JSON | ✅ 自动探测,零依赖解析 | loss · 梯度范数 · lr · step/总步 · epoch · ETA · s-it — 三种源归一化为同一 schema | 🟢 开箱即用 — 任何写其中一种的训练框架(PyTorch / HF / Lightning / Keras / 自写 exporter) |
 | **分布式训练底座**(DCGM + node_exporter) | ✅ 走你的 obs 栈 | 逐 rank GPU · 统一内存余量 · RoCE/InfiniBand 集合通信带宽 · straggler 偏斜 · 静默卡死启发式 | 🟢 开箱即用 |
+| **基础设施** — MikroTik/RouterOS · 群晖 DSM(SNMP) · OpenWrt(node-exporter-lua) | ✅ 只读 | 机身/芯片温度 · 风扇转速 · 冗余电源状态/功率/电压 · 逐盘温度与状态 · 运行时长 | 🟢 开箱即用 · 见 [`docs/topology.md`](docs/topology.md) `infra:` |
 | **告警推送**(ntfy / Telegram / Discord / Slack / webhook) | ✅ 触发 + 恢复 | 节点掉线 / 过热 / 内存 / 磁盘 / 网关错误 → 推到手机,仅状态跳变时发(不刷屏) | 🟢 开箱即用 · 见 [`docs/alerts.md`](docs/alerts.md) |
 
 > **alpha 现实期望值**:今天最佳组合是 *LiteLLM 网关 + vLLM 与/或 llama.cpp + node_exporter + dcgm-exporter*。Hearth 就是在这套组合上开发和测过的。其他配置能用,但有上面注的 caveat。

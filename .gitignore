@@ -38,6 +38,13 @@ build/
 .DS_Store
 Thumbs.db
 
+# --- local backups (NEVER commit: config backups carry real IPs / device IDs) ---
+# `config/hearth.yaml` is ignored, but its `.bak-*` copies were not — one
+# `git add -A` would have leaked the operator's real topology into a public repo.
+*.bak
+*.bak-*
+*.bak.*
+
 # --- AI assistant scratch (not for OSS repo) ---
 CLAUDE.md
 HANDOFF.md

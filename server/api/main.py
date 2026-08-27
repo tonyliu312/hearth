@@ -914,6 +914,164 @@ async def training():
     return await _training_payload()
 
 
+# ── 基础设施设备(交换机 / NAS)温度与健康 ─────────────────────────────
+# 数据链: 设备 SNMP → obs-snmp-exporter → obs-prometheus → 这里只读聚合。
+# 设备清单来自 config 的 `infra:`;整块缺失 → 返回空列表, 前端 section 不渲染。
+INFRA = HEARTH_CFG.get("infra") or []
+
+# mtxrHealthType → (字段名, 缩放)。1/2/6 是 MikroTik 文档语义;
+# 3(0.1V) 与 5(0.1W) 的缩放是实测标定的 —— CLI `/system/health` 显示 26 W / SNMP 262,
+# 市电 2270 → 227.0 V。设备换代若单位变了, 这两行是唯一要改的地方。
+_MTXR_UNIT = {1: ("celsius", 1.0), 2: ("rpm", 1.0),
+              3: ("volts", 0.1), 5: ("watts", 0.1), 6: ("state", 1.0)}
+
+# 传感器名 → 展示分组。RouterOS 的健康表会随型号增减条目,
+# 认不出的温度项一律落到 "chip", 不丢数据(诚实降级优于静默丢弃)。
+_MTXR_GROUP = {"cpu": "chip", "switch": "chip", "sfp": "chip", "phy": "chip",
+               "board": "board"}
+
+
+def _mtxr_group(sensor: str) -> str:
+    head = sensor.split("-", 1)[0]
+    return _MTXR_GROUP.get(head, "chip")
+
+
+def _psu_slot(sensor: str) -> str | None:
+    """psu1-temperature → 'PSU1';非 psu 项返回 None。"""
+    if not sensor.startswith("psu"):
+        return None
+    return "PSU" + sensor[3:4]
+
+
+async def _infra_mikrotik(dev: str) -> dict:
+    vals, types = await asyncio.gather(
+        promql(f'mtxrHealthValue{{device="{dev}"}}'),
+        promql(f'mtxrHealthType{{device="{dev}"}}'),
+    )
+    tmap = {t["metric"].get("sensor"): int(t["value"]) for t in types}
+    temps, fans, states = [], [], []
+    psus: dict[str, dict] = {}
+    for v in vals:
+        sensor = v["metric"].get("sensor")
+        if not sensor:
+            continue
+        field, scale = _MTXR_UNIT.get(tmap.get(sensor, 0), (None, 1.0))
+        val = v["value"] * scale
+        slot = _psu_slot(sensor)
+        if slot:
+            p = psus.setdefault(slot, {"label": slot})
+            # psuN-state: 0 = ok (与群晖的 1=ok 相反, 别统一化时搞反)
+            if field == "state":
+                p["ok"] = val == 0
+            elif field:
+                p[field] = round(val, 1)
+            continue
+        if field == "celsius":
+            temps.append({"label": sensor.replace("-temperature", ""),
+                          "celsius": round(val), "group": _mtxr_group(sensor)})
+        elif field == "rpm":
+            fans.append({"label": sensor.replace("-speed", ""), "rpm": round(val)})
+        elif field == "state":
+            states.append({"label": sensor.replace("-state", ""), "ok": val == 0})
+    fans.sort(key=lambda f: f["label"])
+    return {"temps": temps, "fans": fans, "states": states,
+            "psus": [psus[k] for k in sorted(psus)], "disks": []}
+
+
+async def _infra_synology(dev: str) -> dict:
+    sysT, diskT, diskS, stat = await asyncio.gather(
+        promql(f'synoSystemTemperature{{device="{dev}"}}'),
+        promql(f'synoDiskTemperature{{device="{dev}"}}'),
+        promql(f'synoDiskStatus{{device="{dev}"}}'),
+        promql('{__name__=~"synoSystemStatus|synoPowerStatus|synoSystemFanStatus'
+               f'|synoCpuFanStatus",device="{dev}"}}'),
+    )
+    # 盘位 ≠ 盘符: SNMP 的 diskIndex 0 对应的是 "Disk 3"。一律按 disk 名对齐排序。
+    okByDisk = {d["metric"].get("disk"): d["value"] == 1 for d in diskS}
+    disks = sorted(
+        ({"name": d["metric"].get("disk", "?"), "celsius": round(d["value"]),
+          "ok": okByDisk.get(d["metric"].get("disk"), True)} for d in diskT),
+        key=lambda d: d["name"])
+    temps = [{"label": "system", "celsius": round(s["value"]), "group": "system"}
+             for s in sysT]
+    states = [{"label": s["metric"]["__name__"]
+               .replace("syno", "").replace("Status", ""),
+               "ok": s["value"] == 1} for s in stat]
+    states.sort(key=lambda s: s["label"])
+    return {"temps": temps, "fans": [], "states": states, "psus": [], "disks": disks}
+
+
+async def _infra_openwrt(dev: str) -> dict:
+    """OpenWrt 路由器 — 走 node-exporter 格式而非 SNMP(设备上没有 snmpd)。
+    温度由自建 lua collector 提供, 指标名与官方 hwmon collector 一致。"""
+    temps, load = await asyncio.gather(
+        promql(f'node_hwmon_temp_celsius{{device="{dev}"}}'),
+        promql(f'node_load1{{device="{dev}"}}'),
+    )
+    out = {"temps": [], "fans": [], "states": [], "psus": [], "disks": []}
+    for t in temps:
+        out["temps"].append({"label": t["metric"].get("sensor", "temp"),
+                             "celsius": round(t["value"]), "group": "chip"})
+    # 路由器没有风扇/电源/硬盘可读, 用 load1 占一个状态位当"还活着且不过载"的信号
+    if load:
+        out["states"].append({"label": f"load {load[0]['value']:.2f}",
+                              "ok": load[0]["value"] < 4})
+    return out
+
+
+async def _infra_payload() -> list[dict]:
+    if not INFRA:
+        return []
+    ups, uptimes, boots, nows = await asyncio.gather(
+        promql('up{job=~"snmp_.*|openwrt"}'),
+        promql('hrSystemUptime{job=~"snmp_.*"}'),          # SNMP 设备: 百分之一秒
+        promql('node_boot_time_seconds{job="openwrt"}'),   # node-exporter 设备: 开机时刻
+        promql('node_time_seconds{job="openwrt"}'),
+    )
+    upByDev = {u["metric"].get("device"): u["value"] == 1 for u in ups}
+    utByDev = {u["metric"].get("device"): u["value"] / 100 for u in uptimes}
+    nowByDev = {n["metric"].get("device"): n["value"] for n in nows}
+    for b in boots:                                        # 设备侧时钟自洽, 不用服务端时间
+        d = b["metric"].get("device")
+        if d in nowByDev:
+            utByDev[d] = nowByDev[d] - b["value"]
+
+    async def one(y: dict) -> dict:
+        dev = y.get("prom_device") or y["id"]
+        src = y.get("source", "")
+        up = upByDev.get(dev, False)
+        blank = {"temps": [], "fans": [], "states": [], "psus": [], "disks": []}
+        if not up:
+            body = blank                      # 抓不到就诚实留空, 不显示上一次的陈值
+        elif src == "mikrotik":
+            body = await _infra_mikrotik(dev)
+        elif src == "synology":
+            body = await _infra_synology(dev)
+        elif src == "openwrt":
+            body = await _infra_openwrt(dev)
+        else:
+            body = blank
+        # hottest 给卡片头部一个可扫读的单一数字 —— 盘温也参与, 它才是 NAS 的风险点
+        pool = ([(t["label"], t["celsius"]) for t in body["temps"]]
+                + [(d["name"], d["celsius"]) for d in body["disks"]]
+                + [(p["label"], p["celsius"]) for p in body["psus"] if "celsius" in p])
+        hottest = max(pool, key=lambda x: x[1]) if pool else None
+        return {"id": y["id"], "name": y.get("name", y["id"]), "ip": y.get("ip", ""),
+                "class": y.get("class", ""), "role": y.get("role_label", ""),
+                "source": src, "critical": bool(y.get("critical")),
+                "up": up,
+                "uptimeSec": round(utByDev[dev]) if dev in utByDev else None,
+                "hottest": {"label": hottest[0], "celsius": hottest[1]} if hottest else None,
+                **body}
+
+    return list(await asyncio.gather(*(one(y) for y in INFRA)))
+
+
+@app.get("/api/infra")
+async def infra():
+    return {"ts": time.time(), "devices": await _infra_payload()}
+
+
 # ── HA-derived cluster fields (gracefully null when HA exporter absent) ─
 async def _ha_power() -> dict:
     # Direct aggregation in PromQL — works without recording rules so the
@@ -1014,6 +1172,17 @@ MODEL_META = {
         "kind": "chat", "tags": ["reasoning"]},
     "deepseek-v4-flash-pp4": {"display": "DeepSeek-V4-Flash · PP4",
         "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "test"]},
+    # 下面三条与 deepseek-v4-flash 是【同一个引擎实例】(head 节点, TP=4 会漂移,
+    # 2026-08-06 在 .188:8000) 的四个入口,
+    # 差别只在网关 hook 注入的 thinking/effort 档位, 不是四个部署。
+    # 不登记的话 _meta_for 会 .title() 推导成 "Deepseek V4 Flash Think Low",
+    # 面板上看起来像"当前部署的是 Think Low 档" —— 2026-08-04 已造成一次误判。
+    "deepseek-v4-flash-think-low": {"display": "DeepSeek-V4-Flash \u00b7 Think 低档(同一实例)",
+        "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "think"]},
+    "deepseek-v4-flash-think": {"display": "DeepSeek-V4-Flash \u00b7 Think 标准档(同一实例)",
+        "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "think"]},
+    "deepseek-v4-flash-think-max": {"display": "DeepSeek-V4-Flash \u00b7 Think 极限档(同一实例)",
+        "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "think"]},
     "minimax-m2.7": {"display": "MiniMax-M2.7", "vendor": "MiniMax",
         "kind": "chat", "tags": ["reasoning"]},
     "gemma-4-31b-abliterated": {"display": "Gemma-4-31B-abliterated",
@@ -1114,6 +1283,13 @@ async def _discover() -> list[dict]:
         non_alias = sorted(r for r in routes if r not in _ALIAS_ROUTES)
         if sv:
             nsv = sv.lower().replace("_", "-")
+            # 精确命中优先:served-name 等于某条路由时,那条就是后端身份本身。
+            # 下面的前缀容错会"取最长",而更长的路由可能只是同实例的档位别名
+            # (deepseek-v4-flash-think-low),不是更精确的身份 —— 不加这一步就会
+            # 被别名挤掉主名(2026-08-06 实测显成 "Think 低档(同一实例)")。
+            for r in routes:
+                if r.lower().replace("_", "-") == nsv:
+                    return r, True, []
             best = None
             for r in routes:
                 nr = r.lower().replace("_", "-")
@@ -1569,21 +1745,6 @@ async def _alerts(nodes=None, log=None):
                     "msg": f"gateway errors · {err}/40",
                     "sub": "LiteLLM 5xx rate elevated recently", "when": "last 40 reqs"})
 
-    # L2 AC controller sensor health: any thermometer the controller is
-    # supposed to monitor that is currently missing forces fail-safe ON
-    # (see ha-controller.py).  Surface each missing sensor as a critical
-    # alert so the operator gets a push.
-    try:
-        miss = await promql("hearth_ac_controller_sensor_health == 0")
-        for r in miss:
-            sensor = r.get("metric", {}).get("sensor", "?")
-            out.append({"key": f"l2:sensor_missing:{sensor}", "sev": "bad",
-                        "msg": f"L2 sensor missing: {sensor}",
-                        "sub": "controller forced AC ON; thermal coverage incomplete",
-                        "when": "live"})
-    except Exception:
-        pass
-
     up = sum(1 for n in nodes if n.get("up"))
     if not out:
         out.append({"key": None, "sev": "ok",
@@ -1722,11 +1883,13 @@ _SNAP_TTL = 2.5
 async def _build_snapshot() -> dict:
     nodes = await _node_payload()                 # 贵, 只算一次
     log = await _litellm_request_log(40)
-    cl, models, training = await asyncio.gather(cluster(), models_list(), _training_payload())
+    cl, models, training, infra_dev = await asyncio.gather(
+        cluster(), models_list(), _training_payload(), _infra_payload())
     al = await _alerts(nodes, log)                # 复用 nodes/log, 不重复跑
     await _notify_alerts(al)                       # 推送渠道(跳变才发, 不阻塞失败)
     return {"ts": time.time(), "cluster": cl, "nodes": nodes,
-            "models": models, "alerts": al, "log": log, "training": training}
+            "models": models, "alerts": al, "log": log, "training": training,
+            "infra": infra_dev}
 
 
 _SNAP_TASK = None

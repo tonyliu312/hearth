@@ -1,0 +1,148 @@
+# snmp_exporter modules for Hearth's `infra:` block (switch + NAS).
+#
+# Two ready-made modules for the `infra:` block — see docs/topology.md
+# Switch side:  /snmp/community/set [find name=public] addresses=<your-prometheus-host>/32
+#               /snmp/set enabled=yes
+# Revert:       /snmp/set enabled=no
+# Synology side: see the comment above the `synology` module below.
+#
+# The mtxrHealth table (1.3.6.1.4.1.14988.1.1.3.100.1) is RouterOS 7's generic
+# health table: it mirrors `/system/health/print` row for row, so a different
+# model's extra sensors appear on their own — no change needed here.
+# mtxrHealthType: 1=celsius  2=RPM  3=0.1V  5=0.1W  6=state (0 = ok)
+
+auths:
+  public_v2:
+    community: public
+    version: 2
+  synology_v2:
+    community: <community>
+    version: 2
+
+modules:
+  mikrotik:
+    walk:
+      - 1.3.6.1.2.1.25.1.1                 # hrSystemUptime (real host uptime)
+      - 1.3.6.1.2.1.25.3.3.1.2             # hrProcessorLoad (per core)
+      - 1.3.6.1.4.1.14988.1.1.3.100.1.2    # mtxrHealthName
+      - 1.3.6.1.4.1.14988.1.1.3.100.1.3    # mtxrHealthValue
+      - 1.3.6.1.4.1.14988.1.1.3.100.1.4    # mtxrHealthType
+    metrics:
+      - name: mtxrHealthValue
+        oid: 1.3.6.1.4.1.14988.1.1.3.100.1.3
+        type: gauge
+        help: MikroTik health reading; unit given by mtxrHealthType at the same index
+        indexes:
+          - labelname: mtxrHealthIndex
+            type: gauge
+        lookups:
+          - labels: [mtxrHealthIndex]
+            labelname: sensor
+            oid: 1.3.6.1.4.1.14988.1.1.3.100.1.2
+            type: DisplayString
+
+      - name: mtxrHealthType
+        oid: 1.3.6.1.4.1.14988.1.1.3.100.1.4
+        type: gauge
+        help: Unit type - 1=C 2=RPM 3=0.1V 5=0.1W 6=state
+        indexes:
+          - labelname: mtxrHealthIndex
+            type: gauge
+        lookups:
+          - labels: [mtxrHealthIndex]
+            labelname: sensor
+            oid: 1.3.6.1.4.1.14988.1.1.3.100.1.2
+            type: DisplayString
+
+      # Use hrSystemUptime, NOT sysUpTime. Synology runs net-snmp, where
+      # sysUpTime is the snmpd AGENT's uptime - it resets to zero when you
+      # toggle SNMP. hrSystemUptime matches real host uptime on both vendors.
+      - name: hrSystemUptime
+        oid: 1.3.6.1.2.1.25.1.1
+        type: gauge
+        help: Host uptime (hundredths of a second)
+
+      - name: hrProcessorLoad
+        oid: 1.3.6.1.2.1.25.3.3.1.2
+        type: gauge
+        help: Per-core CPU load percentage
+        indexes:
+          - labelname: hrDeviceIndex
+            type: gauge
+
+  # Synology DSM - SYNOLOGY-SYSTEM-MIB (6574.1) + SYNOLOGY-DISK-MIB (6574.2)
+  # Enable over SSH (DSM 7.3; no web UI / OTP needed):
+  #   ssh user@<nas> "sudo /usr/syno/bin/synowebapi --exec api=SYNO.Core.SNMP \
+  #     method=set version=1 enable_snmp=true enable_snmp_v1v2=true enable_snmp_v3=false \
+  #     rocommunity=<community> rouser='' name='' location='' contact='' node0_name='' node1_name=''"
+  #   All fields are mandatory - omitting any returns error 2202.
+  # Revert: same command with enable_snmp=false
+  #
+  # Bay != disk name: diskIndex 0 can be "Disk 3". Always label by diskName.
+  # Status semantics: 1 = Normal, anything else = fault (all *Status metrics).
+  synology:
+    walk:
+      - 1.3.6.1.2.1.25.1.1         # hrSystemUptime (real host uptime)
+      - 1.3.6.1.4.1.6574.1         # system: status / temp / power / fan / model
+      - 1.3.6.1.4.1.6574.2.1.1.2   # diskName
+      - 1.3.6.1.4.1.6574.2.1.1.5   # diskStatus
+      - 1.3.6.1.4.1.6574.2.1.1.6   # diskTemperature
+    metrics:
+      - name: synoSystemTemperature
+        oid: 1.3.6.1.4.1.6574.1.2
+        type: gauge
+        help: Synology chassis temperature (celsius)
+
+      - name: synoSystemStatus
+        oid: 1.3.6.1.4.1.6574.1.1
+        type: gauge
+        help: System status, 1 = Normal
+
+      - name: synoPowerStatus
+        oid: 1.3.6.1.4.1.6574.1.3
+        type: gauge
+        help: Power status, 1 = Normal
+
+      - name: synoSystemFanStatus
+        oid: 1.3.6.1.4.1.6574.1.4.1
+        type: gauge
+        help: System fan status, 1 = Normal
+
+      - name: synoCpuFanStatus
+        oid: 1.3.6.1.4.1.6574.1.4.2
+        type: gauge
+        help: CPU fan status, 1 = Normal
+
+      - name: synoDiskTemperature
+        oid: 1.3.6.1.4.1.6574.2.1.1.6
+        type: gauge
+        help: Per-disk temperature (celsius)
+        indexes:
+          - labelname: diskIndex
+            type: gauge
+        lookups:
+          - labels: [diskIndex]
+            labelname: disk
+            oid: 1.3.6.1.4.1.6574.2.1.1.2
+            type: DisplayString
+
+      - name: synoDiskStatus
+        oid: 1.3.6.1.4.1.6574.2.1.1.5
+        type: gauge
+        help: Per-disk status, 1 = Normal
+        indexes:
+          - labelname: diskIndex
+            type: gauge
+        lookups:
+          - labels: [diskIndex]
+            labelname: disk
+            oid: 1.3.6.1.4.1.6574.2.1.1.2
+            type: DisplayString
+
+      # Use hrSystemUptime, NOT sysUpTime. Synology runs net-snmp, where
+      # sysUpTime is the snmpd AGENT's uptime - it resets to zero when you
+      # toggle SNMP. hrSystemUptime matches real host uptime on both vendors.
+      - name: hrSystemUptime
+        oid: 1.3.6.1.2.1.25.1.1
+        type: gauge
+        help: Host uptime (hundredths of a second)

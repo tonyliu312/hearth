@@ -26,25 +26,25 @@
       gpu: { name: "GB10 Grace-Blackwell", mem: 128, fp16: 250.0, fp4: 1000.0 },
       cpu: { model: "Grace 20-core ARM",   cores: 20, threads: 20 },
       ram: 128, disk: 4096, net: "200 GbE ConnectX-7",
-      services: ["vllm","node-exporter","dcgm"] },
+      services: ["vllm","node-exporter"] },
     { id: "node-3", name: "Inference-2", ip: "10.0.0.3",     role: "Inference",        class: "GPU node",
       os: "Ubuntu 24.04 LTS (DGX OS)", kernel: "6.8.0-49", driver: "NVIDIA 560.40", cuda: "12.6",
       gpu: { name: "GB10 Grace-Blackwell", mem: 128, fp16: 250.0, fp4: 1000.0 },
       cpu: { model: "Grace 20-core ARM",   cores: 20, threads: 20 },
       ram: 128, disk: 4096, net: "200 GbE ConnectX-7",
-      services: ["vllm","sglang","node-exporter","dcgm"] },
+      services: ["vllm","sglang","node-exporter"] },
     { id: "node-4", name: "Inference-3", ip: "10.0.0.4",     role: "Inference",        class: "GPU node",
       os: "Ubuntu 24.04 LTS (DGX OS)", kernel: "6.8.0-49", driver: "NVIDIA 560.40", cuda: "12.6",
       gpu: { name: "GB10 Grace-Blackwell", mem: 128, fp16: 250.0, fp4: 1000.0 },
       cpu: { model: "Grace 20-core ARM",   cores: 20, threads: 20 },
       ram: 128, disk: 4096, net: "200 GbE ConnectX-7",
-      services: ["vllm","node-exporter","dcgm"] },
+      services: ["vllm","node-exporter"] },
     { id: "node-5", name: "Inference-4", ip: "10.0.0.5",     role: "Inference",        class: "GPU node",
       os: "Ubuntu 24.04 LTS (DGX OS)", kernel: "6.8.0-49", driver: "NVIDIA 560.40", cuda: "12.6",
       gpu: { name: "GB10 Grace-Blackwell", mem: 128, fp16: 250.0, fp4: 1000.0 },
       cpu: { model: "Grace 20-core ARM",   cores: 20, threads: 20 },
       ram: 128, disk: 4096, net: "200 GbE ConnectX-7",
-      services: ["vllm","node-exporter","dcgm"] },
+      services: ["vllm","node-exporter"] },
   ];
 
   // 真实模型（镜像后端 MODEL_CATALOG / litellm /v1/models · comfyui mode）。
@@ -90,6 +90,9 @@
     // 训练可观测性(Phase 1 纯 obs 底座);trainingHist 驱动 sparkline
     training: { nodes: [], summary: {} },
     trainingHist: { util: [], roce: [] },
+    // 基础设施设备(交换机/NAS)温度与健康 — 由后端 config 的 infra: 驱动。
+    // mock 模式下保持为空,InfraSection 自行不渲染(与 training 同款:不伪造设备)。
+    infra: [],
   };
 
   function makeNodeMetrics() {
@@ -392,6 +395,8 @@
       rollT("util", s.utilAvg || 0);
       rollT("roce", (s.roceRxMBps || 0) + (s.roceTxMBps || 0));
     }
+    // ── 基础设施设备(SNMP)──整块替换即可,无历史缓冲(温度变化远慢于 tick)
+    if (Array.isArray(p.infra)) live.infra = p.infra;
     // ── nodes：后端是运行时权威全集。前端动态对齐——后端发什么节点就显
     //    什么(id 任意, 不要求匹配前端静态目录)。静态 NODES 仅 mock 模式用;
     //    live 模式按 payload 重建 NODES + live.nodes, 否则后端 id(atlas/
