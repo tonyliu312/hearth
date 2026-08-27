@@ -179,77 +179,154 @@ The reasons are deliberate and structural:
 
 **Bottom line for OSS users**: don't try to make Hearth match your phone app. Use Hearth to monitor your *cluster's* energy reality (which is what you can act on), and use the phone app or the utility meter for the bill.
 
-## `ha.controller` — Layer-2 GPU-driven AC override (opt-in)
+---
 
-When the AC plug is wired through HA and Hearth knows the GPU temperatures, you can let Hearth opportunistically de-energize the AC plug when GPUs are demonstrably cool, saving compressor cycles the AC's own thermostat would have spent on over-cooling. This is **strictly additive**: every off-second is a win versus the AC running standalone, and the AC's built-in controller (F01/F02 setpoints) remains the safety baseline whenever the plug is energized.
+## `infra:` — non-compute devices (optional)
 
-### Architecture
+The boxes that carry the cluster but don't compute: the fabric switch, the NAS,
+the gateway router. They're invisible to GPU and node metrics, yet a switch that
+overheats or a NAS disk creeping toward its shutdown threshold takes the whole
+cluster down with it.
 
-Two control layers, with explicit roles:
+Declare them under `infra:` and Hearth renders an **Infrastructure** section with
+temperatures, fans, redundant PSUs and per-disk health. Omit the block entirely
+and the section doesn't render — Hearth never invents devices.
 
-- **Layer 1** — the AC's internal F01/F02/F05 thermostat. Must be configured to safely run the rack on its own; Hearth never modifies these.
-- **Layer 2** — `ha-controller` systemd service. Reads `max(DCGM_FI_DEV_GPU_TEMP{node=~"spark.+"})` and toggles the AC plug via HA REST. Default-on (Layer 1 runs); turns plug off only when all of: GPU ≤ close threshold, ≥ 5 min since last switch, not in emergency.
-
-### Four watchdog layers (any L2 failure → L1 takes over within minutes)
-
-1. **Controller fail-safe**: any missing signal (Prometheus down, HA down, GPU temp metric absent) → if plug is off, force on.
-2. **Max-OFF-duration cap**: plug cannot stay off longer than `max_off_duration_s` (default 600 s). Bounds L2's blast radius if its logic ever goes wrong.
-3. **In-host watchdog** (`server/deploy/ha-controller-watchdog.sh`, runs from cron every 5 min **on the controller host**): if controller's last-decision metric is stale > 120 s and plug is off, force plug on via HA REST. Single-file bash + curl — has zero dependency on Python or Hearth's runtime, so it works even if everything else on the host is broken.
-4. **Cross-host failover watchdog** (`server/deploy/ha-failover-watchdog.sh`, runs from cron every 5 min **on a peer host** — a Spark, the NAS, anywhere with HA REST access): covers the harder failure mode that layer 3 cannot — the controller host **itself** dies (kernel hardlockup, PSU drop, motherboard fault), taking the controller AND its in-host watchdog with it. The cross-host script polls Atlas's `sensor.hearth_atlas_heartbeat` (which `ha-controller` writes every ~30 s); if it's stale beyond `STALE_SECONDS` (default 300) AND the plug is OFF, it unconditionally turns the plug ON via HA REST, returning control to Layer 1. Zero dependency on Atlas's runtime — survives Atlas being literally unplugged. Token loads from peer's `~/.config/ha/token` (chmod 600). Install: copy the script + a long-lived HA token to a peer, add a `*/5 * * * *` crontab entry. Recommended for any deployment where the controller host is itself the most-likely-to-die node.
+Everything here is **read-only**. There is no control path: Hearth observes these
+devices, it does not configure, reboot, or throttle them.
 
 ### Schema
 
+| Key | Required | Meaning |
+|---|---|---|
+| `id` | yes | Stable identifier, used as the React key |
+| `name` | yes | Display name |
+| `ip` | no | Shown on the card; not used to reach the device |
+| `class` | no | Hardware one-liner (port count, disk layout, …) |
+| `role_label` | no | What it does in your topology |
+| `source` | yes | `mikrotik` \| `synology` \| `openwrt` — selects the read path |
+| `prom_device` | no | Must match the `device` label in your Prometheus job. Defaults to `id` |
+| `critical` | no | `true` marks it a single point of failure in the UI |
+
+### Where the data comes from
+
+Hearth reads everything through **your** Prometheus — it never talks to these
+devices directly. You add one scrape job; Hearth queries the result.
+
+**`mikrotik`** — RouterOS publishes a generic health table (`mtxrHealth`,
+`1.3.6.1.4.1.14988.1.1.3.100.1`) that mirrors `/system/health/print` row for row,
+so a different switch model just works without a schema change. Enable read-only
+SNMP on the device and restrict the community to your Prometheus host:
+
+```routeros
+/snmp/community/set [find name=public] addresses=<prometheus-host>/32
+/snmp/set enabled=yes
+```
+
+**`synology`** — DSM exposes `SYNOLOGY-SYSTEM-MIB` (chassis temperature, power
+and fan status) and `SYNOLOGY-DISK-MIB` (per-disk temperature and status). Enable
+SNMP in *Control Panel → Terminal & SNMP*, or over SSH without the web UI:
+
+```bash
+sudo /usr/syno/bin/synowebapi --exec api=SYNO.Core.SNMP method=set version=1 \
+  enable_snmp=true enable_snmp_v1v2=true enable_snmp_v3=false \
+  rocommunity=<community> rouser='' name='' location='' contact='' \
+  node0_name='' node1_name=''
+```
+
+All fields must be supplied — omitting any of them returns `error 2202`.
+
+> **Disk bay ≠ disk name.** The SNMP `diskIndex` is not the bay number: index `0`
+> can be "Disk 3". Hearth labels by `diskName`, never by index.
+
+**`openwrt`** — routers usually have no `snmpd`, so Hearth reads
+`prometheus-node-exporter-lua` on the device instead (`opkg install
+prometheus-node-exporter-lua`). Temperature needs one extra collector, because
+the package ships none — drop this in
+`/usr/lib/lua/prometheus-collectors/thermal.lua`:
+
+```lua
+local function scrape()
+  local i = 0
+  while true do
+    local base = "/sys/class/thermal/thermal_zone" .. i
+    local raw = get_contents(base .. "/temp")
+    if raw == nil or raw == "" then break end
+    local milli = tonumber(raw)
+    if milli ~= nil then
+      local zone = (get_contents(base .. "/type") or "unknown"):gsub("%s+$", "")
+      metric("node_hwmon_temp_celsius", "gauge",
+             { chip = "thermal_zone" .. i, sensor = zone }, milli / 1000)
+    end
+    i = i + 1
+  end
+end
+return { scrape = scrape }
+```
+
+The metric name deliberately matches upstream node_exporter's `hwmon`
+collector, so one query and one alert rule cover both routers and x86 hosts.
+
+> The package **listens on loopback by default** — Prometheus can't reach it
+> until you set `uci set prometheus-node-exporter-lua.main.listen_interface=lan`.
+
+### Prometheus jobs
+
+SNMP devices go through [`snmp_exporter`](https://github.com/prometheus/snmp_exporter).
+A minimal `snmp.yml` covering both vendors lives in
+[`server/prometheus/snmp.yml`](../server/prometheus/snmp.yml).
+
 ```yaml
-ha:
-  controller:
-    enabled: false                  # opt in by setting true
-    target_plug_id: "2027457700"    # AC plug only — NOT a node plug
-    decision_interval_s: 30
-    gpu_open_threshold: 65          # max-GPU ≥ this → plug ON
-    gpu_close_threshold: 55         # max-GPU ≤ this → plug may turn OFF
-    min_switch_interval_s: 300      # compressor protection
-    max_off_duration_s: 600         # safety cap (10 min)
-    emergency_open_threshold: 75    # max-GPU ≥ this for 30s → force ON
-    emergency_open_dur_s: 30
-    fail_safe: "on"                 # default to ON on any failure
+  - job_name: snmp_mikrotik
+    scrape_interval: 30s          # chassis thermal mass is slow; 30s is plenty
+    metrics_path: /snmp
+    params: { auth: [public_v2], module: [mikrotik] }
+    static_configs:
+      - targets: ['10.0.0.2']
+        labels: { device: switch-01, kind: switch }
+    relabel_configs:
+      - { source_labels: [__address__], target_label: __param_target }
+      - { source_labels: [__param_target], target_label: instance }
+      - { target_label: __address__, replacement: snmp-exporter:9116 }
+
+  - job_name: snmp_synology
+    scrape_interval: 60s
+    metrics_path: /snmp
+    params: { auth: [synology_v2], module: [synology] }
+    static_configs:
+      - targets: ['10.0.0.3']
+        labels: { device: nas-01, kind: nas }
+    relabel_configs:
+      - { source_labels: [__address__], target_label: __param_target }
+      - { source_labels: [__param_target], target_label: instance }
+      - { target_label: __address__, replacement: snmp-exporter:9116 }
+
+  # OpenWrt speaks node_exporter natively — no snmp_exporter in the path.
+  # Keep it in its own job: the `node` job is usually file_sd-managed and
+  # aggregated by a `node` label, and a router mixed in there skews it.
+  - job_name: openwrt
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['10.0.0.1:9100']
+        labels: { device: router-01, kind: router }
 ```
 
-### Hard safety rails
+### Thresholds
 
-- `target_plug_id` must **not** be in `ha.blocklist` (operator-defined) or in `HARD_BLOCKLIST` (`2051674991` MT6000 router — hardcoded, cannot be overridden).
-- Controller refuses to start if `enabled` is false or if `target_plug_id` is missing.
-- The install script (`install-ha-controller.sh`) re-validates all of the above before touching systemd.
+Two scales, because disks are far more fragile than silicon:
 
-### Deployment
+| Group | warn | hot |
+|---|---|---|
+| Disks | 48 °C | 55 °C |
+| Chips, chassis, PSUs | 70 °C | 80 °C |
 
-```bash
-# 0) Set controller.enabled: true and target_plug_id in hearth.yaml
-# 1) Install (idempotent)
-sudo TOKEN_FILE=/home/$USER/.config/ha/token \
-    bash server/deploy/install-ha-controller.sh
-# 2) Watch first 24h via Hearth Telemetry → Energy trends card
-# 3) Disable any time
-sudo systemctl stop ha-controller && sudo systemctl disable ha-controller
-```
+Normal readings render in plain ink — colour is reserved for a reading that has
+actually crossed a line, and an all-healthy device shows no status pills at all.
+A wall of green would make a genuine warning harder to spot, not easier.
 
-**Recommended**: install the cross-host failover watchdog on at least one peer node (a Spark, the NAS — any always-on host that can reach HA REST and is independent of the controller host's hardware):
+### Uptime
 
-```bash
-# On the peer host (e.g. spark-01), as the owning user:
-mkdir -p ~/.config/ha && chmod 700 ~/.config/ha
-# Paste your HA long-lived token (Bearer ...) into this file:
-echo "YOUR_HA_LONG_LIVED_TOKEN" > ~/.config/ha/token && chmod 600 ~/.config/ha/token
-
-# Copy the watchdog (from your Hearth checkout or scp from the controller host)
-cp server/deploy/ha-failover-watchdog.sh ~/ha-failover-watchdog.sh
-chmod +x ~/ha-failover-watchdog.sh
-
-# Add to crontab — every 5 min
-( crontab -l 2>/dev/null; echo "*/5 * * * * HA_URL=http://homeassistant.local:8123 \$HOME/ha-failover-watchdog.sh >> \$HOME/hearth-failover-watchdog.log 2>&1" ) | crontab -
-```
-
-`HA_URL` defaults to `http://homeassistant.local:8123`; override to your LAN IP if mDNS isn't reachable from the peer. Logs accumulate in `~/hearth-failover-watchdog.log` — each cron run logs "Atlas alive" silently or "Atlas DOWN AND plug OFF — UNCONDITIONAL TURN ON" when it rescues.
-
-### Operator's mental model
-
-"Layer 1 is the AC doing its normal job. Layer 2 is Hearth saying 'hey, GPUs are cool, take a short break.'  If Hearth gets confused, Layer 1 takes over within 10 minutes max."
+Hearth reads `hrSystemUptime` (`1.3.6.1.2.1.25.1.1`), not `sysUpTime`. On
+net-snmp devices (Synology) `sysUpTime` is the *agent's* uptime — it resets to
+zero when you toggle SNMP, making a box that's been up for weeks look freshly
+rebooted.

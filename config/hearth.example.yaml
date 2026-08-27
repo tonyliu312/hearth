@@ -210,31 +210,52 @@ alerts:
 #   blocklist:                                         # plugs the exporter must NEVER monitor (refuses to start if seen)
 #     - "2051674991"                                   # e.g. your main router — turning it off kills the whole LAN
 #
-#   # ── Layer-2 AC controller (OPT-IN, default disabled) ────────────
-#   # When enabled, a separate systemd service (ha-controller) reads
-#   # max(DCGM_FI_DEV_GPU_TEMP) and can DE-ENERGIZE the rack AC plug to
-#   # save power when GPUs are demonstrably cool.  It never overrides
-#   # the AC's own controller's "stop cooling" decisions — Layer 2 can
-#   # only turn the plug off, not force-cool.  This guarantees L2-on
-#   # is mathematically ≥ L2-off in energy savings, with safety from
-#   # three independent watchdog layers (controller's own fail-safe,
-#   # max-OFF cap, external cron watchdog).
-#   #
-#   # Layer 1 (the AC's own F01/F02/F05 setpoints) MUST be configured
-#   # to safely run the rack on its own — L2 is an opportunistic
-#   # override, not a replacement.
-#   #
-#   # See docs/topology.md ha.controller section + the ARCHITECTURE
-#   # comment block at the top of server/integration/ha-controller.py.
-#   #
-#   controller:
-#     enabled: false                            # set true to opt in
-#     target_plug_id: "2027457700"              # MUST also be the AC plug, not a node plug
-#     decision_interval_s: 30
-#     gpu_open_threshold: 65                    # max-GPU ≥ this → plug ON
-#     gpu_close_threshold: 55                   # max-GPU ≤ this → plug may turn OFF
-#     min_switch_interval_s: 300                # compressor protection — at least this between switches
-#     max_off_duration_s: 600                   # safety cap: plug OFF ≤ 10 min, then forced ON
-#     emergency_open_threshold: 75              # max-GPU ≥ this for 30s → force ON immediately
-#     emergency_open_dur_s: 30
-#     fail_safe: "on"                           # if signal missing, default to ON (never strand without cooling)
+#   # NOTE: Hearth 只读取 Home Assistant 的数据(功率/温度), 不写回、不控制任何设备。
+#   # 曾经存在的 ha.controller(L2 机柜空调控制)已于 2026-08-18 整体下线 ——
+#   # 控制物理执行器不属于观测平面的问题域。请勿重新加回。
+# ── infra: non-compute devices (OPTIONAL) ──────────────────────────────
+# The boxes that carry the cluster but don't compute: the fabric switch,
+# the NAS, the gateway router.  A switch that overheats or a NAS disk
+# creeping toward its shutdown threshold takes the whole cluster with it,
+# yet none of it shows up in GPU/node metrics.
+#
+# Delete this whole block if you don't want it — the Infrastructure
+# section then renders nothing at all (it never fabricates devices).
+#
+# `source` selects the read path.  All three are READ-ONLY:
+#   mikrotik — RouterOS `mtxrHealth` table over SNMP.  Temperatures, fans,
+#              redundant PSUs.  Sensor rows are whatever the device
+#              publishes, so a different model just works.
+#   synology — DSM SYNOLOGY-SYSTEM-MIB + DISK-MIB over SNMP.  Chassis
+#              temperature plus per-disk temperature and status.
+#   openwrt  — no SNMP; scrapes `prometheus-node-exporter-lua` on the
+#              device (`node_hwmon_temp_celsius`, load, memory).
+#
+# `prom_device` must match the `device` label you attach in your
+# Prometheus scrape job (see docs/topology.md for ready-made jobs).
+#
+# infra:
+#   - id: switch-01
+#     name: "Fabric switch"
+#     ip: 10.0.0.2
+#     class: "8x50G SFP56 · 2x200G QSFP56"
+#     role_label: "Fabric · east-west"
+#     source: mikrotik
+#     prom_device: switch-01
+#     critical: true              # marks it a single point of failure in the UI
+#
+#   - id: nas-01
+#     name: "NAS"
+#     ip: 10.0.0.3
+#     class: "4-bay · RAID5"
+#     role_label: "Storage"
+#     source: synology
+#     prom_device: nas-01
+#
+#   - id: router-01
+#     name: "Gateway router"
+#     ip: 10.0.0.1
+#     class: "OpenWrt"
+#     role_label: "Gateway"
+#     source: openwrt
+#     prom_device: router-01
