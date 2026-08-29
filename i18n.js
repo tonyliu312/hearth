@@ -87,6 +87,7 @@
       "Response composition": "响应构成", "last": "近",
       "Empty answers": "空正文", "baseline 0%": "基线 0%",
       "Tool responses": "工具响应", "counted separately": "单独分组",
+      "items": "条", "chunks": "块",
       "Thinking share": "thinking 占比", "of characters": "按字符",
       "truncated, excluded": "条触顶已排除",
       "text vs tool split by tool_calls array, not finish_reason":
@@ -268,6 +269,7 @@
       "Response composition": "響應構成", "last": "近",
       "Empty answers": "空正文", "baseline 0%": "基線 0%",
       "Tool responses": "工具響應", "counted separately": "單獨分組",
+      "items": "條", "chunks": "塊",
       "Thinking share": "thinking 佔比", "of characters": "按字元",
       "truncated, excluded": "條觸頂已排除",
       "text vs tool split by tool_calls array, not finish_reason":

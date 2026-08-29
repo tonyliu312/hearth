@@ -300,9 +300,17 @@ function DetailMetric({ label, value, unit, bar, color = "accent" }) {
 // 一行「均值 + p50/p90/p99」。分位数是业界标准口径(vllm bench serve /
 // GenAI-Perf / LLMPerf)，均值同排列出来做对照：样本量小时分位数会偏高，
 // 两者背离大时以均值为准。
+// ⛔ 单位必须跟在【每个值】上，不能只写在表头：这张表会对 >=10000ms 的值自动
+//    换算成秒，表头写死 (ms) 会和那些单元格矛盾。之前四列全是裸数字、只有超过
+//    10s 的才带 "s"，读的人无从判断 150 是毫秒还是秒。
 function PctRow({ label, mean, p50, p90, p99, unit = "ms", warn }) {
-  const f = (v) => (v === undefined || v === null ? "—"
-    : v >= 10000 ? (v / 1000).toFixed(1) + "s" : Math.round(v));
+  const f = (v) => {
+    if (v === undefined || v === null) return "—";
+    const big = unit === "ms" && v >= 10000;
+    const txt = big ? (v / 1000).toFixed(1) : Math.round(v);
+    const u = big ? "s" : unit;
+    return <>{txt}<small style={{ color: "var(--ink-3)", marginLeft: 2 }}>{u}</small></>;
+  };
   return (
     <div style={{ display: "contents" }}>
       <span style={{ color: "var(--ink-3)" }}>{label}</span>
@@ -476,7 +484,8 @@ function ResponseBlock({ model }) {
         {model.toolCallN !== undefined ? <>
           <span style={{ color: "var(--ink-3)" }}>{t("Tool responses")}</span>
           <span style={{ color: "var(--ink-2)" }}>
-            {model.toolCallN} <small style={{ color: "var(--ink-3)" }}>{t("counted separately")}</small>
+            {model.toolCallN}<small style={{ color: "var(--ink-3)", marginLeft: 2 }}>{t("items")}</small>
+            {" "}<small style={{ color: "var(--ink-3)" }}>{t("counted separately")}</small>
           </span>
         </> : null}
         {hasThink ? <>
@@ -520,7 +529,8 @@ function ResponseBlock({ model }) {
           </> : null}
           {model.thinkChunksP50 !== undefined ? <>
             <span style={{ color: "var(--ink-3)" }}>{t("Think chunks first")}</span>
-            <span>{model.thinkChunksP50} <small style={{ color: "var(--ink-3)" }}>
+            <span>{model.thinkChunksP50}<small style={{ color: "var(--ink-3)", marginLeft: 2 }}>
+              {t("chunks")}</small>{" "}<small style={{ color: "var(--ink-3)" }}>
               {t("median, before first content")}</small></span>
           </> : null}
         </div>
