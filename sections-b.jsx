@@ -661,7 +661,10 @@ function ModelsSection() {
                 ) : <span style={{ color: "var(--ink-4)", fontFamily: "var(--mono)", fontSize: 10.5 }}>—</span>}
               </div>
               <div className="num" style={{ fontSize: 11.5, color: "var(--ink-2)" }}>
-                {(m.metricsSource === "vllm" || m.metricsSource === "sglang") ? <>
+                {/* p50/p95/p99 是滑动窗口值：窗口内没有完成的请求就整组缺席，
+                    此时显示「—」而不是 undefined 或上一个窗口的残值。 */}
+                {(m.metricsSource === "vllm" || m.metricsSource === "sglang")
+                  && typeof m.p95 === "number" ? <>
                   <span style={{ color: "var(--ink)" }}>{m.p50}</span>
                   <span style={{ color: "var(--ink-4)" }}> / </span>
                   <span>{m.p95}</span>
@@ -737,8 +740,10 @@ function ModelDetail({ model }) {
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         {(model.metricsSource === "vllm" || model.metricsSource === "sglang") ? <>
-          <DetailMetric label={t("TTFT (first token)")} value={ms.ttft.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.ttft.now / 8)} color="violet" />
-          <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
+          {/* 窗口内没有完成的请求 → 显示「—」而不是上一个窗口的残值。
+              「延迟未知」和「延迟很低」是两件事，混起来最容易误判。 */}
+          <DetailMetric label={t("TTFT (first token)")} value={model.ttft !== undefined ? model.ttft.toFixed(0) : "—"} unit={model.ttft !== undefined ? " ms" : ""} bar={Math.min(100, (model.ttft || 0) / 8)} color="violet" />
+          <DetailMetric label={t("TPOT (per token)")}   value={model.tpot !== undefined ? model.tpot.toFixed(0) : "—"} unit={model.tpot !== undefined ? " ms" : ""} bar={Math.min(100, (model.tpot || 0) / 5)} color="teal" />
           <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 10)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
           <DetailMetric label={t("Requests / sec")}     value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
           <DetailMetric label={t("KV-cache")}           value={ms.kv.now.toFixed(1)} unit="%" bar={Math.min(100, ms.kv.now)} color={ms.kv.now > 80 ? "bad" : ms.kv.now > 65 ? "hot" : "violet"} />
@@ -746,8 +751,15 @@ function ModelDetail({ model }) {
                                           fontSize: 10.5, color: "var(--ink-3)" }}>
             {t("pool")} {(model.kvTokens / 1e6).toFixed(2)}M {t("tokens")} · {(model.kvBytes / 2 ** 30).toFixed(1)} GiB · {t("max concurrency")} {model.kvMaxConc}×
           </div> : null}
-          {model.ttftP50 !== undefined ? <div>
-            <div className="metric-l" style={{ marginBottom: 8 }}>{t("Latency breakdown · mean vs percentiles")}</div>
+          {model.latencyWindowSec !== undefined ? <div>
+            <div className="metric-l" style={{ marginBottom: 8 }}>
+              {t("Latency breakdown · mean vs percentiles")}
+              {/* 窗口长度与样本数必须显示：这些是滑动窗口值不是「开机以来」，
+                  而且读数的人要能判断这个 p99 是几条样本撑起来的。 */}
+              <span style={{ color: "var(--ink-3)", textTransform: "none" }}>
+                {" · "}{t("window")} {model.latencyWindowSec}s · n={model.latencySampleN}
+              </span>
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "auto repeat(4, 1fr)",
                           gap: "5px 10px", fontFamily: "var(--mono)", fontSize: 11 }}>
               <span />
@@ -760,8 +772,10 @@ function ModelDetail({ model }) {
               <PctRow label={t("Queue")}   mean={model.queue}   p50={model.queueP50}   p90={model.queueP90}   p99={model.queueP99} />
               <PctRow label={t("Prefill")} mean={model.prefill} p50={model.prefillP50} p90={model.prefillP90} p99={model.prefillP99} />
               <PctRow label={t("Decode")}  mean={model.decode}  p50={model.decodeP50}  p90={model.decodeP90}  p99={model.decodeP99} />
-              <PctRow label="TTFT"         mean={ms.ttft.now}   p50={model.ttftP50}    p90={model.ttftP90}    p99={model.ttftP99} warn={20000} />
-              <PctRow label="TPOT"         mean={ms.tpot.now}   p50={model.tpotP50}    p90={model.tpotP90}    p99={model.tpotP99} />
+              {/* 均值用 model.ttft/tpot（窗口 Δsum/Δcount），不用 sparkline 的 now：
+                  分位数和均值必须同源同窗，一半窗口一半别的比全错更难查。 */}
+              <PctRow label="TTFT"         mean={model.ttft}    p50={model.ttftP50}    p90={model.ttftP90}    p99={model.ttftP99} warn={20000} />
+              <PctRow label="TPOT"         mean={model.tpot}    p50={model.tpotP50}    p90={model.tpotP90}    p99={model.tpotP99} />
               {/* ITL ≠ TPOT：TPOT 按请求平均每 token，ITL 是相邻 token 的实际
                   到达间隔分布。投机解码下一次接受多个 token → 一批接近 0 的间隔
                   加少量长间隔，均值抹平，分位数才看得见。 */}

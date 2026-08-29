@@ -236,7 +236,11 @@
               : m.kind === "speech" ? "POST /v1/audio/transcriptions"
               : m.kind === "image"  ? "POST /v1/images/generations"
               : "POST /v1/chat/completions";
-    const lat = Math.round(m.p50 + (Math.random() - .3) * (m.p95 - m.p50));
+    // p50/p95 现在是滑动窗口值，可能整组缺席（窗口内无请求）。这里是 mock 日志
+    // 生成器，取不到就退回一个占位值 —— 上面那段注释记着它在 boot 期崩过一次，
+    // 不让 undefined 再有机会进算式。
+    const lat = (typeof m.p50 === "number" && typeof m.p95 === "number")
+      ? Math.round(m.p50 + (Math.random() - .3) * (m.p95 - m.p50)) : 0;
     const r = Math.random();
     const status = r > .985 ? "5xx" : r > .97 ? "4xx" : "200";
     return { t, model: m.id, meth, lat, status };
@@ -477,7 +481,7 @@
           e.p50 = Math.round(lv.p50);
           e.p95 = Math.round(lv.p95);
           e.p99 = Math.round(lv.p99);
-        }
+        }                                        // 缺席时由下方清理列表删掉
         // 分位数 / 耗时分解 / 投机解码：逐字段判 undefined 再写。
         // 目录里的冷启动占位条目没有这些键，无条件赋值会把 undefined 写进去，
         // 面板会显示 NaN。llama.cpp 后端同理（引擎根本不暴露）→ 键缺席即不渲染。
@@ -504,6 +508,20 @@
         // 显示成一个看似当前实则陈旧的数字。分位数/KV 池不在此列——它们是
         // 生命周期累计量或静态配置，空闲时保留上一次的值仍然成立。
         ["mbu", "mfu", "mfuDelivered", "mfuDrafterMissing"].forEach((k) => {
+          if (lv[k] === undefined) delete e[k];
+        });
+        // 延迟量现在是【滑动窗口】值：窗口内没有完成的请求时后端整组不返回。
+        // 必须跟着清掉，否则会把上一个有流量的窗口的 p99 挂在这里当作当前值 ——
+        // 与 MBU 那处同一类误读，而且延迟更容易被当成实时值来读。
+        ["latencyWindowSec","latencySampleN","p50","p95","p99",
+         "ttft","tpot","ttftP50","ttftP90","ttftP99","tpotP50","tpotP90","tpotP99",
+         "queue","queueP50","queueP90","queueP99",
+         "prefill","prefillP50","prefillP90","prefillP99",
+         "decode","decodeP50","decodeP90","decodeP99",
+         "itl","itlP50","itlP90","itlP99",
+         "sloTtftMs","sloTpotMs","sloTtftRate","sloTpotRate",
+         "sloJointLower","sloJointUpper","sloJointWide",
+         "queueShareP90","saturated"].forEach((k) => {
           if (lv[k] === undefined) delete e[k];
         });
         if (!live.models[m.id]) live.models[m.id] = makeModelMetrics();

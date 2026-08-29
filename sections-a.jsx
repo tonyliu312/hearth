@@ -349,7 +349,11 @@ function Cluster() {
 
 function cluster_peak() { return Math.round(Math.max(...NODES.map((n) => live.nodes[n.id].tempGpu.now))); }
 function weightedP95() {
-  const serving = MODELS.filter((m) => m.state === "serving" && m.kind === "chat");
+  // p95 现在是【滑动窗口】值，窗口内没有完成的请求时后端整组不返回 →
+  // 这里必须先过滤掉没有 p95 的模型并按其 rps 重新归一，否则 undefined 会把
+  // 整个集群加权值污染成 NaN。
+  const serving = MODELS.filter((m) => m.state === "serving" && m.kind === "chat"
+                                    && typeof m.p95 === "number");
   const totalRps = serving.reduce((a, m) => a + live.models[m.id].rps.now, 0) || 1;
   return serving.reduce((a, m) => a + m.p95 * live.models[m.id].rps.now / totalRps, 0);
 }

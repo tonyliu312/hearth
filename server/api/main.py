@@ -17,6 +17,7 @@ import sys
 import time
 import json
 import asyncio
+from collections import deque
 from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
@@ -2099,6 +2100,123 @@ def _tps_sustained(bases: list[str], roll: dict) -> tuple:
     return round(tot, 1), round(win, 1)
 
 
+# ── 延迟直方图的滑动窗口差分 ───────────────────────────────────────────
+# ⛔ 直接把第二次抓取的【累积】桶喂给 _hquant，报出来的是「开机以来」不是
+# 「当前」。业界标准是 histogram_quantile(q, rate(bucket[5m])) —— 关键是
+# rate() 那一步。实测虚高幅度(引擎已跑 11.9 小时、累积 1386 条样本时)：
+#     E2E  p50 15871ms → 真值 800ms (19.8x)   E2E  p90 44438 → 2200 (20x)
+#     TTFT p50  1640ms → 真值 406ms ( 4.0x)   TTFT p90  4974 → 1975 (2.5x)
+#     TPOT p50    40ms → 真值  38ms ( 1.05x)  ← 每 token 的量对请求长短不敏感
+# 偏差随引擎运行时长单调增大：跑得越久，"当前延迟"越像是在报历史平均。
+_LAT_HIST: dict[str, deque] = {}
+_LAT_MAX_WIN = 300.0        # 窗口上限(秒)。取窗口内【最老】的一份做基准，
+                            # 所以稳态下窗口自然趋近这个值，样本量最大。
+_LAT_MAX_SNAPS = 400        # 防止高频调用把 deque 撑大(按时间 trim 之外的兜底)
+_LAT_BUCKETS = ("__e2e_buckets", "__ttft_buckets", "__tpot_buckets",
+                "__queue_buckets", "__prefill_buckets", "__decode_buckets",
+                "__itl_buckets")
+# 均值也必须做差 —— sum/count 同样是生命周期累计
+_LAT_MEANS = {
+    "ttft": "vllm:time_to_first_token_seconds",
+    "tpot": "vllm:request_time_per_output_token_seconds",
+    "queue": "vllm:request_queue_time_seconds",
+    "prefill": "vllm:request_prefill_time_seconds",
+    "decode": "vllm:request_decode_time_seconds",
+    "itl": "vllm:inter_token_latency_seconds",
+    "e2e": "vllm:e2e_request_latency_seconds",
+}
+
+
+# SGLang 暴露的是同类指标、不同前缀。该分支【与 vLLM 有完全相同的缺陷】，
+# 一并按同一口径修。注意整个 SGLang 分支仍未在 live 实例上端到端验证过
+# (开发集群无 SGLang 后端)，本次修改沿用 vLLM 已验证的逻辑，未新增未验证的假设。
+_LAT_MEANS_SGLANG = {
+    "ttft": "sglang:time_to_first_token_seconds",
+    "tpot": "sglang:inter_token_latency_seconds",
+    "e2e": "sglang:e2e_request_latency_seconds",
+}
+
+
+def _lat_snapshot(merged: dict, means: dict) -> dict:
+    """从一次(已跨副本合并的)抓取里抠出算延迟要用的全部累积量。"""
+    snap: dict = {"b": {}, "s": {}}
+    for k in _LAT_BUCKETS:
+        snap["b"][k] = dict(merged.get(k) or {})
+    for base in means.values():
+        for suf in ("_sum", "_count"):
+            snap["s"][base + suf] = float(merged.get(base + suf, 0.0) or 0.0)
+    return snap
+
+
+def _lat_window(key: str, merged: dict, now: float,
+                means: dict | None = None, e2e_prefix: str = "vllm") -> dict | None:
+    """滑动窗口差分。返回 差分桶 + 窗口均值 + 窗口长度 + 样本数；不可用返回 None。
+
+    ⛔ 锚点建在【_merge_scrape 之后】的口径上（跨副本已求和）。副作用：某个副本
+    掉线会让合并后的和【下降】，被下面的重置检测判成引擎重启 → 丢锚重来。这个
+    退化是有意接受的（代价是损失一个窗口），不是 bug —— 不要把它"修"成允许负差分。
+
+    返回 None 的三种情况，调用方一律让相关字段【整组缺席】而不是填 0：
+      1. 还没有窗口内的基准（刚启动 / 刚重置）
+      2. 检测到 counter 重置（引擎重启、副本掉线）
+      3. 窗口内 0 条样本（模型空闲）—— 报 0 会被读成「延迟 0 毫秒」，
+         这是所有误读里最危险的一种
+    """
+    means = means or _LAT_MEANS
+    hist = _LAT_HIST.setdefault(key, deque())
+    cur = _lat_snapshot(merged, means)
+    base = None
+    # 取窗口内最老的一份做基准；顺手 trim 掉过期的
+    while hist and now - hist[0][0] > _LAT_MAX_WIN:
+        hist.popleft()
+    if hist:
+        base = hist[0]
+    hist.append((now, cur))
+    while len(hist) > _LAT_MAX_SNAPS:
+        hist.popleft()
+    if base is None:
+        return None
+    b_ts, b_snap = base
+
+    # 陷阱 1：counter 重置要【逐桶】判 —— _rate() 那套单值判据不够用。
+    # 任一 le 桶或任一 sum/count 变小 → 引擎重启/副本掉线 → 丢弃全部历史重新起锚，
+    # 绝不能让差分出现负数（负数喂进 _hquant 会算出无意义的分位数）。
+    for k in _LAT_BUCKETS:
+        cb, bb = cur["b"][k], b_snap["b"][k]
+        for le, v in bb.items():
+            if cb.get(le, 0.0) < v:
+                hist.clear()
+                hist.append((now, cur))
+                return None
+    for name, v in b_snap["s"].items():
+        if cur["s"].get(name, 0.0) < v:
+            hist.clear()
+            hist.append((now, cur))
+            return None
+
+    diff_b: dict = {}
+    for k in _LAT_BUCKETS:
+        cb, bb = cur["b"][k], b_snap["b"][k]
+        d = {le: cb[le] - bb.get(le, 0.0) for le in cb}
+        diff_b[k] = d if max(d.values(), default=0.0) > 0 else {}
+
+    # ⚠️ 累加器不能叫 means —— 那会遮蔽同名入参，循环立刻在空字典上迭代，
+    # 所有窗口均值静默丢成 0（而 0 恰好会被读成「延迟 0 毫秒」）。
+    out_means: dict = {}
+    for short, base_name in means.items():
+        dc = cur["s"][base_name + "_count"] - b_snap["s"][base_name + "_count"]
+        ds = cur["s"][base_name + "_sum"] - b_snap["s"][base_name + "_sum"]
+        if dc > 0:
+            out_means[short] = ds / dc * 1000.0
+    # 样本数用 e2e(按请求计)；ITL 是按 token 间隔计的，量级不同，不拿它当请求数
+    _e2e_cnt = f"{e2e_prefix}:e2e_request_latency_seconds_count"
+    n = int(cur["s"].get(_e2e_cnt, 0.0) - b_snap["s"].get(_e2e_cnt, 0.0))
+    if n <= 0 and not out_means:
+        return None                     # 窗口内没有完成的请求 → 整组缺席
+    return {"b": diff_b, "mean": out_means,
+            "windowSec": round(now - b_ts, 1), "sampleN": max(0, n)}
+
+
 def _spec_stats(a: dict, b: dict) -> dict | None:
     """投机解码(speculative decoding)派生指标。未开投机解码 → 引擎不暴露这批
     counter → 返回 None,前端据此整块不渲染(而不是显示 0% —— 那是伪造)。
@@ -2177,69 +2295,53 @@ async def models_list():
             dt = _dt_real
             tps = _rate(a, b, "vllm:generation_tokens_total", dt)
             rps = _rate(a, b, "vllm:request_success_total", dt)
-            tcnt = b.get("vllm:time_to_first_token_seconds_count", 0)
-            tsum = b.get("vllm:time_to_first_token_seconds_sum", 0)
-            ttft = (tsum / tcnt * 1000) if tcnt else 0
-            pcnt = b.get("vllm:request_time_per_output_token_seconds_count", 0)
-            psum = b.get("vllm:request_time_per_output_token_seconds_sum", 0)
-            tpot = (psum / pcnt * 1000) if pcnt else 0
             kv = b.get("vllm:kv_cache_usage_perc", 0) * 100 / max(1, len(vb))
-            e2e_b = b.get("__e2e_buckets") or {}
-            ttft_b = b.get("__ttft_buckets") or {}
-            tpot_b = b.get("__tpot_buckets") or {}
-            queue_b = b.get("__queue_buckets") or {}
-            prefill_b = b.get("__prefill_buckets") or {}
-            decode_b = b.get("__decode_buckets") or {}
-            itl_b = b.get("__itl_buckets") or {}
+            # 全部延迟量走【滑动窗口差分】。None = 刚起/引擎重启/窗口内无请求,
+            # 此时整组延迟字段缺席 —— 不填 0(会被读成"延迟 0 毫秒")。
+            lat = _lat_window(m["id"], b, _t_now)
             tps_sus, tps_win = _tps_sustained(vb, _tps_roll)
             running = _gauge(a, b, "vllm:num_requests_running")
             waiting = _gauge(a, b, "vllm:num_requests_waiting")
             state = "serving" if running > 0 or tps > 0 else "idle"
             live = {"tps": round(tps, 1), "rps": round(rps, 3),
-                    "ttft": round(ttft, 1), "tpot": round(tpot, 1),
                     "kv": round(kv, 1), "running": int(running),
                     "waiting": int(waiting), "metrics": "vllm",
                     # 真实驻留探针：vLLM 可达且模型已加载 → 权重常驻、毫秒级可服务
                     "resident": True,
-                    "p50": round(_hquant(e2e_b, 0.50) * 1000, 0),
-                    "p95": round(_hquant(e2e_b, 0.95) * 1000, 0),
-                    "p99": round(_hquant(e2e_b, 0.99) * 1000, 0),
-                    # TTFT / TPOT 分位数(ms)。上面的 ttft/tpot 均值字段保留不删:
-                    # 样本量小时分位数会偏高(几十个样本的 p99 基本就是最大值),
-                    # 两者背离大时以均值为准。分位数走 p50/p90/p99 是业界口径
-                    # (vllm bench serve / GenAI-Perf / LLMPerf), 与上面 e2e 那组
-                    # 历史 p50/p95/p99 刻意不统一 —— 不动既有 e2e 字段。
-                    "ttftP50": round(_hquant(ttft_b, 0.50) * 1000, 0),
-                    "ttftP90": round(_hquant(ttft_b, 0.90) * 1000, 0),
-                    "ttftP99": round(_hquant(ttft_b, 0.99) * 1000, 0),
-                    "tpotP50": round(_hquant(tpot_b, 0.50) * 1000, 1),
-                    "tpotP90": round(_hquant(tpot_b, 0.90) * 1000, 1),
-                    "tpotP99": round(_hquant(tpot_b, 0.99) * 1000, 1),
                     # tps 是 1.2s 瞬时采样窗口 —— 把窗口长度一并暴露出来,
                     # 面板才能标清"瞬时"而不是让人当成持续吞吐。
                     "tpsWindowSec": round(dt, 2),
                     "tpsSustained": tps_sus, "tpsSustainedWindowSec": tps_win}
-            # 请求耗时分解:排队 → prefill → decode。三段分开报,"变慢了"才知道
-            # 该查哪一侧(排队 = 容量不够 / prefill = 上下文太长 / decode = 带宽)。
-            for _k, _bk, _sum, _cnt in (
-                    ("queue", queue_b, "vllm:request_queue_time_seconds_sum",
-                     "vllm:request_queue_time_seconds_count"),
-                    ("prefill", prefill_b, "vllm:request_prefill_time_seconds_sum",
-                     "vllm:request_prefill_time_seconds_count"),
-                    ("decode", decode_b, "vllm:request_decode_time_seconds_sum",
-                     "vllm:request_decode_time_seconds_count"),
-                    ("itl", itl_b, "vllm:inter_token_latency_seconds_sum",
-                     "vllm:inter_token_latency_seconds_count")):
-                _c, _s = b.get(_cnt, 0), b.get(_sum, 0)
-                live[_k] = round(_s / _c * 1000, 1) if _c else 0     # 均值对照线
-                live[f"{_k}P50"] = round(_hquant(_bk, 0.50) * 1000, 1)
-                live[f"{_k}P90"] = round(_hquant(_bk, 0.90) * 1000, 1)
-                live[f"{_k}P99"] = round(_hquant(_bk, 0.99) * 1000, 1)
+            if lat:
+                _lb, _lm = lat["b"], lat["mean"]
+                # 窗口长度与样本数必须暴露:读数的人要能判断这个 p99 是几条样本
+                # 撑起来的。样本数按【请求】计(e2e),ITL 是按 token 间隔计的,
+                # 量级不同,不拿它冒充请求数。
+                live["latencyWindowSec"] = lat["windowSec"]
+                live["latencySampleN"] = lat["sampleN"]
+                # e2e 这组历史字段沿用 p50/p95/p99 命名(不动),但语义已从
+                # 「开机以来」修正为「窗口内」。
+                for _q, _n in ((0.50, "p50"), (0.95, "p95"), (0.99, "p99")):
+                    live[_n] = round(_hquant(_lb["__e2e_buckets"], _q) * 1000, 0)
+                # 均值同样是窗口差分(Δsum/Δcount),与分位数同源同窗 —— 一半窗口
+                # 一半生命周期比全错更难查。样本量小时分位数会偏高,均值做对照。
+                live["ttft"] = round(_lm.get("ttft", 0.0), 1)
+                live["tpot"] = round(_lm.get("tpot", 0.0), 1)
+                for _q, _suf in ((0.50, "P50"), (0.90, "P90"), (0.99, "P99")):
+                    live["ttft" + _suf] = round(_hquant(_lb["__ttft_buckets"], _q) * 1000, 0)
+                    live["tpot" + _suf] = round(_hquant(_lb["__tpot_buckets"], _q) * 1000, 1)
+                # 请求耗时分解:排队 → prefill → decode。三段分开报,"变慢了"才知道
+                # 该查哪一侧(排队 = 容量不够 / prefill = 上下文太长 / decode = 带宽)。
+                for _k in ("queue", "prefill", "decode", "itl"):
+                    live[_k] = round(_lm.get(_k, 0.0), 1)
+                    for _q, _suf in ((0.50, "P50"), (0.90, "P90"), (0.99, "P99")):
+                        live[_k + _suf] = round(_hquant(_lb[f"__{_k}_buckets"], _q) * 1000, 1)
             spec = _spec_stats(a, b)
             if spec:                    # 未开投机解码 → 键整个缺席,前端 if (live.spec)
                 live["spec"] = spec
-            # SLO 达标率(阈值来自配置 slo:,未配则整组字段缺席)
-            slo = _slo_rates(ttft_b, tpot_b)
+            # SLO 达标率。⛔ 必须用【同一份差分桶】—— 它建在 TTFT/TPOT 之上,
+            # 若这里还吃生命周期桶,就成了"一半窗口一半生命周期",比全错更难查。
+            slo = _slo_rates(_lb["__ttft_buckets"], _lb["__tpot_buckets"]) if lat else None
             if slo:
                 live.update(slo)
             # 饱和提示:排队时间占了 TTFT 的大头 + 两次采样都有请求在等 →
@@ -2247,13 +2349,14 @@ async def models_list():
             # 涨了一个数量级,多出来的时间几乎全花在排队上)。
             # "持续"在单次调用内只能取两次采样都 > 0 —— 这是本接口能拿到的
             # 最强证据,不做跨调用状态。
-            _qr = (live["queueP90"] / live["ttftP90"]) if live["ttftP90"] > 0 else 0.0
-            live["queueShareP90"] = round(_qr * 100, 1)
             live["waitingCapacity"] = int(_gauge(a, b, "__waiting_capacity"))
-            live["saturated"] = bool(
-                min(a.get("vllm:num_requests_waiting", 0),
-                    b.get("vllm:num_requests_waiting", 0)) > 0
-                and _qr > float(_SLO.get("queue_share_warn", 0.5)))
+            if lat:                     # 同样只在有窗口数据时才给,不拿 0 冒充
+                _qr = (live["queueP90"] / live["ttftP90"]) if live["ttftP90"] > 0 else 0.0
+                live["queueShareP90"] = round(_qr * 100, 1)
+                live["saturated"] = bool(
+                    min(a.get("vllm:num_requests_waiting", 0),
+                        b.get("vllm:num_requests_waiting", 0)) > 0
+                    and _qr > float(_SLO.get("queue_share_warn", 0.5)))
             # KV 池绝对值。来自 cache_config_info 这个 info gauge,搭现有抓取的
             # 顺风车 —— 零额外往返。老版本 vLLM 无此指标 → 字段缺席。
             _kvi = b.get("__kv_info") or {}
@@ -2317,25 +2420,25 @@ async def models_list():
             b = _merge_scrape([g2.get(b) or {} for b in gb])
             dt = _dt_real
             tps = _rate(a, b, "sglang:generation_tokens_total", dt)
-            tcnt = b.get("sglang:time_to_first_token_seconds_count", 0)
-            tsum = b.get("sglang:time_to_first_token_seconds_sum", 0)
-            ttft = (tsum / tcnt * 1000) if tcnt else 0
-            icnt = b.get("sglang:inter_token_latency_seconds_count", 0)
-            isum = b.get("sglang:inter_token_latency_seconds_sum", 0)
-            tpot = (isum / icnt * 1000) if icnt else 0
             kv = b.get("sglang:token_usage", 0) * 100 / max(1, len(gb))
-            e2e_b = b.get("__e2e_buckets") or {}
+            # 与 vLLM 同一修正：延迟量走滑动窗口差分，不再报"开机以来"
+            lat = _lat_window(m["id"], b, _t_now,
+                              means=_LAT_MEANS_SGLANG, e2e_prefix="sglang")
             running = _gauge(a, b, "sglang:num_running_reqs")
             waiting = _gauge(a, b, "sglang:num_queue_reqs")
             state = "serving" if running > 0 or tps > 0 else "idle"
             live = {"tps": round(tps, 1), "rps": 0,
-                    "ttft": round(ttft, 1), "tpot": round(tpot, 1),
                     "kv": round(kv, 1), "running": int(running),
                     "waiting": int(waiting), "metrics": "sglang",
-                    "resident": True,
-                    "p50": round(_hquant(e2e_b, 0.50) * 1000, 0),
-                    "p95": round(_hquant(e2e_b, 0.95) * 1000, 0),
-                    "p99": round(_hquant(e2e_b, 0.99) * 1000, 0)}
+                    "resident": True}
+            if lat:                     # None → 整组延迟字段缺席，不填 0
+                _lb, _lm = lat["b"], lat["mean"]
+                live["latencyWindowSec"] = lat["windowSec"]
+                live["latencySampleN"] = lat["sampleN"]
+                live["ttft"] = round(_lm.get("ttft", 0.0), 1)
+                live["tpot"] = round(_lm.get("tpot", 0.0), 1)
+                for _q, _n in ((0.50, "p50"), (0.95, "p95"), (0.99, "p99")):
+                    live[_n] = round(_hquant(_lb["__e2e_buckets"], _q) * 1000, 0)
         elif m.get("up"):                       # 网关健康但无可识别 /metrics
             state = "online"                    # 在线·服务中，无详细指标（不伪造）
             live = {"metrics": "none", "resident": True}
