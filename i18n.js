@@ -78,6 +78,12 @@
       "Route · ": "路由 · ",
       // 指标口径：延迟分解 + 分位数 + 投机解码 + 瞬时/持续吞吐
       // 响应构成（来自 LiteLLM spend logs，带外只读）
+      "Time to first content": "首个正文延迟", "gateway stream": "网关流",
+      "TTFT (gw)": "TTFT（网关）", "TTFC": "TTFC",
+      "No content at all": "全程无正文", "tool calls, expected": "为工具调用，属预期",
+      "Think chunks first": "正文前 think 块", "median, before first content": "中位数，首个正文之前",
+      "TTFC from gateway stream hook · different population than vLLM TTFT above":
+        "TTFC 来自网关流 hook，与上方 vLLM 口径的 TTFT 样本总体不同，勿互相校验",
       "Response composition": "响应构成", "last": "近",
       "Empty answers": "空正文", "baseline 0%": "基线 0%",
       "Tool responses": "工具响应", "counted separately": "单独分组",
@@ -253,6 +259,12 @@
       "Route · ": "路由 · ",
       // 指標口徑：延遲分解 + 分位數 + 投機解碼 + 瞬時/持續吞吐
       // 響應構成（來自 LiteLLM spend logs，帶外唯讀）
+      "Time to first content": "首個正文延遲", "gateway stream": "網關流",
+      "TTFT (gw)": "TTFT（網關）", "TTFC": "TTFC",
+      "No content at all": "全程無正文", "tool calls, expected": "為工具呼叫，屬預期",
+      "Think chunks first": "正文前 think 塊", "median, before first content": "中位數，首個正文之前",
+      "TTFC from gateway stream hook · different population than vLLM TTFT above":
+        "TTFC 來自網關流 hook，與上方 vLLM 口徑的 TTFT 樣本總體不同，勿互相校驗",
       "Response composition": "響應構成", "last": "近",
       "Empty answers": "空正文", "baseline 0%": "基線 0%",
       "Tool responses": "工具響應", "counted separately": "單獨分組",

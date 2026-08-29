@@ -453,7 +453,8 @@ function ResponseBlock({ model }) {
   const { t } = useLang();
   const hasEmpty = model.emptyContentRate !== undefined;
   const hasThink = model.thinkingCharShare !== undefined;
-  if (!hasEmpty && !hasThink) return null;
+  const hasTtfc = model.ttfcNullRate !== undefined || model.ttfcP50 !== undefined;
+  if (!hasEmpty && !hasThink && !hasTtfc) return null;
   return (
     <div>
       <div className="metric-l" style={{ marginBottom: 6 }}>
@@ -489,6 +490,41 @@ function ResponseBlock({ model }) {
           </span>
         </> : null}
       </div>
+      {model.ttfcP50 !== undefined || model.ttfcNullRate !== undefined ? <>
+        <div className="metric-l" style={{ margin: "12px 0 6px" }}>
+          {t("Time to first content")} · {t("gateway stream")} · {t("last")} {model.ttfcWindowH}h
+        </div>
+        {model.ttfcP50 !== undefined ? <div style={{ display: "grid",
+              gridTemplateColumns: "auto repeat(4, 1fr)", gap: "4px 10px",
+              fontFamily: "var(--mono)", fontSize: 11 }}>
+          <span />
+          <span style={{ color: "var(--ink-3)", fontSize: 10 }}>{t("mean")}</span>
+          <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p50</span>
+          <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p90</span>
+          <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p99</span>
+          {/* TTFT 这一行是【网关口径】，与上面延迟分解里那个 vLLM 口径的 TTFT
+              不是一回事：hook 只看走网关的流量，vLLM 看全部含直连。故分别标源，
+              ⛔ 不要拿两者互相校验或二选一。 */}
+          <PctRow label={t("TTFT (gw)")} p50={model.ttftGwP50} p90={model.ttftGwP90} />
+          <PctRow label={t("TTFC")} mean={model.ttfcMean} p50={model.ttfcP50}
+                  p90={model.ttfcP90} p99={model.ttfcP99} warn={10000} />
+        </div> : null}
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px",
+                      fontFamily: "var(--mono)", fontSize: 11.5, marginTop: 6 }}>
+          {model.ttfcNullRate !== undefined ? <>
+            <span style={{ color: "var(--ink-3)" }}>{t("No content at all")}</span>
+            <span><b style={{ color: "var(--ink)" }}>{model.ttfcNullRate}%</b>
+              <small style={{ color: "var(--ink-3)" }}>
+                {" "}{model.ttfcNullN}/{model.ttfcTotalN} · {t("tool calls, expected")}
+              </small></span>
+          </> : null}
+          {model.thinkChunksP50 !== undefined ? <>
+            <span style={{ color: "var(--ink-3)" }}>{t("Think chunks first")}</span>
+            <span>{model.thinkChunksP50} <small style={{ color: "var(--ink-3)" }}>
+              {t("median, before first content")}</small></span>
+          </> : null}
+        </div>
+      </> : null}
       {/* ⛔ 判据写在界面上是刻意的：区分「文本响应」与「工具响应」必须用
           tool_calls 是不是数组，不能用 finish_reason —— 该模型发 tool_calls 时
           finish_reason 仍是 'stop'，按它过滤会把工具响应算进文本组，空正文率
@@ -498,6 +534,9 @@ function ResponseBlock({ model }) {
                     fontFamily: "var(--mono)", lineHeight: 1.6 }}>
         {t("text vs tool split by tool_calls array, not finish_reason")}
         {hasThink ? <><br />{t("character share, not tokens · truncated responses excluded")}</> : null}
+        {model.ttfcP50 !== undefined
+          ? <><br />{t("TTFC from gateway stream hook · different population than vLLM TTFT above")}</>
+          : null}
       </div>
     </div>
   );
@@ -731,6 +770,9 @@ function ModelDetail({ model }) {
             {model.sloTtftRate !== undefined ? <SloBlock model={model} /> : null}
             {model.saturated !== undefined ? <SatBlock model={model} /> : null}
           </div> : null}
+          {/* 响应构成放第 2 栏：它讲的是延迟与输出构成，与上面的分解同话题；
+              第 3 栏留给 路由 / 效率 / 投机解码，两栏高度才不至于一边空一半。 */}
+          <ResponseBlock model={model} />
         </> : model.metricsSource === "llamacpp" ? <>
           {/* llama.cpp /metrics 暴露 TPOT/throughput/running, 不暴露 TTFT/KV/e2e */}
           <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
@@ -758,7 +800,6 @@ function ModelDetail({ model }) {
         {model.mbu !== undefined || model.mfu !== undefined
           ? <div style={{ marginTop: 18 }}><EffBlock model={model} /></div> : null}
         {model.spec ? <div style={{ marginTop: 18 }}><SpecDecode spec={model.spec} /></div> : null}
-        <div style={{ marginTop: 18 }}><ResponseBlock model={model} /></div>
       </div>
     </div>
   );

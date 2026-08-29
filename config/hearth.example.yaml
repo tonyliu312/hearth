@@ -165,6 +165,19 @@ spend_logs:
                                    # 否则会因截断系统性偏低。
   refresh_seconds: 300             # ⛔ 绝不能进 2.5s 快照循环。300s ≈ 0.0033 次/秒
 
+# 网关 TTFC hook 产出（只读文件）。首个【正文】token 延迟 —— vLLM 侧给不出，
+# 因为 completionStartTime 只是首个 chunk 的时刻，而该模型首个 chunk 是
+# thinking token 不是正文。hook 在流上直接量并写 jsonl，Hearth 只读文件。
+# 文件按日期分、容器可写层无挂载，重建容器即丢 —— 当天文件不存在是【正常
+# 情况】，按无数据静默处理。整段删掉 → 相关字段全部消失。
+ttfc:
+  enabled: true
+  container: litellm-gateway
+  dir: /tmp/ttfc
+  window_hours: 6
+  # 刷新频率与 spend_logs 共用同一个 300s 循环（见 spend_logs.refresh_seconds），
+  # ⛔ 同样绝不进 2.5s 快照循环。
+
 # 效率口径(MBU/MFU)。不配 → 不显示,不估算。
 efficiency:
   # ⛔ 以下两个都是【每节点】硬件常数,不含并行度 —— 并行度属于部署,配在

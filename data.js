@@ -494,6 +494,9 @@
           "stepsPerSec","mbu","mfu","mfuDelivered","mfuDrafterMissing",
           "emptyContentRate","emptyContentN","emptyContentTotal","toolCallN",
           "thinkingCharShare","thinkingSampleN","thinkingTruncatedN","spendWindowH",
+          "ttfcP50","ttfcP90","ttfcP99","ttfcMean","ttfcSampleN",
+          "ttfcNullRate","ttfcNullN","ttfcTotalN","ttfcWindowH",
+          "ttftGwP50","ttftGwP90","thinkChunksP50",
         ].forEach((k) => { if (lv[k] !== undefined) e[k] = lv[k]; });
         e.spec = lv.spec || null;                // 未开投机解码 → null → 整块不渲染
         // 效率与饱和是【瞬时】量：引擎空闲时后端不返回(不估算)，前端必须跟着

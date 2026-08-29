@@ -1921,23 +1921,131 @@ async def _spend_scrape() -> dict:
     return by_model
 
 
+# ── 网关 TTFC hook 产出（只读文件，不碰网关）─────────────────────────
+# 首个【正文】token 延迟。vLLM 侧给不出:completionStartTime 只是首个 chunk 的
+# 时刻,而该模型首个 chunk 是 thinking token 不是正文,库里没有任何 intra-stream
+# 的正文起始时刻。网关 hook 在流上直接量,产出 jsonl,我们只读文件。
+_TTFC = HEARTH_CFG.get("ttfc") or {}
+
+
+def _quantile(vals: list, q: float) -> float:
+    """原始样本的分位数(线性插值)。与 _hquant 不同 —— 那个吃累积直方图桶,
+    这个吃逐条样本。样本量小时分位数会偏高,所以同时给均值和样本数做对照。"""
+    if not vals:
+        return 0.0
+    v = sorted(vals)
+    if len(v) == 1:
+        return v[0]
+    pos = q * (len(v) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (pos - lo)
+
+
+async def _ttfc_scrape() -> dict:
+    """读 hook 产出的 jsonl。失败/缺文件一律 {} —— 文件按日期分且容器可写层
+    无挂载,重建容器即丢,所以"当天文件不存在"是【正常情况】不是错误。
+
+    取最近两个文件而不是按日期名拼:既跨零点仍能凑满窗口,又不必猜 hook 写
+    文件名用的是哪个时区。"""
+    if not _TTFC.get("enabled"):
+        return {}
+    try:
+        win = int(_TTFC.get("window_hours", 6))
+    except (TypeError, ValueError):
+        return {}
+    d = str(_TTFC.get("dir", "/tmp/ttfc"))
+    argv = ["docker", "exec", str(_TTFC.get("container", "litellm-gateway")), "sh", "-c",
+            f"ls -1t {d}/ttfc-*.jsonl 2>/dev/null | head -2 | xargs -r cat"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, _e = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        if proc.returncode != 0:
+            return {}
+    except Exception:
+        return {}
+    cutoff = time.time() - win * 3600
+    agg: dict = {}
+    for line in out.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            r = json.loads(line)
+            if float(r.get("ts", 0)) < cutoff:
+                continue
+            name = str(r.get("model") or "")
+        except (ValueError, TypeError):
+            continue
+        if not name:
+            continue
+        name = name.split("/", 1)[1] if "/" in name else name
+        a = agg.setdefault(name, {"ttfc": [], "ttft": [], "think": [], "n": 0, "null": 0})
+        a["n"] += 1
+        c = r.get("ttfc_ms")
+        # ⛔ ttfc_ms 为 null 是【合法值】不是缺数据:工具调用响应本来就没有正文。
+        # 必须先过滤再算分位数,否则要么崩要么把 null 当 0(会把分位数拉到地板)。
+        if c is None:
+            a["null"] += 1
+        else:
+            try:
+                a["ttfc"].append(float(c))
+            except (TypeError, ValueError):
+                pass
+        for key, fld in (("ttft", "ttft_ms"), ("think", "think_chunks_before_content")):
+            v = r.get(fld)
+            if v is not None:
+                try:
+                    a[key].append(float(v))
+                except (TypeError, ValueError):
+                    pass
+    out_by_model: dict = {}
+    for name, a in agg.items():
+        if not a["n"]:
+            continue
+        d2: dict = {"ttfcWindowH": win, "ttfcTotalN": a["n"],
+                    "ttfcNullN": a["null"],
+                    "ttfcNullRate": round(a["null"] / a["n"] * 100, 1)}
+        if a["ttfc"]:
+            d2.update({"ttfcSampleN": len(a["ttfc"]),
+                       "ttfcMean": round(sum(a["ttfc"]) / len(a["ttfc"]), 0),
+                       "ttfcP50": round(_quantile(a["ttfc"], 0.50), 0),
+                       "ttfcP90": round(_quantile(a["ttfc"], 0.90), 0),
+                       "ttfcP99": round(_quantile(a["ttfc"], 0.99), 0)})
+        if a["ttft"]:
+            # ⛔ 与 vLLM 侧的 ttftP50 【口径不同】,不要互相校验或二选一:
+            # hook 只看走网关的流量,vLLM 看全部(含直连)。故字段名带 Gw 标源。
+            d2["ttftGwP50"] = round(_quantile(a["ttft"], 0.50), 0)
+            d2["ttftGwP90"] = round(_quantile(a["ttft"], 0.90), 0)
+        if a["think"]:
+            # ⛔ 这是首个正文【之前】的 thinking 分片数,不是全程累计 ——
+            # hook 在首个正文到达后完全短路(那正是它零开销的前提)。
+            d2["thinkChunksP50"] = round(_quantile(a["think"], 0.50), 0)
+        out_by_model[name] = d2
+    return out_by_model
+
+
 async def _spend_loop():
     """独立的长 TTL 刷新循环。⛔ 绝不能放进 2.5s 快照循环:那张表近百万行,
     且这是子进程 + DB 查询。默认 300s 一次 ≈ 0.0033 次/秒。"""
     while True:
-        try:
-            d = await _spend_scrape()
-            if d:
-                _SPEND_DATA["by_model"], _SPEND_DATA["ts"] = d, time.time()
-        except Exception:
-            pass
+        merged: dict = {}
+        for fn in (_spend_scrape, _ttfc_scrape):
+            try:                        # 两个数据源互不牵连:一个挂了另一个照常
+                for k, v in (await fn() or {}).items():
+                    merged.setdefault(k, {}).update(v)
+            except Exception:
+                pass
+        if merged:
+            _SPEND_DATA["by_model"], _SPEND_DATA["ts"] = merged, time.time()
         await asyncio.sleep(max(60, int(_SPEND.get("refresh_seconds", 300))))
 
 
 def _spend_for(model_id: str) -> dict:
     """取某模型的 spend 指标。没开、没数据、该模型没样本 → 空 dict → 字段缺席。"""
     global _SPEND_TASK
-    if not _SPEND.get("enabled"):
+    if not (_SPEND.get("enabled") or _TTFC.get("enabled")):
         return {}
     if _SPEND_TASK is None or _SPEND_TASK.done():
         _SPEND_TASK = asyncio.create_task(_spend_loop())
