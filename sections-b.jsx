@@ -362,6 +362,91 @@ function SpecDecode({ spec }) {
   );
 }
 
+// SLO 达标率。刻意不叫 goodput —— 那个词业界特指「同时满足全部 SLO 的请求
+// 占比」，是每请求的联合条件；聚合直方图只能给边缘分布。联合值用
+// Fréchet-Hoeffding 边界给严格区间，不做任何独立性假设。
+function SloBlock({ model }) {
+  const { t } = useLang();
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div className="metric-l" style={{ marginBottom: 6 }}>
+        {t("SLO attainment")} · TTFT ≤ {model.sloTtftMs}ms · TPOT ≤ {model.sloTpotMs}ms
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr",
+                    gap: "4px 12px", fontFamily: "var(--mono)", fontSize: 11.5 }}>
+        <span style={{ color: "var(--ink-3)" }}>TTFT</span>
+        <span style={{ color: "var(--ink)" }}>{model.sloTtftRate}%</span>
+        <span style={{ color: "var(--ink-3)" }}>TPOT</span>
+        <span style={{ color: "var(--ink)" }}>{model.sloTpotRate}%</span>
+        <span style={{ color: "var(--ink-3)" }}>{t("both")}</span>
+        <span>
+          <b style={{ color: model.sloJointWide ? "var(--ink-2)" : "var(--ink)" }}>
+            {model.sloJointLower}–{model.sloJointUpper}%
+          </b>
+          {model.sloJointWide
+            ? <small style={{ color: "var(--hot)" }}> {t("wide range · indicative only")}</small>
+            : null}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// 饱和提示：排队占了 TTFT 的大头 + 持续有请求在等 → 再加负载不划算。
+function SatBlock({ model }) {
+  const { t } = useLang();
+  return (
+    <div style={{ marginTop: 12, fontFamily: "var(--mono)", fontSize: 11 }}>
+      <span style={{
+        display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10,
+        background: model.saturated ? "var(--hot)" : "var(--line)",
+        color: model.saturated ? "#000" : "var(--ink-3)",
+      }}>
+        {model.saturated ? t("SATURATED · adding load costs latency, not throughput")
+                         : t("headroom available")}
+      </span>
+      <span style={{ color: "var(--ink-3)", marginLeft: 8 }}>
+        {t("queue is")} {model.queueShareP90}% {t("of TTFT p90")}
+        {model.waitingCapacity > 0 ? ` · ${model.waitingCapacity} ${t("waiting on capacity")}` : ""}
+      </span>
+    </div>
+  );
+}
+
+// MBU / MFU。回答「还有多少余量」——瓶颈在带宽还是在别处。
+function EffBlock({ model }) {
+  const { t } = useLang();
+  return (
+    <div>
+      <div className="metric-l" style={{ marginBottom: 6 }}>{t("Efficiency")}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr",
+                    gap: "4px 12px", fontFamily: "var(--mono)", fontSize: 11.5 }}>
+        {model.mbu !== undefined ? <>
+          <span style={{ color: "var(--ink-3)" }}>{t("MBU (bandwidth)")}</span>
+          <span style={{ color: "var(--ink)" }}>{model.mbu}%</span>
+        </> : null}
+        {model.mfu !== undefined ? <>
+          <span style={{ color: "var(--ink-3)" }}>{t("MFU (compute)")}</span>
+          <span><b style={{ color: "var(--ink)" }}>{model.mfu}%</b>
+            <small style={{ color: "var(--ink-3)" }}> {t("processed")}</small>
+            {" · "}{model.mfuDelivered}%
+            <small style={{ color: "var(--ink-3)" }}> {t("delivered")}</small>
+          </span>
+        </> : null}
+        {model.stepsPerSec !== undefined ? <>
+          <span style={{ color: "var(--ink-3)" }}>{t("Engine steps")}</span>
+          <span>{model.stepsPerSec}/s</span>
+        </> : null}
+      </div>
+      {model.mfuDrafterMissing
+        ? <div style={{ marginTop: 5, fontSize: 10, color: "var(--ink-3)",
+                        fontFamily: "var(--mono)" }}>
+            {t("drafter params not configured → MFU is an underestimate")}
+          </div> : null}
+    </div>
+  );
+}
+
 // ── MODELS ─────────────────────────────────────────────────────────────
 function ModelsSection() {
   useLive();
@@ -562,6 +647,10 @@ function ModelDetail({ model }) {
           <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 10)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
           <DetailMetric label={t("Requests / sec")}     value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
           <DetailMetric label={t("KV-cache")}           value={ms.kv.now.toFixed(1)} unit="%" bar={Math.min(100, ms.kv.now)} color={ms.kv.now > 80 ? "bad" : ms.kv.now > 65 ? "hot" : "violet"} />
+          {model.kvTokens ? <div style={{ marginTop: -6, fontFamily: "var(--mono)",
+                                          fontSize: 10.5, color: "var(--ink-3)" }}>
+            {t("pool")} {(model.kvTokens / 1e6).toFixed(2)}M {t("tokens")} · {(model.kvBytes / 2 ** 30).toFixed(1)} GiB · {t("max concurrency")} {model.kvMaxConc}×
+          </div> : null}
           {model.ttftP50 !== undefined ? <div>
             <div className="metric-l" style={{ marginBottom: 8 }}>{t("Latency breakdown · mean vs percentiles")}</div>
             <div style={{ display: "grid", gridTemplateColumns: "auto repeat(4, 1fr)",
@@ -583,6 +672,8 @@ function ModelDetail({ model }) {
                   加少量长间隔，均值抹平，分位数才看得见。 */}
               <PctRow label="ITL"          mean={model.itl}     p50={model.itlP50}     p90={model.itlP90}     p99={model.itlP99} />
             </div>
+            {model.sloTtftRate !== undefined ? <SloBlock model={model} /> : null}
+            {model.saturated !== undefined ? <SatBlock model={model} /> : null}
           </div> : null}
         </> : model.metricsSource === "llamacpp" ? <>
           {/* llama.cpp /metrics 暴露 TPOT/throughput/running, 不暴露 TTFT/KV/e2e */}
@@ -613,6 +704,8 @@ function ModelDetail({ model }) {
           <button style={modelBtn(false)}>{t("Restart")}</button>
           <button style={modelBtn(false)}>{t("Logs")}</button>
         </div>
+        {model.mbu !== undefined || model.mfu !== undefined
+          ? <div style={{ marginTop: 18 }}><EffBlock model={model} /></div> : null}
         {model.spec ? <div style={{ marginTop: 18 }}><SpecDecode spec={model.spec} /></div> : null}
       </div>
     </div>

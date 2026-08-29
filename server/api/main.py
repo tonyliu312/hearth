@@ -1419,6 +1419,13 @@ _VLLM_SCALARS = {
     "vllm:request_time_per_output_token_seconds_count",
     "vllm:kv_cache_usage_perc",
     "vllm:e2e_request_latency_seconds_sum", "vllm:e2e_request_latency_seconds_count",
+    # 引擎迭代计数。count = 引擎前向次数(每次前向把激活权重完整读一遍 → MBU 的
+    # 分子基础); sum = 这些前向里实际处理的 token 位置总数(含 prefill 与投机解码
+    # 的 verify 位置 → MFU 的分子基础)。
+    # ⛔ 不要拿 spec_decode_num_drafts_total 当步频:drafts 是【每请求】计数,
+    #    连续批处理下一次前向会产出 B 个 draft(本机实测 51564/28300 = 1.82),
+    #    用它算 MBU 会按批量倍数高估。
+    "vllm:iteration_tokens_total_count", "vllm:iteration_tokens_total_sum",
     # 请求耗时分解 + ITL。sum/count 求均值,作为分位数的对照线:样本量小时
     # 分位数会偏高(几十个样本的 p99 基本就是最大值),两者背离大时以均值为准。
     "vllm:request_prefill_time_seconds_sum", "vllm:request_prefill_time_seconds_count",
@@ -1457,6 +1464,29 @@ def _hquant(buckets: dict, q: float) -> float:
             return prev_le + (le_f - prev_le) * ((rank - prev_c) / (c - prev_c))
         prev_le, prev_c = le_f, c
     return pts[-1][0]
+
+
+def _hfrac(buckets: dict, x: float) -> float | None:
+    """累积桶 → 样本中 <= x 秒的比例(0-1)。_hquant 的反函数,桶内线性插值。
+
+    用于 SLO 达标率:阈值恰好落在桶边界时是精确值(如 TPOT 100ms = le 0.1),
+    落在桶中间则是插值近似(如 TTFT 2000ms 落在 [1.0, 2.5] 之间)。
+    无样本返回 None —— 不是 0%,也不是 100%,是"没测到"。"""
+    if not buckets:
+        return None
+    pts = sorted((float("inf") if le in ("+Inf", "Inf") else float(le), c)
+                 for le, c in buckets.items())
+    total = pts[-1][1]
+    if total <= 0:
+        return None
+    prev_le, prev_c = 0.0, 0.0
+    for le_f, c in pts:
+        if x <= le_f:
+            if le_f == float("inf") or le_f == prev_le:
+                return prev_c / total
+            return (prev_c + (c - prev_c) * ((x - prev_le) / (le_f - prev_le))) / total
+        prev_le, prev_c = le_f, c
+    return 1.0
 
 
 _LLAMACPP_SCALARS = {
@@ -1577,6 +1607,7 @@ async def _scrape_vllm(base: str) -> dict:
     out: dict[str, float] = {}
     hists: dict[str, dict[str, float]] = {k: {} for k in _VLLM_HISTS.values()}
     spec_pos: dict[str, float] = {}
+    kv_info: dict[str, float] = {}
     try:
         r = await client.get(f"{base}/metrics", timeout=4.0)
         r.raise_for_status()
@@ -1597,6 +1628,26 @@ async def _scrape_vllm(base: str) -> dict:
                 if mle:
                     hb = hists[hkey]
                     hb[mle.group(1)] = hb.get(mle.group(1), 0.0) + v
+            elif name == "vllm:cache_config_info":
+                # KV 池绝对值。这是 Prometheus info gauge(值恒为 1,信息全在
+                # label 里),**就在已抓的这份文本内** —— 不需要 docker logs、
+                # 不需要 ssh、不新增任何网络往返。
+                # 不要用 num_gpu_blocks × block_size 反推池大小:该模型
+                # 2176 × 2304 = 5,013,504 ≠ kv_cache_size_tokens 4,545,221
+                # (混合 mamba 层页大小不同),以 kv_cache_size_tokens 为准。
+                for lbl, key in (("kv_cache_size_tokens", "tokens"),
+                                 ("kv_cache_memory_bytes", "bytes"),
+                                 ("kv_cache_max_concurrency", "maxConc")):
+                    mv = re.search(rf'{lbl}="([^"]+)"', head)
+                    if mv:
+                        try:
+                            kv_info[key] = kv_info.get(key, 0.0) + float(mv.group(1))
+                        except ValueError:
+                            pass
+            elif name == "vllm:num_requests_waiting_by_reason":
+                mr = re.search(r'reason="([^"]+)"', head)
+                if mr and mr.group(1) == "capacity":     # 容量性排队 = 真饱和信号
+                    out["__waiting_capacity"] = out.get("__waiting_capacity", 0.0) + v
             elif name == "vllm:spec_decode_num_accepted_tokens_per_pos_total":
                 mp = re.search(r'position="([^"]+)"', head)
                 if mp:
@@ -1607,6 +1658,7 @@ async def _scrape_vllm(base: str) -> dict:
         return {}
     out.update(hists)
     out["__spec_pos"] = spec_pos
+    out["__kv_info"] = kv_info          # 老版本 vLLM 无此指标 → 空 dict → 字段缺席
     return out
 
 
@@ -1650,6 +1702,81 @@ def _gauge(a: dict, b: dict, key: str) -> float:
 _TPS_ANCHOR: dict[str, tuple[float, float]] = {}
 _TPS_MIN_WIN = 15.0     # 窗口短于此 → 与瞬时值无异,不值得单列
 _TPS_MAX_WIN = 300.0    # 超过此 → 锚点太旧,重置(否则会把很久以前的负载摊进来)
+
+
+# SLO 阈值与饱和判据。阈值放配置不写死;整段缺失 → 相关字段全部缺席,面板不渲染。
+_SLO = HEARTH_CFG.get("slo") or {}
+# 效率口径。峰值算力必须用【实测】值:规格书数字与实际可达差很远,用规格书算出来的
+# MFU 没有意义。GB10 实测 bf16 matmul burn 95.0 TFLOP/s(来源 tonyd2wild 的
+# GLM-5.3-Int4-Int8Mix 仓,排查单节点降频时测得)。
+_EFF = HEARTH_CFG.get("efficiency") or {}
+
+
+def _slo_rates(ttft_b: dict, tpot_b: dict) -> dict | None:
+    """SLO 达标率。**刻意不叫 goodput** —— 业界那个词特指「同时满足全部 SLO
+    的请求占比」,是每请求的联合条件;我们手上只有聚合直方图,只能给边缘分布,
+    拿分量去占用那个名字会误导。
+
+    联合达标率用 Fréchet-Hoeffding 边界给严格区间(不需要任何独立性假设):
+        joint ∈ [max(0, a+b-1), min(a, b)]
+    区间宽度自己也是信息:a=99% b=60% → [59%,60%] 几乎等于精确值;
+    a=80% b=70% → [50%,70%] 就只能当参考。宽度超过 sloJointWidthWarn
+    个百分点时前端标"仅供参考"。"""
+    t_ms, p_ms = _SLO.get("ttft_ms"), _SLO.get("tpot_ms")
+    if not t_ms or not p_ms:
+        return None
+    a = _hfrac(ttft_b, t_ms / 1000.0)
+    b = _hfrac(tpot_b, p_ms / 1000.0)
+    if a is None or b is None:
+        return None                     # 无样本 → 不报 0% 也不报 100%
+    lo, hi = max(0.0, a + b - 1.0), min(a, b)
+    return {"sloTtftMs": t_ms, "sloTpotMs": p_ms,
+            "sloTtftRate": round(a * 100, 1), "sloTpotRate": round(b * 100, 1),
+            "sloJointLower": round(lo * 100, 1), "sloJointUpper": round(hi * 100, 1),
+            "sloJointWide": (hi - lo) * 100 > float(_SLO.get("joint_width_warn_pp", 10))}
+
+
+def _efficiency(meta: dict, steps_ps: float, tok_ps: float,
+                proc_tok_ps: float, spec_len: int) -> dict | None:
+    """MBU(内存带宽利用率) / MFU(算力利用率)。需要按模型配激活参数量,
+    没配就整块不返回 —— 不估算、不编造。
+
+    MBU: decode 每步把激活权重完整读一遍 → 激活字节数 × 步频 / 理论带宽。
+    MFU 给两个口径,回答的是不同问题:
+      mfu          verify pass 实际处理的 token(草稿长度+1)。硬件确实为全部
+                   位置做了 FLOPs,被拒的草稿也真烧了算力 —— MFU 按定义是
+                   「硬件利用率」,这个是主口径。
+      mfuDelivered 实际吐出的 token。回答「每个有用 token 花了多少算力」。
+    两者比值就是接受率(已有 acceptRate),故不单列成字段。
+    FLOPs 用前向 MAC 近似 2 × 激活参数 × token 数。"""
+    ap = meta.get("active_params_b")
+    if not ap:
+        return None
+    out: dict = {}
+    ap_n = float(ap) * 1e9
+    bw = _EFF.get("mem_bw_gbps")
+    bpp = meta.get("bytes_per_param")
+    if bw and bpp and steps_ps > 0:
+        out["mbu"] = round(ap_n * float(bpp) * steps_ps / (float(bw) * 1e9) * 100, 1)
+    peak = _EFF.get("peak_tflops")
+    if peak and proc_tok_ps > 0:
+        # FLOPs 用前向 MAC 近似 2 × 激活参数 × token 数。
+        # 分子用【实测】的 iteration_tokens_sum 速率,而不是 步频 × (k+1) 估算:
+        # 前者是引擎自报的"这些前向里真处理了多少 token 位置",天然涵盖投机解码
+        # 的 verify 位置与 prefill 位置,不需要假设每步批量或草稿长度。
+        # 代价是 prefill 阶段 mfu 会冲高 —— 那是真实的算力消耗,不是失真。
+        peak_f = float(peak) * 1e12
+        fl = 2 * ap_n * proc_tok_ps
+        dp = meta.get("drafter_params_b")
+        if dp and spec_len:
+            # DFlash2 是 block-diffusion:k 个草稿位置来自【一次】并行前向,
+            # 不是 k 次前向 —— 每步只加一次 drafter 的量。
+            fl += 2 * float(dp) * 1e9 * steps_ps * spec_len
+        elif spec_len:
+            out["mfuDrafterMissing"] = True   # 未配 drafter 参数量 → mfu 偏低估
+        out["mfu"] = round(fl / peak_f * 100, 1)
+        out["mfuDelivered"] = round(2 * ap_n * tok_ps / peak_f * 100, 1)
+    return out or None
 
 
 def _tps_rollup(samples: dict, now: float) -> dict[str, tuple]:
@@ -1838,6 +1965,38 @@ async def models_list():
             spec = _spec_stats(a, b)
             if spec:                    # 未开投机解码 → 键整个缺席,前端 if (live.spec)
                 live["spec"] = spec
+            # SLO 达标率(阈值来自配置 slo:,未配则整组字段缺席)
+            slo = _slo_rates(ttft_b, tpot_b)
+            if slo:
+                live.update(slo)
+            # 饱和提示:排队时间占了 TTFT 的大头 + 两次采样都有请求在等 →
+            # 再加负载已经不划算(实测 QPS 1.0→2.0 吞吐只涨 25%,而 TTFT p90
+            # 涨了一个数量级,多出来的时间几乎全花在排队上)。
+            # "持续"在单次调用内只能取两次采样都 > 0 —— 这是本接口能拿到的
+            # 最强证据,不做跨调用状态。
+            _qr = (live["queueP90"] / live["ttftP90"]) if live["ttftP90"] > 0 else 0.0
+            live["queueShareP90"] = round(_qr * 100, 1)
+            live["waitingCapacity"] = int(_gauge(a, b, "__waiting_capacity"))
+            live["saturated"] = bool(
+                min(a.get("vllm:num_requests_waiting", 0),
+                    b.get("vllm:num_requests_waiting", 0)) > 0
+                and _qr > float(_SLO.get("queue_share_warn", 0.5)))
+            # KV 池绝对值。来自 cache_config_info 这个 info gauge,搭现有抓取的
+            # 顺风车 —— 零额外往返。老版本 vLLM 无此指标 → 字段缺席。
+            _kvi = b.get("__kv_info") or {}
+            if _kvi.get("tokens"):
+                live["kvTokens"] = int(_kvi["tokens"])
+                live["kvBytes"] = int(_kvi.get("bytes", 0))
+                live["kvMaxConc"] = round(_kvi.get("maxConc", 0), 2)
+            # MBU / MFU。步频:开了投机解码时一步 = 一次 draft,用 drafts 速率;
+            # 否则一步出一个 token,用 token 速率。
+            _steps = _rate(a, b, "vllm:iteration_tokens_total_count", dt)
+            _proc = _rate(a, b, "vllm:iteration_tokens_total_sum", dt)
+            live["stepsPerSec"] = round(_steps, 2)
+            eff = _efficiency((HEARTH_CFG.get("model_meta") or {}).get(m["id"]) or {},
+                              _steps, tps, _proc, (spec or {}).get("specLen", 0))
+            if eff:
+                live.update(eff)
         elif lb:                                # llama.cpp 真实指标（可能多副本汇总）
             a = _merge_scrape([l1.get(b) or {} for b in lb])
             b = _merge_scrape([l2.get(b) or {} for b in lb])

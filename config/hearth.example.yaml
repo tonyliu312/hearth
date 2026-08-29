@@ -138,7 +138,38 @@ nodes:
 #
 # Key = the gateway route name (i.e. LiteLLM `model_name`).
 # ---------------------------------------------------------------------
+# SLO 达标率与饱和判据。整段删掉 → 面板相关字段全部消失(不是显示 0)。
+slo:
+  ttft_ms: 2000                  # 首 token 延迟上限
+  tpot_ms: 100                   # 每 token 延迟上限
+  # 联合达标率只能给 Fréchet-Hoeffding 严格区间(聚合直方图推不出联合分布)。
+  # 区间宽度超过这个百分点数时,前端标"仅供参考"。
+  joint_width_warn_pp: 10
+  # 排队时间占 TTFT p90 的比例超过此值 + 两次采样都有请求在等 → 标记饱和。
+  queue_share_warn: 0.5
+
+
+# 效率口径(MBU/MFU)。不配 → 不显示,不估算。
+efficiency:
+  # ⛔ 峰值算力用【实测】值,不要填规格书数字 —— 规格书与实际可达差很远,
+  #    用规格书算出来的 MFU 没有意义。
+  #    GB10 实测 bf16 matmul burn 95.0 TFLOP/s。
+  peak_tflops: 95.0
+  mem_bw_gbps: 273               # GB10 理论内存带宽
+
 model_meta:
+  glm-5.3-flash:
+    display: "GLM-5.3-Flash"
+    vendor: "Z.ai"
+    kind: chat
+    tags: [coding]
+    # MBU/MFU 用。激活参数量(B) + 每参数字节数(NVFP4 约 0.57,含 block scale)。
+    active_params_b: 18
+    bytes_per_param: 0.57
+    # drafter 参数量(B)。未配时 MFU 只算目标模型 → 偏低估(会置
+    # mfuDrafterMissing 标记)。DFlash2 是 block-diffusion,每步只有一次
+    # drafter 并行前向,不是 k 次。
+    # drafter_params_b: <填入后 MFU 才完整>
   # Example entries — replace with your own routes.
   # qwen3-coder-next:
   #   display: "Qwen3-Coder-Next"

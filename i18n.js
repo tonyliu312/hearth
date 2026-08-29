@@ -77,6 +77,16 @@
       "Requests / sec": "请求/秒",
       "Route · ": "路由 · ",
       // 指标口径：延迟分解 + 分位数 + 投机解码 + 瞬时/持续吞吐
+      // SLO / 饱和 / KV 池 / 效率
+      "SLO attainment": "SLO 达标率", "both": "同时满足",
+      "wide range · indicative only": "区间过宽 · 仅供参考",
+      "SATURATED · adding load costs latency, not throughput": "已饱和 · 再加负载只增延迟不增吞吐",
+      "headroom available": "尚有余量", "queue is": "排队占", "of TTFT p90": "的 TTFT p90",
+      "waiting on capacity": "个请求因容量排队",
+      "pool": "池", "tokens": "token", "max concurrency": "满窗并发",
+      "Efficiency": "效率", "MBU (bandwidth)": "MBU（内存带宽）", "MFU (compute)": "MFU（算力）",
+      "processed": "已处理", "delivered": "有效产出", "Engine steps": "引擎步频",
+      "drafter params not configured → MFU is an underestimate": "未配 drafter 参数量 → MFU 为低估值",
       "Latency breakdown · mean vs percentiles": "延迟分解 · 均值与分位数",
       "mean": "均值", "Queue": "排队", "Prefill": "预填充", "Decode": "解码",
       "instantaneous": "瞬时", "sustained": "持续", "(warming up)": "（累积中）",
@@ -233,6 +243,16 @@
       "Requests / sec": "請求/秒",
       "Route · ": "路由 · ",
       // 指標口徑：延遲分解 + 分位數 + 投機解碼 + 瞬時/持續吞吐
+      // SLO / 飽和 / KV 池 / 效率
+      "SLO attainment": "SLO 達標率", "both": "同时满足",
+      "wide range · indicative only": "區間過寬 · 仅供参考",
+      "SATURATED · adding load costs latency, not throughput": "已飽和 · 再加負載只增延遲不增吞吐",
+      "headroom available": "尚有餘量", "queue is": "排隊佔", "of TTFT p90": "的 TTFT p90",
+      "waiting on capacity": "個請求因容量排隊",
+      "pool": "池", "tokens": "token", "max concurrency": "滿窗並發",
+      "Efficiency": "效率", "MBU (bandwidth)": "MBU（記憶體頻寬）", "MFU (compute)": "MFU（算力）",
+      "processed": "已处理", "delivered": "有效產出", "Engine steps": "引擎步頻",
+      "drafter params not configured → MFU is an underestimate": "未配 drafter 參數量 → MFU 為低估值",
       "Latency breakdown · mean vs percentiles": "延遲分解 · 均值與分位數",
       "mean": "均值", "Queue": "排隊", "Prefill": "預填充", "Decode": "解碼",
       "instantaneous": "瞬時", "sustained": "持續", "(warming up)": "（累積中）",

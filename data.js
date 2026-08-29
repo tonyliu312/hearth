@@ -487,8 +487,20 @@
           "decode","decodeP50","decodeP90","decodeP99",
           "itl","itlP50","itlP90","itlP99",
           "tpsWindowSec","tpsSustained","tpsSustainedWindowSec",
+          "sloTtftMs","sloTpotMs","sloTtftRate","sloTpotRate",
+          "sloJointLower","sloJointUpper","sloJointWide",
+          "queueShareP90","waitingCapacity","saturated",
+          "kvTokens","kvBytes","kvMaxConc",
+          "stepsPerSec","mbu","mfu","mfuDelivered","mfuDrafterMissing",
         ].forEach((k) => { if (lv[k] !== undefined) e[k] = lv[k]; });
         e.spec = lv.spec || null;                // 未开投机解码 → null → 整块不渲染
+        // 效率与饱和是【瞬时】量：引擎空闲时后端不返回(不估算)，前端必须跟着
+        // 清掉，否则会把上一轮有负载时的 MBU 挂在 "Engine steps 0/s" 旁边，
+        // 显示成一个看似当前实则陈旧的数字。分位数/KV 池不在此列——它们是
+        // 生命周期累计量或静态配置，空闲时保留上一次的值仍然成立。
+        ["mbu", "mfu", "mfuDelivered", "mfuDrafterMissing"].forEach((k) => {
+          if (lv[k] === undefined) delete e[k];
+        });
         if (!live.models[m.id]) live.models[m.id] = makeModelMetrics();
         const ms = live.models[m.id];
         const upd = (k, v) => { if (v === undefined || v === null) return;
