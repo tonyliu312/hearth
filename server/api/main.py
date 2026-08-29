@@ -1633,17 +1633,29 @@ async def _scrape_vllm(base: str) -> dict:
                 # label 里),**就在已抓的这份文本内** —— 不需要 docker logs、
                 # 不需要 ssh、不新增任何网络往返。
                 # 不要用 num_gpu_blocks × block_size 反推池大小:该模型
-                # 2176 × 2304 = 5,013,504 ≠ kv_cache_size_tokens 4,545,221
-                # (混合 mamba 层页大小不同),以 kv_cache_size_tokens 为准。
+                # 2176 × 2304 = 5,013,504 ≠ kv_cache_size_tokens 4,545,221。
+                # 精确关系是 kv_cache_size_tokens == int(kv_cache_max_concurrency
+                # × max_model_len):4.334661354581673 × 1048576 = 4,545,221,
+                # 精确到个位(源头见 vLLM kv_cache_utils.py 的
+                # get_kv_cache_capacity() / update_kv_cache_capacity())。
+                # 以 kv_cache_size_tokens 为准。
                 for lbl, key in (("kv_cache_size_tokens", "tokens"),
                                  ("kv_cache_memory_bytes", "bytes"),
                                  ("kv_cache_max_concurrency", "maxConc")):
                     mv = re.search(rf'{lbl}="([^"]+)"', head)
-                    if mv:
-                        try:
-                            kv_info[key] = kv_info.get(key, 0.0) + float(mv.group(1))
-                        except ValueError:
-                            pass
+                    if not mv:
+                        continue
+                    try:
+                        val = float(mv.group(1))
+                    except ValueError:
+                        continue
+                    if key == "maxConc":
+                        # ⛔ maxConc 是【比值】(满窗请求数 = 池容量 / max_model_len)，
+                        # 跨 engine 求和无意义 —— DP>1 时会变成 N 倍。取最大值。
+                        # tokens / bytes 是【容量】，多 engine 就该相加，故走下面分支。
+                        kv_info[key] = max(kv_info.get(key, 0.0), val)
+                    else:
+                        kv_info[key] = kv_info.get(key, 0.0) + val
             elif name == "vllm:num_requests_waiting_by_reason":
                 mr = re.search(r'reason="([^"]+)"', head)
                 if mr and mr.group(1) == "capacity":     # 容量性排队 = 真饱和信号
@@ -1754,10 +1766,26 @@ def _efficiency(meta: dict, steps_ps: float, tok_ps: float,
         return None
     out: dict = {}
     ap_n = float(ap) * 1e9
+    # 并行度属于【部署】，硬件常数属于【机器】——两者必须分开。
+    # peak_tflops / mem_bw_gbps 是【每节点】的 GB10 常数；active_params_b 是
+    # 【全模型】激活量。TP=N 时每个节点只读自己那 1/N 分片、只用自己那份算力，
+    # 所以分子是聚合的、分母必须乘上 N，否则系统性高估 N 倍。
+    # 未配 tp_size 按 1 处理(单节点部署)。
+    tp = float(meta.get("tp_size") or 1) or 1.0
+    dp_n = float(meta.get("drafter_params_b") or 0) * 1e9
+    # drafter 的每参数字节数【不继承】目标模型：目标是 NVFP4(0.57)，drafter
+    # 是 bf16(2.0)，差 3.5 倍，继承会把 drafter 那一项算小。
+    dbpp = float(meta.get("drafter_bytes_per_param") or 0)
     bw = _EFF.get("mem_bw_gbps")
     bpp = meta.get("bytes_per_param")
     if bw and bpp and steps_ps > 0:
-        out["mbu"] = round(ap_n * float(bpp) * steps_ps / (float(bw) * 1e9) * 100, 1)
+        # drafter 在 MBU 里不可忽略：本机 1.1711B × 2B/param = 2.342 GB/步，
+        # 相对目标模型的 10.26 GB/步 是 22.8%(占两者合计的 18.6%)。
+        # 假设(未证实)：drafter 与目标模型同 TP 分片 —— vLLM 对 speculative
+        # model 默认沿用同一 parallel config。若实际未分片，drafter 那一项应
+        # 单独按 tp 倍算；因该项只占两成、影响可控，不为它加开关。
+        step_bytes = ap_n * float(bpp) + dp_n * dbpp
+        out["mbu"] = round(step_bytes * steps_ps / (float(bw) * 1e9 * tp) * 100, 1)
     peak = _EFF.get("peak_tflops")
     if peak and proc_tok_ps > 0:
         # FLOPs 用前向 MAC 近似 2 × 激活参数 × token 数。
@@ -1765,13 +1793,18 @@ def _efficiency(meta: dict, steps_ps: float, tok_ps: float,
         # 前者是引擎自报的"这些前向里真处理了多少 token 位置",天然涵盖投机解码
         # 的 verify 位置与 prefill 位置,不需要假设每步批量或草稿长度。
         # 代价是 prefill 阶段 mfu 会冲高 —— 那是真实的算力消耗,不是失真。
-        peak_f = float(peak) * 1e12
+        peak_f = float(peak) * 1e12 * tp        # 同 MBU：分母按 TP 聚合
         fl = 2 * ap_n * proc_tok_ps
-        dp = meta.get("drafter_params_b")
-        if dp and spec_len:
-            # DFlash2 是 block-diffusion:k 个草稿位置来自【一次】并行前向,
-            # 不是 k 次前向 —— 每步只加一次 drafter 的量。
-            fl += 2 * float(dp) * 1e9 * steps_ps * spec_len
+        if dp_n and spec_len:
+            # FLOPs 只数【位置】不数【前向次数】：7 次串行单 token 前向
+            # = 7 × (2·P·1) = 14P，1 次并行 7 token 前向 = 2·P·7 = 14P，完全相同。
+            # block-diffusion 省的是步时(墙钟)，不是 FLOP 计数。
+            # 此处 spec_len 是每步经过 drafter 的位置数。
+            # 待核：config.json 的 dflash_config.block_size = 8 而
+            # num_speculative_tokens = 7。若 drafter 前向实际覆盖 8 个位置，
+            # 这一项偏低 14%；但该项仅占总 FLOPs 约 6.5%，净影响 <1%。
+            # 未证实前保持 7，不猜。
+            fl += 2 * dp_n * steps_ps * spec_len
         elif spec_len:
             out["mfuDrafterMissing"] = True   # 未配 drafter 参数量 → mfu 偏低估
         out["mfu"] = round(fl / peak_f * 100, 1)

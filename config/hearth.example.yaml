@@ -166,10 +166,17 @@ model_meta:
     # MBU/MFU 用。激活参数量(B) + 每参数字节数(NVFP4 约 0.57,含 block scale)。
     active_params_b: 18
     bytes_per_param: 0.57
-    # drafter 参数量(B)。未配时 MFU 只算目标模型 → 偏低估(会置
-    # mfuDrafterMissing 标记)。DFlash2 是 block-diffusion,每步只有一次
-    # drafter 并行前向,不是 k 次。
-    # drafter_params_b: <填入后 MFU 才完整>
+    # 并行度。active_params_b 是【全模型】激活量而 efficiency 里的硬件常数是
+    # 【每节点】的,TP=4 时每节点只读 1/4 分片、只用自己那份算力 —— 分母必须
+    # 乘 tp_size,否则 MBU/MFU 系统性高估 4 倍。未配按 1(单节点)处理。
+    tp_size: 4
+    # drafter(DFlash2)。实测 1,171,080,448 参数 = 1.1711 B,全 dense,
+    # 无 embedding 无 lm_head(复用目标模型的),故全部参与每 token GEMM。
+    # bytes_per_param 必须单独配:drafter 是 bf16(2.0),目标是 NVFP4(0.57),
+    # 差 3.5 倍,继承目标的值会把 drafter 那一项算小。
+    # 它在 MBU 里不可忽略:2.342 GB/步 vs 目标 10.26 GB/步 = 22.8%。
+    drafter_params_b: 1.1711
+    drafter_bytes_per_param: 2.0
   # Example entries — replace with your own routes.
   # qwen3-coder-next:
   #   display: "Qwen3-Coder-Next"
