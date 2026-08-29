@@ -478,6 +478,17 @@
           e.p95 = Math.round(lv.p95);
           e.p99 = Math.round(lv.p99);
         }
+        // 分位数 / 耗时分解 / 投机解码：逐字段判 undefined 再写。
+        // 目录里的冷启动占位条目没有这些键，无条件赋值会把 undefined 写进去，
+        // 面板会显示 NaN。llama.cpp 后端同理（引擎根本不暴露）→ 键缺席即不渲染。
+        [ "ttftP50","ttftP90","ttftP99", "tpotP50","tpotP90","tpotP99",
+          "queue","queueP50","queueP90","queueP99",
+          "prefill","prefillP50","prefillP90","prefillP99",
+          "decode","decodeP50","decodeP90","decodeP99",
+          "itl","itlP50","itlP90","itlP99",
+          "tpsWindowSec","tpsSustained","tpsSustainedWindowSec",
+        ].forEach((k) => { if (lv[k] !== undefined) e[k] = lv[k]; });
+        e.spec = lv.spec || null;                // 未开投机解码 → null → 整块不渲染
         if (!live.models[m.id]) live.models[m.id] = makeModelMetrics();
         const ms = live.models[m.id];
         const upd = (k, v) => { if (v === undefined || v === null) return;

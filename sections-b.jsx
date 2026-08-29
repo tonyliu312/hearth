@@ -297,6 +297,71 @@ function DetailMetric({ label, value, unit, bar, color = "accent" }) {
   );
 }
 
+// 一行「均值 + p50/p90/p99」。分位数是业界标准口径(vllm bench serve /
+// GenAI-Perf / LLMPerf)，均值同排列出来做对照：样本量小时分位数会偏高，
+// 两者背离大时以均值为准。
+function PctRow({ label, mean, p50, p90, p99, unit = "ms", warn }) {
+  const f = (v) => (v === undefined || v === null ? "—"
+    : v >= 10000 ? (v / 1000).toFixed(1) + "s" : Math.round(v));
+  return (
+    <div style={{ display: "contents" }}>
+      <span style={{ color: "var(--ink-3)" }}>{label}</span>
+      <span style={{ color: "var(--ink-3)" }}>{f(mean)}</span>
+      <span style={{ color: "var(--ink)" }}>{f(p50)}</span>
+      <span>{f(p90)}</span>
+      <span style={{ color: warn && p99 > warn ? "var(--hot)" : "var(--ink-2)" }}>{f(p99)}</span>
+    </div>
+  );
+}
+
+// 投机解码：接受率决定吞吐。实测同一引擎五种负载，每步耗时全在 76-80ms 只差
+// 5.5%，而端到端吞吐 38→102 tok/s 差 168%，差异几乎全部来自接受率。
+function SpecDecode({ spec }) {
+  const { t } = useLang();
+  const pos = Array.isArray(spec.perPos) ? spec.perPos : [];
+  return (
+    <div>
+      <div className="metric-l" style={{ marginBottom: 8 }}>
+        {t("Speculative decoding")} · {t("draft len")} {spec.specLen}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr",
+                    gap: "5px 12px", fontFamily: "var(--mono)", fontSize: 11.5 }}>
+        <span style={{ color: "var(--ink-3)" }}>{t("Acceptance rate")}</span>
+        <span><b style={{ color: "var(--ink)" }}>{spec.acceptRate}%</b>
+          <small style={{ color: "var(--ink-3)" }}> {t("lifetime")}</small>
+          {spec.acceptRateNow !== null && spec.acceptRateNow !== undefined
+            ? <> · <b style={{ color: "var(--ink)" }}>{spec.acceptRateNow}%</b>
+                <small style={{ color: "var(--ink-3)" }}> {t("current window")}</small></>
+            : null}
+        </span>
+        <span style={{ color: "var(--ink-3)" }}>{t("Tokens / step")}</span>
+        <span style={{ color: "var(--ink)" }}>{spec.tokensPerStep}</span>
+        <span style={{ color: "var(--ink-3)" }}>{t("Drafts")}</span>
+        <span>{spec.drafts.toLocaleString()}</span>
+        <span style={{ color: "var(--ink-3)" }}>{t("Accepted")}</span>
+        <span>{spec.accepted.toLocaleString()} / {spec.draftTokens.toLocaleString()}</span>
+      </div>
+      {pos.length ? <>
+        <div className="metric-l" style={{ margin: "12px 0 6px" }}>{t("Acceptance by draft position")}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          {pos.map((v, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "18px 1fr 42px",
+                                  alignItems: "center", gap: 8,
+                                  fontFamily: "var(--mono)", fontSize: 10.5 }}>
+              <span style={{ color: "var(--ink-3)" }}>{i}</span>
+              <span style={{ height: 6, background: "var(--line)", borderRadius: 3, overflow: "hidden" }}>
+                <i style={{ display: "block", height: "100%", width: `${Math.max(0, Math.min(100, v))}%`,
+                            background: "var(--accent)" }} />
+              </span>
+              <span style={{ color: "var(--ink-2)", textAlign: "right" }}>{v}%</span>
+            </div>
+          ))}
+        </div>
+      </> : null}
+    </div>
+  );
+}
+
 // ── MODELS ─────────────────────────────────────────────────────────────
 function ModelsSection() {
   useLive();
@@ -473,7 +538,21 @@ function ModelDetail({ model }) {
   return (
     <div className="model-detail">
       <div>
-        <div className="metric-l" style={{ marginBottom: 8 }}>{t("Throughput · last 32 ticks")}</div>
+        <div className="metric-l" style={{ marginBottom: 8 }}>
+          {t("Throughput · last 32 ticks")}
+          {model.tpsWindowSec
+            ? <span style={{ color: "var(--ink-3)", textTransform: "none" }}>
+                {" · "}{t("instantaneous")} {model.tpsWindowSec}s
+                {/* 瞬时窗口只有十几步，方差极大；vllm bench serve 同一次测量
+                    Output vs Peak token throughput 就差 2.1 倍(61.13 / 129.00)。
+                    并排给出长窗口持续值，避免把峰值读成持续吞吐。 */}
+                {model.tpsSustained !== null && model.tpsSustained !== undefined
+                  ? <> · {t("sustained")} <b style={{ color: "var(--ink-2)" }}>{model.tpsSustained}</b> t/s
+                      {" "}({model.tpsSustainedWindowSec}s)</>
+                  : <> · {t("sustained")} — <small>{t("(warming up)")}</small></>}
+              </span>
+            : null}
+        </div>
         <AreaChart series={[ms.tps.hist]} colors={["var(--accent)"]} height={140} unit={model.kind === "embed" ? " e/s" : " t/s"} padding={{l:42,r:14,t:10,b:18}} ticks={3} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -483,6 +562,28 @@ function ModelDetail({ model }) {
           <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 10)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
           <DetailMetric label={t("Requests / sec")}     value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
           <DetailMetric label={t("KV-cache")}           value={ms.kv.now.toFixed(1)} unit="%" bar={Math.min(100, ms.kv.now)} color={ms.kv.now > 80 ? "bad" : ms.kv.now > 65 ? "hot" : "violet"} />
+          {model.ttftP50 !== undefined ? <div>
+            <div className="metric-l" style={{ marginBottom: 8 }}>{t("Latency breakdown · mean vs percentiles")}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "auto repeat(4, 1fr)",
+                          gap: "5px 10px", fontFamily: "var(--mono)", fontSize: 11 }}>
+              <span />
+              <span style={{ color: "var(--ink-3)", fontSize: 10 }}>{t("mean")}</span>
+              <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p50</span>
+              <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p90</span>
+              <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p99</span>
+              {/* 排队 / prefill / decode 三段分开：prefill 算力受限、decode 内存
+                  带宽受限、queue 是容量不够。混着报，"变慢了"看不出该查哪一侧。 */}
+              <PctRow label={t("Queue")}   mean={model.queue}   p50={model.queueP50}   p90={model.queueP90}   p99={model.queueP99} />
+              <PctRow label={t("Prefill")} mean={model.prefill} p50={model.prefillP50} p90={model.prefillP90} p99={model.prefillP99} />
+              <PctRow label={t("Decode")}  mean={model.decode}  p50={model.decodeP50}  p90={model.decodeP90}  p99={model.decodeP99} />
+              <PctRow label="TTFT"         mean={ms.ttft.now}   p50={model.ttftP50}    p90={model.ttftP90}    p99={model.ttftP99} warn={20000} />
+              <PctRow label="TPOT"         mean={ms.tpot.now}   p50={model.tpotP50}    p90={model.tpotP90}    p99={model.tpotP99} />
+              {/* ITL ≠ TPOT：TPOT 按请求平均每 token，ITL 是相邻 token 的实际
+                  到达间隔分布。投机解码下一次接受多个 token → 一批接近 0 的间隔
+                  加少量长间隔，均值抹平，分位数才看得见。 */}
+              <PctRow label="ITL"          mean={model.itl}     p50={model.itlP50}     p90={model.itlP90}     p99={model.itlP99} />
+            </div>
+          </div> : null}
         </> : model.metricsSource === "llamacpp" ? <>
           {/* llama.cpp /metrics 暴露 TPOT/throughput/running, 不暴露 TTFT/KV/e2e */}
           <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
@@ -512,6 +613,7 @@ function ModelDetail({ model }) {
           <button style={modelBtn(false)}>{t("Restart")}</button>
           <button style={modelBtn(false)}>{t("Logs")}</button>
         </div>
+        {model.spec ? <div style={{ marginTop: 18 }}><SpecDecode spec={model.spec} /></div> : null}
       </div>
     </div>
   );

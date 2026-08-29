@@ -1419,6 +1419,18 @@ _VLLM_SCALARS = {
     "vllm:request_time_per_output_token_seconds_count",
     "vllm:kv_cache_usage_perc",
     "vllm:e2e_request_latency_seconds_sum", "vllm:e2e_request_latency_seconds_count",
+    # 请求耗时分解 + ITL。sum/count 求均值,作为分位数的对照线:样本量小时
+    # 分位数会偏高(几十个样本的 p99 基本就是最大值),两者背离大时以均值为准。
+    "vllm:request_prefill_time_seconds_sum", "vllm:request_prefill_time_seconds_count",
+    "vllm:request_decode_time_seconds_sum", "vllm:request_decode_time_seconds_count",
+    "vllm:request_queue_time_seconds_sum", "vllm:request_queue_time_seconds_count",
+    "vllm:inter_token_latency_seconds_sum", "vllm:inter_token_latency_seconds_count",
+    # 投机解码(speculative decoding)：只取 _total 计数器。同名的 _created 是
+    # "该序列首次出现的 unix 时间戳"gauge(1.78e9),混进求和会把接受率炸成
+    # 天文数字 —— 精确名匹配天然把它挡在外面,不要改成前缀匹配。
+    "vllm:spec_decode_num_drafts_total",
+    "vllm:spec_decode_num_draft_tokens_total",
+    "vllm:spec_decode_num_accepted_tokens_total",
 }
 
 
@@ -1533,10 +1545,38 @@ async def _scrape_sglang(base: str) -> dict:
     return out
 
 
+# name → 累积桶累加到 out 的哪个 __key 下。业界标准口径(vllm bench serve /
+# GenAI-Perf / LLMPerf)一律报 p50/p90/p99 —— 交互式场景的验收线是尾延迟,
+# 均值会把长尾抹平, 故 TTFT/TPOT 与 e2e 一样走直方图桶。
+_VLLM_HISTS = {
+    "vllm:e2e_request_latency_seconds_bucket": "__e2e_buckets",
+    "vllm:time_to_first_token_seconds_bucket": "__ttft_buckets",
+    "vllm:request_time_per_output_token_seconds_bucket": "__tpot_buckets",
+    # prefill 算力受限、decode 内存带宽受限,混进一个 tok/s 里两边信息都丢了。
+    # 实测同一引擎上下文 4K→1M: decode 只掉 2%(41.2→40.3 tok/s), 而 TTFT 从
+    # 3.2s 涨到 452s —— 长上下文的代价全在 prefill 一侧。混着报就看不出该查哪边。
+    "vllm:request_prefill_time_seconds_bucket": "__prefill_buckets",
+    "vllm:request_decode_time_seconds_bucket": "__decode_buckets",
+    # queue: 区分"服务器慢"和"服务器排队"的唯一指标。实测 QPS 1.0→2.0 时
+    # TTFT p90 从 1451ms 炸到 16248ms(11 倍), 而 TPOT 只从 90.5 到 96.5ms ——
+    # 引擎没变慢,是在排队。没有这一项会把排队误判成模型问题去调参数。
+    "vllm:request_queue_time_seconds_bucket": "__queue_buckets",
+    # ITL 与 TPOT 不是一回事: TPOT 是整个请求的平均每 token 耗时(按请求计数),
+    # ITL 是相邻 token 实际到达间隔的分布(按间隔计数)。本机实测该差异是实的:
+    # ITL count 45000 ≈ drafts_total 44720, ITL sum 12373s ≈ decode sum 12362s
+    # → 该引擎上 ITL 记的是"每次产出事件"的间隔, 而投机解码一步产出约 3.95 个
+    # token, 所以 ITL 均值 275ms ≈ TPOT 均值 77ms × 3.95。一次接受多个 token 会
+    # 产生一批接近 0 的间隔加少量长间隔, 均值看不出来, 分位数能。
+    "vllm:inter_token_latency_seconds_bucket": "__itl_buckets",
+}
+
+
 async def _scrape_vllm(base: str) -> dict:
-    """直采 vLLM 原生 /metrics（prom 文本）。含 V1 改名指标 + e2e 直方图桶。"""
+    """直采 vLLM 原生 /metrics（prom 文本）。含 V1 改名指标、e2e/TTFT/TPOT
+    直方图桶, 以及投机解码每位置接受计数。"""
     out: dict[str, float] = {}
-    e2e_b: dict[str, float] = {}
+    hists: dict[str, dict[str, float]] = {k: {} for k in _VLLM_HISTS.values()}
+    spec_pos: dict[str, float] = {}
     try:
         r = await client.get(f"{base}/metrics", timeout=4.0)
         r.raise_for_status()
@@ -1551,26 +1591,37 @@ async def _scrape_vllm(base: str) -> dict:
                 v = float(sp[1])
             except ValueError:
                 continue
-            if name == "vllm:e2e_request_latency_seconds_bucket":
+            hkey = _VLLM_HISTS.get(name)
+            if hkey:
                 mle = re.search(r'le="([^"]+)"', head)
                 if mle:
-                    e2e_b[mle.group(1)] = e2e_b.get(mle.group(1), 0.0) + v
+                    hb = hists[hkey]
+                    hb[mle.group(1)] = hb.get(mle.group(1), 0.0) + v
+            elif name == "vllm:spec_decode_num_accepted_tokens_per_pos_total":
+                mp = re.search(r'position="([^"]+)"', head)
+                if mp:
+                    spec_pos[mp.group(1)] = spec_pos.get(mp.group(1), 0.0) + v
             elif name in _VLLM_SCALARS:
                 out[name] = out.get(name, 0.0) + v
     except Exception:
         return {}
-    out["__e2e_buckets"] = e2e_b
+    out.update(hists)
+    out["__spec_pos"] = spec_pos
     return out
 
 
 def _merge_scrape(dicts: list[dict]) -> dict:
-    """多副本 vLLM /metrics 合并：标量相加，e2e 桶相加（总吞吐口径）。"""
+    """多副本 /metrics 合并：标量相加；dict 值（直方图桶 __*_buckets、投机解码
+    每位置计数 __spec_pos）按子键相加。累积桶逐 le 相加后仍是合法累积直方图,
+    故多副本合并出来的分位数就是全部副本的总口径。llama.cpp / SGLang 的
+    scrape 结果键更少, 走同一分支不受影响。"""
     acc: dict = {"__e2e_buckets": {}}
     for d in dicts:
         for k, v in (d or {}).items():
-            if k == "__e2e_buckets":
-                for le, c in (v or {}).items():
-                    acc["__e2e_buckets"][le] = acc["__e2e_buckets"].get(le, 0.0) + c
+            if isinstance(v, dict):
+                sub = acc.setdefault(k, {})
+                for sk, c in (v or {}).items():
+                    sub[sk] = sub.get(sk, 0.0) + c
             else:
                 acc[k] = acc.get(k, 0.0) + v
     return acc
@@ -1590,6 +1641,102 @@ def _gauge(a: dict, b: dict, key: str) -> float:
     """瞬时 gauge(并发/排队):取两次采样的峰值,降低短请求落在采样间隙
     被整体漏成 0 的概率(单点采一个每 ~2.5s 才刷的瞬时值代表性差)。"""
     return max(a.get(key, 0.0), b.get(key, 0.0))
+
+
+# base → (monotonic 时刻, generation_tokens_total)。用于把"瞬时吞吐"和
+# "持续吞吐"分开报。vllm bench serve 自己就分两行报 Output token throughput
+# 与 Peak output token throughput,同一次测量 61.13 对 129.00,差 2.1 倍 ——
+# 只报一个数,看到 120+ 的人会把峰值当成持续吞吐。
+_TPS_ANCHOR: dict[str, tuple[float, float]] = {}
+_TPS_MIN_WIN = 15.0     # 窗口短于此 → 与瞬时值无异,不值得单列
+_TPS_MAX_WIN = 300.0    # 超过此 → 锚点太旧,重置(否则会把很久以前的负载摊进来)
+
+
+def _tps_rollup(samples: dict, now: float) -> dict[str, tuple]:
+    """每轮**只调一次**,推进所有 base 的锚点并算出各自的长窗口持续吞吐。
+
+    必须整轮一次性算完、不能放进按模型的循环里:同一个 base 可能被多个模型 id
+    命中(LiteLLM 别名),循环里逐模型推锚点会让第二个模型读到刚被自己写成
+    age=0 的锚点,持续值恒为 None。
+
+    返回 base → (tok/s 或 None, 实际窗口秒数 或 None)。"""
+    out: dict[str, tuple] = {}
+    for base, samp in samples.items():
+        cur = (samp or {}).get("vllm:generation_tokens_total")
+        if cur is None:                         # 抓取失败 → 不动锚点
+            out[base] = (None, None)
+            continue
+        prev = _TPS_ANCHOR.get(base)
+        if prev is None:
+            _TPS_ANCHOR[base] = (now, cur)
+            out[base] = (None, None)
+            continue
+        age, ptok = now - prev[0], prev[1]
+        if cur < ptok or age > _TPS_MAX_WIN:    # 引擎重启 / 锚点过旧 → 重新起锚
+            _TPS_ANCHOR[base] = (now, cur)
+            out[base] = (None, None)
+            continue
+        if age < _TPS_MIN_WIN:                  # 窗口还不够长,保留旧锚点继续攒
+            out[base] = (None, None)
+            continue
+        _TPS_ANCHOR[base] = (now, cur)
+        out[base] = ((cur - ptok) / age, age)
+    return out
+
+
+def _tps_sustained(bases: list[str], roll: dict) -> tuple:
+    """把某模型名下各副本的持续吞吐汇总。要么全部有效要么整体 None ——
+    不同窗口的速率相加没有意义,也不拿 1.2s 瞬时值冒充持续值。"""
+    tot, win = 0.0, None
+    for base in bases:
+        r, age = roll.get(base, (None, None))
+        if r is None:
+            return None, None
+        tot += r
+        win = age if win is None else max(win, age)
+    if win is None:
+        return None, None
+    return round(tot, 1), round(win, 1)
+
+
+def _spec_stats(a: dict, b: dict) -> dict | None:
+    """投机解码(speculative decoding)派生指标。未开投机解码 → 引擎不暴露这批
+    counter → 返回 None,前端据此整块不渲染(而不是显示 0% —— 那是伪造)。
+
+    为什么这几个数值得单列:实测同一引擎五种负载,每步耗时(ms/step)全在
+    76-80ms 之间只差 5.5%,而端到端吞吐从 38 到 102 tok/s 差了 168% ——
+    差异几乎全部来自接受率。只看 tps/TPOT 看不到决定吞吐的那个自变量。
+
+    口径(两种并存,语义固定,不做模式切换):
+      acceptRate    生命周期累计 = accepted_tokens_total / draft_tokens_total
+      acceptRateNow 本采样窗口增量,反映"当前这种负载"的接受率;窗口内没有
+                    草稿(空闲)时为 None,不拿生命周期值冒充当前值
+      tokensPerStep 每步产出 = 1 + accepted_tokens_total / drafts_total
+      perPos        每位置接受率 = per_pos_total[i] / drafts_total
+    perPos / tokensPerStep 只给生命周期口径:一个窗口约 16 步,窗口内的
+    每位置接受率量化粒度是 1/16,噪声比信号大。"""
+    drafts = b.get("vllm:spec_decode_num_drafts_total", 0.0)
+    dtok = b.get("vllm:spec_decode_num_draft_tokens_total", 0.0)
+    acc = b.get("vllm:spec_decode_num_accepted_tokens_total", 0.0)
+    pos = b.get("__spec_pos") or {}
+    if drafts <= 0:
+        return None                     # 未开投机解码 / 开了但零流量 → 不伪造
+
+    d_dtok = _rate(a, b, "vllm:spec_decode_num_draft_tokens_total", 1.0)
+    d_acc = _rate(a, b, "vllm:spec_decode_num_accepted_tokens_total", 1.0)
+    now = round(d_acc / d_dtok * 100, 1) if d_dtok > 0 else None
+
+    # position 是字符串标签,必须按整数排序 —— 字典序下 "10" < "2",
+    # 草稿长度 >=10 时曲线会被打乱。
+    keys = sorted((k for k in pos if str(k).isdigit()), key=int)
+    per_pos = [round(pos[k] / drafts * 100, 1) for k in keys]
+    return {"acceptRate": round(acc / dtok * 100, 1) if dtok > 0 else 0.0,
+            "acceptRateNow": now,
+            "tokensPerStep": round(1 + acc / drafts, 2),
+            "perPos": per_pos,
+            "specLen": len(per_pos),
+            "drafts": int(drafts), "draftTokens": int(dtok),
+            "accepted": int(acc)}
 
 
 @app.get("/api/models")
@@ -1613,6 +1760,8 @@ async def models_list():
     l2 = {b: await _scrape_llamacpp(b) for b in lbases}
     g2 = {b: await _scrape_sglang(b) for b in gbases}
     _dt_real = max(1e-3, time.monotonic() - _t0)
+    _t_now = time.monotonic()           # 持续吞吐锚点时刻,整轮统一
+    _tps_roll = _tps_rollup(s2, _t_now)  # 整轮一次性推进锚点(不可下放进循环)
     out = []
     for m in disco:
         vb = m.get("vllm_bases") or []
@@ -1636,6 +1785,13 @@ async def models_list():
             tpot = (psum / pcnt * 1000) if pcnt else 0
             kv = b.get("vllm:kv_cache_usage_perc", 0) * 100 / max(1, len(vb))
             e2e_b = b.get("__e2e_buckets") or {}
+            ttft_b = b.get("__ttft_buckets") or {}
+            tpot_b = b.get("__tpot_buckets") or {}
+            queue_b = b.get("__queue_buckets") or {}
+            prefill_b = b.get("__prefill_buckets") or {}
+            decode_b = b.get("__decode_buckets") or {}
+            itl_b = b.get("__itl_buckets") or {}
+            tps_sus, tps_win = _tps_sustained(vb, _tps_roll)
             running = _gauge(a, b, "vllm:num_requests_running")
             waiting = _gauge(a, b, "vllm:num_requests_waiting")
             state = "serving" if running > 0 or tps > 0 else "idle"
@@ -1647,7 +1803,41 @@ async def models_list():
                     "resident": True,
                     "p50": round(_hquant(e2e_b, 0.50) * 1000, 0),
                     "p95": round(_hquant(e2e_b, 0.95) * 1000, 0),
-                    "p99": round(_hquant(e2e_b, 0.99) * 1000, 0)}
+                    "p99": round(_hquant(e2e_b, 0.99) * 1000, 0),
+                    # TTFT / TPOT 分位数(ms)。上面的 ttft/tpot 均值字段保留不删:
+                    # 样本量小时分位数会偏高(几十个样本的 p99 基本就是最大值),
+                    # 两者背离大时以均值为准。分位数走 p50/p90/p99 是业界口径
+                    # (vllm bench serve / GenAI-Perf / LLMPerf), 与上面 e2e 那组
+                    # 历史 p50/p95/p99 刻意不统一 —— 不动既有 e2e 字段。
+                    "ttftP50": round(_hquant(ttft_b, 0.50) * 1000, 0),
+                    "ttftP90": round(_hquant(ttft_b, 0.90) * 1000, 0),
+                    "ttftP99": round(_hquant(ttft_b, 0.99) * 1000, 0),
+                    "tpotP50": round(_hquant(tpot_b, 0.50) * 1000, 1),
+                    "tpotP90": round(_hquant(tpot_b, 0.90) * 1000, 1),
+                    "tpotP99": round(_hquant(tpot_b, 0.99) * 1000, 1),
+                    # tps 是 1.2s 瞬时采样窗口 —— 把窗口长度一并暴露出来,
+                    # 面板才能标清"瞬时"而不是让人当成持续吞吐。
+                    "tpsWindowSec": round(dt, 2),
+                    "tpsSustained": tps_sus, "tpsSustainedWindowSec": tps_win}
+            # 请求耗时分解:排队 → prefill → decode。三段分开报,"变慢了"才知道
+            # 该查哪一侧(排队 = 容量不够 / prefill = 上下文太长 / decode = 带宽)。
+            for _k, _bk, _sum, _cnt in (
+                    ("queue", queue_b, "vllm:request_queue_time_seconds_sum",
+                     "vllm:request_queue_time_seconds_count"),
+                    ("prefill", prefill_b, "vllm:request_prefill_time_seconds_sum",
+                     "vllm:request_prefill_time_seconds_count"),
+                    ("decode", decode_b, "vllm:request_decode_time_seconds_sum",
+                     "vllm:request_decode_time_seconds_count"),
+                    ("itl", itl_b, "vllm:inter_token_latency_seconds_sum",
+                     "vllm:inter_token_latency_seconds_count")):
+                _c, _s = b.get(_cnt, 0), b.get(_sum, 0)
+                live[_k] = round(_s / _c * 1000, 1) if _c else 0     # 均值对照线
+                live[f"{_k}P50"] = round(_hquant(_bk, 0.50) * 1000, 1)
+                live[f"{_k}P90"] = round(_hquant(_bk, 0.90) * 1000, 1)
+                live[f"{_k}P99"] = round(_hquant(_bk, 0.99) * 1000, 1)
+            spec = _spec_stats(a, b)
+            if spec:                    # 未开投机解码 → 键整个缺席,前端 if (live.spec)
+                live["spec"] = spec
         elif lb:                                # llama.cpp 真实指标（可能多副本汇总）
             a = _merge_scrape([l1.get(b) or {} for b in lb])
             b = _merge_scrape([l2.get(b) or {} for b in lb])
