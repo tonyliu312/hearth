@@ -447,6 +447,62 @@ function EffBlock({ model }) {
   );
 }
 
+// 响应构成。数据来自 LiteLLM spend logs（带外只读，不碰推理路径），不是引擎
+// /metrics —— 引擎侧完全没有 thinking/正文的区分。
+function ResponseBlock({ model }) {
+  const { t } = useLang();
+  const hasEmpty = model.emptyContentRate !== undefined;
+  const hasThink = model.thinkingCharShare !== undefined;
+  if (!hasEmpty && !hasThink) return null;
+  return (
+    <div>
+      <div className="metric-l" style={{ marginBottom: 6 }}>
+        {t("Response composition")} · {t("last")} {model.spendWindowH}h
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr",
+                    gap: "4px 12px", fontFamily: "var(--mono)", fontSize: 11.5 }}>
+        {hasEmpty ? <>
+          <span style={{ color: "var(--ink-3)" }}>{t("Empty answers")}</span>
+          <span>
+            <b style={{ color: model.emptyContentRate > 5 ? "var(--hot)" : "var(--ink)" }}>
+              {model.emptyContentRate}%
+            </b>
+            <small style={{ color: "var(--ink-3)" }}>
+              {" "}{model.emptyContentN}/{model.emptyContentTotal} · {t("baseline 0%")}
+            </small>
+          </span>
+        </> : null}
+        {model.toolCallN !== undefined ? <>
+          <span style={{ color: "var(--ink-3)" }}>{t("Tool responses")}</span>
+          <span style={{ color: "var(--ink-2)" }}>
+            {model.toolCallN} <small style={{ color: "var(--ink-3)" }}>{t("counted separately")}</small>
+          </span>
+        </> : null}
+        {hasThink ? <>
+          <span style={{ color: "var(--ink-3)" }}>{t("Thinking share")}</span>
+          <span>
+            <b style={{ color: "var(--ink)" }}>{model.thinkingCharShare}%</b>
+            <small style={{ color: "var(--ink-3)" }}>
+              {" "}{t("of characters")} · n={model.thinkingSampleN}
+              {model.thinkingTruncatedN > 0 ? ` · ${model.thinkingTruncatedN} ${t("truncated, excluded")}` : ""}
+            </small>
+          </span>
+        </> : null}
+      </div>
+      {/* ⛔ 判据写在界面上是刻意的：区分「文本响应」与「工具响应」必须用
+          tool_calls 是不是数组，不能用 finish_reason —— 该模型发 tool_calls 时
+          finish_reason 仍是 'stop'，按它过滤会把工具响应算进文本组，空正文率
+          会虚高到 35.6%（那些正文本来就该空）。后人若照 finish_reason 改回去，
+          这行字是唯一的拦阻。 */}
+      <div style={{ marginTop: 5, fontSize: 10, color: "var(--ink-3)",
+                    fontFamily: "var(--mono)", lineHeight: 1.6 }}>
+        {t("text vs tool split by tool_calls array, not finish_reason")}
+        {hasThink ? <><br />{t("character share, not tokens · truncated responses excluded")}</> : null}
+      </div>
+    </div>
+  );
+}
+
 // ── MODELS ─────────────────────────────────────────────────────────────
 function ModelsSection() {
   useLive();
@@ -702,6 +758,7 @@ function ModelDetail({ model }) {
         {model.mbu !== undefined || model.mfu !== undefined
           ? <div style={{ marginTop: 18 }}><EffBlock model={model} /></div> : null}
         {model.spec ? <div style={{ marginTop: 18 }}><SpecDecode spec={model.spec} /></div> : null}
+        <div style={{ marginTop: 18 }}><ResponseBlock model={model} /></div>
       </div>
     </div>
   );

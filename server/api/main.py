@@ -1824,6 +1824,126 @@ def _efficiency(meta: dict, steps_ps: float, tok_ps: float,
     return out or None
 
 
+# ── LiteLLM spend logs（带外只读，不碰推理路径）────────────────────────
+# 为什么走这条路：thinking/正文的区分【引擎侧完全没有】—— vLLM /metrics 里没有
+# 任何 reasoning 指标；LiteLLM 自己的 prometheus 是企业版门控(见本文件上方注释)。
+# 唯一通的是网关落库的响应正文(litellm config 里 store_prompts_in_spend_logs)。
+# 这是【只读、带外】查询：不经过推理路径、不给引擎发任何请求，对模型零影响。
+_SPEND = HEARTH_CFG.get("spend_logs") or {}
+_SPEND_DATA: dict = {"ts": 0.0, "by_model": {}}
+_SPEND_TASK = None
+
+# 判据说明(踩过的两个坑，改这段前先读)：
+# 1) tool_calls 必须用 jsonb_typeof(...)='array' 判定。键存在但值为 JSON null 时
+#    SQL 的 `IS NOT NULL` 仍为真 —— 用它会把纯文本响应误判成工具调用。
+# 2) ⛔ 不能用 finish_reason 区分「文本响应」和「工具响应」：GLM-5.3-Flash 发
+#    tool_calls 时 finish_reason 仍是 'stop'。实测 422 条工具响应里 323 条藏在
+#    'stop' 下，只有 99 条是 'tool_calls'。按 finish_reason 过滤会把工具响应算进
+#    文本组，于是「空正文率」虚高到 35.6%（那些正文本来就该是空的，模型用工具
+#    作答了）。按 tool_calls 数组判定后，真实文本响应的空正文率是 0%。
+# 3) completion_tokens > N 顺带排掉健康探针(实测探针 max 5 token)。
+_SPEND_SQL = """
+WITH t AS (
+  SELECT model, (response::jsonb->'choices'->0->'message') AS msg
+  FROM "LiteLLM_SpendLogs"
+  WHERE "startTime" > now() - '{win} hours'::interval
+    AND completion_tokens > {mintok} AND response IS NOT NULL
+), u AS (
+  SELECT CASE WHEN position('/' in model)>0 THEN split_part(model,'/',2) ELSE model END AS m,
+         jsonb_typeof(msg->'tool_calls')='array' AS is_tool,
+         length(COALESCE(msg->>'content','')) c,
+         length(COALESCE(msg->>'reasoning_content','')) r
+  FROM t
+)
+SELECT m, count(*) FILTER (WHERE NOT is_tool), count(*) FILTER (WHERE NOT is_tool AND c=0),
+       count(*) FILTER (WHERE is_tool),
+       count(*) FILTER (WHERE NOT is_tool AND c<{lim} AND r<{lim}),
+       count(*) FILTER (WHERE NOT is_tool AND (c>={lim} OR r>={lim})),
+       COALESCE(sum(r) FILTER (WHERE NOT is_tool AND c<{lim} AND r<{lim}),0),
+       COALESCE(sum(c+r) FILTER (WHERE NOT is_tool AND c<{lim} AND r<{lim}),0)
+FROM u GROUP BY m
+"""
+
+
+async def _spend_scrape() -> dict:
+    """查一次 spend logs，返回 模型名 → 指标。失败一律返回 {} → 字段缺席。
+
+    只读是【硬保证】不是纪律：PGOPTIONS 强制 default_transaction_read_only=on，
+    写操作会被 Postgres 直接拒绝(已实测 CREATE TABLE 报错)。
+    走 docker exec 而非 TCP：容器内不需要口令，避免把 DB 密码放进配置。
+    postgres 也监听 127.0.0.1:5432，日后要换 TCP 只需改 argv。"""
+    if not _SPEND.get("enabled"):
+        return {}
+    try:
+        win = int(_SPEND.get("window_hours", 6))
+        mintok = int(_SPEND.get("min_completion_tokens", 20))
+        lim = int(_SPEND.get("truncation_char_limit", 2200))
+    except (TypeError, ValueError):
+        return {}
+    sql = _SPEND_SQL.format(win=win, mintok=mintok, lim=lim)
+    argv = ["docker", "exec", "-e", "PGOPTIONS=-c default_transaction_read_only=on",
+            str(_SPEND.get("container", "litellm-postgres")),
+            "psql", "-U", str(_SPEND.get("user", "litellm")),
+            "-d", str(_SPEND.get("db", "litellm")),
+            "-X", "-A", "-F", "\t", "-t", "-v", "ON_ERROR_STOP=1", "-c", sql]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, _err = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        if proc.returncode != 0:
+            return {}
+    except Exception:
+        return {}
+    by_model: dict = {}
+    for line in out.decode("utf-8", "replace").splitlines():
+        f = line.split("\t")
+        if len(f) != 8:
+            continue
+        try:
+            m = f[0].strip()
+            text_n, empty_n, tool_n, untrunc, trunc, think_c, total_c = (int(x) for x in f[1:])
+        except ValueError:
+            continue
+        d: dict = {"spendWindowH": win, "toolCallN": tool_n}
+        if text_n > 0:
+            d["emptyContentN"] = empty_n
+            d["emptyContentTotal"] = text_n
+            d["emptyContentRate"] = round(empty_n / text_n * 100, 1)
+        if untrunc > 0 and total_c > 0:
+            # ⚠️ 字符占比,不是 token 占比 —— token 级切分没落库。字段名带 Char
+            # 就是为了不让人当成 token 占比读。
+            # 只统计两个字段都未触顶的响应:LiteLLM 落库把文本截断在约 2293 字符,
+            # 对全体求平均会因截断【系统性偏低】。
+            d["thinkingCharShare"] = round(think_c / total_c * 100, 1)
+            d["thinkingSampleN"] = untrunc
+            d["thinkingTruncatedN"] = trunc
+        by_model[m] = d
+    return by_model
+
+
+async def _spend_loop():
+    """独立的长 TTL 刷新循环。⛔ 绝不能放进 2.5s 快照循环:那张表近百万行,
+    且这是子进程 + DB 查询。默认 300s 一次 ≈ 0.0033 次/秒。"""
+    while True:
+        try:
+            d = await _spend_scrape()
+            if d:
+                _SPEND_DATA["by_model"], _SPEND_DATA["ts"] = d, time.time()
+        except Exception:
+            pass
+        await asyncio.sleep(max(60, int(_SPEND.get("refresh_seconds", 300))))
+
+
+def _spend_for(model_id: str) -> dict:
+    """取某模型的 spend 指标。没开、没数据、该模型没样本 → 空 dict → 字段缺席。"""
+    global _SPEND_TASK
+    if not _SPEND.get("enabled"):
+        return {}
+    if _SPEND_TASK is None or _SPEND_TASK.done():
+        _SPEND_TASK = asyncio.create_task(_spend_loop())
+    return (_SPEND_DATA["by_model"] or {}).get(model_id) or {}
+
+
 def _tps_rollup(samples: dict, now: float) -> dict[str, tuple]:
     """每轮**只调一次**,推进所有 base 的锚点并算出各自的长窗口持续吞吐。
 
@@ -2062,6 +2182,7 @@ async def models_list():
                               _steps, tps, _proc, _dtok_ps)
             if eff:
                 live.update(eff)
+            live.update(_spend_for(m["id"]))   # 带外只读，缺数据即缺字段
         elif lb:                                # llama.cpp 真实指标（可能多副本汇总）
             a = _merge_scrape([l1.get(b) or {} for b in lb])
             b = _merge_scrape([l2.get(b) or {} for b in lb])

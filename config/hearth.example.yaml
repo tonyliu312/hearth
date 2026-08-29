@@ -149,6 +149,22 @@ slo:
   queue_share_warn: 0.5
 
 
+# LiteLLM spend logs（带外只读）。thinking/正文的区分引擎侧完全没有，
+# LiteLLM 自己的 prometheus 是企业版门控 —— 唯一通的是网关落库的响应正文
+# （需 litellm config 开 store_prompts_in_spend_logs）。
+# 这条链路【不经过推理路径】，对模型零影响。整段删掉 → 相关字段全部消失。
+spend_logs:
+  enabled: true
+  container: litellm-postgres      # 走 docker exec：容器内免口令，不必把 DB 密码放配置
+  db: litellm
+  user: litellm
+  window_hours: 6                  # 必须有时间窗：该表近百万行，全表扫不可接受
+  min_completion_tokens: 20        # 顺带排掉健康探针（实测探针 max 5 token）
+  truncation_char_limit: 2200      # LiteLLM 落库把文本截断在约 2293 字符。
+                                   # 只对两个字段都未触顶的响应算 thinking 占比，
+                                   # 否则会因截断系统性偏低。
+  refresh_seconds: 300             # ⛔ 绝不能进 2.5s 快照循环。300s ≈ 0.0033 次/秒
+
 # 效率口径(MBU/MFU)。不配 → 不显示,不估算。
 efficiency:
   # ⛔ 以下两个都是【每节点】硬件常数,不含并行度 —— 并行度属于部署,配在

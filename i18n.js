@@ -77,6 +77,16 @@
       "Requests / sec": "请求/秒",
       "Route · ": "路由 · ",
       // 指标口径：延迟分解 + 分位数 + 投机解码 + 瞬时/持续吞吐
+      // 响应构成（来自 LiteLLM spend logs，带外只读）
+      "Response composition": "响应构成", "last": "近",
+      "Empty answers": "空正文", "baseline 0%": "基线 0%",
+      "Tool responses": "工具响应", "counted separately": "单独分组",
+      "Thinking share": "thinking 占比", "of characters": "按字符",
+      "truncated, excluded": "条触顶已排除",
+      "text vs tool split by tool_calls array, not finish_reason":
+        "文本/工具的判据是 tool_calls 是否为数组，不是 finish_reason",
+      "character share, not tokens · truncated responses excluded":
+        "字符占比非 token 占比；落库截断的响应已排除",
       // SLO / 饱和 / KV 池 / 效率
       "SLO attainment": "SLO 达标率", "both": "同时满足",
       "wide range · indicative only": "区间过宽 · 仅供参考",
@@ -242,6 +252,16 @@
       "Requests / sec": "請求/秒",
       "Route · ": "路由 · ",
       // 指標口徑：延遲分解 + 分位數 + 投機解碼 + 瞬時/持續吞吐
+      // 響應構成（來自 LiteLLM spend logs，帶外唯讀）
+      "Response composition": "響應構成", "last": "近",
+      "Empty answers": "空正文", "baseline 0%": "基線 0%",
+      "Tool responses": "工具響應", "counted separately": "單獨分組",
+      "Thinking share": "thinking 佔比", "of characters": "按字元",
+      "truncated, excluded": "條觸頂已排除",
+      "text vs tool split by tool_calls array, not finish_reason":
+        "文本/工具的判據是 tool_calls 是否為陣列，不是 finish_reason",
+      "character share, not tokens · truncated responses excluded":
+        "字元佔比非 token 佔比；落庫截斷的響應已排除",
       // SLO / 飽和 / KV 池 / 效率
       "SLO attainment": "SLO 達標率", "both": "同时满足",
       "wide range · indicative only": "區間過寬 · 仅供参考",
