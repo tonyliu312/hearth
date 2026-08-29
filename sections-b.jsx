@@ -699,27 +699,12 @@ function ModelDetail({ model }) {
         <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 5 }}>
           {model.tags.map((t) => <span key={t} className="chip violet" style={{ fontSize: 9.5 }}>{t}</span>)}
         </div>
-        <div style={{ marginTop: 16, display: "flex", gap: 6 }}>
-          <button style={modelBtn(true)}>{t("Open Playground")}</button>
-          <button style={modelBtn(false)}>{t("Restart")}</button>
-          <button style={modelBtn(false)}>{t("Logs")}</button>
-        </div>
         {model.mbu !== undefined || model.mfu !== undefined
           ? <div style={{ marginTop: 18 }}><EffBlock model={model} /></div> : null}
         {model.spec ? <div style={{ marginTop: 18 }}><SpecDecode spec={model.spec} /></div> : null}
       </div>
     </div>
   );
-}
-
-function modelBtn(primary) {
-  return {
-    appearance: "none", border: "0.5px solid " + (primary ? "transparent" : "var(--line)"),
-    background: primary ? "var(--ink)" : "transparent",
-    color: primary ? "var(--bg)" : "var(--ink)",
-    borderRadius: 7, padding: "7px 12px",
-    font: "500 11.5px var(--display)", letterSpacing: "-.005em", cursor: "pointer",
-  };
 }
 
 // ── TELEMETRY ──────────────────────────────────────────────────────────
