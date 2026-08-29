@@ -1599,13 +1599,20 @@ async def models_list():
     vbases = sorted({b for m in disco for b in m.get("vllm_bases", [])})
     lbases = sorted({b for m in disco for b in m.get("llamacpp_bases", [])})
     gbases = sorted({b for m in disco for b in m.get("sglang_bases", [])})
+    # 2026-08-29: dt 原为硬编码 0.5, 但真实间隔 = sleep + 两轮【串行】抓取耗时。
+    # 抓取耗时被漏算 -> dt 偏小 -> 速率系统性偏高(实测虚高约 2 倍:
+    # 持续 61 tok/s 显示成 129)。改为用 monotonic 实测间隔。
+    # sleep 同时 0.5 -> 1.2s: 本地推理一步约 76ms, 0.5s 窗口只装得下 7 步,
+    # 而每步产出 1-5 token 方差极大; 1.2s 约 16 步, 方差被抹平且接口仍可接受。
+    _t0 = time.monotonic()
     s1 = {b: await _scrape_vllm(b) for b in vbases}
     l1 = {b: await _scrape_llamacpp(b) for b in lbases}
     g1 = {b: await _scrape_sglang(b) for b in gbases}
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1.2)
     s2 = {b: await _scrape_vllm(b) for b in vbases}
     l2 = {b: await _scrape_llamacpp(b) for b in lbases}
     g2 = {b: await _scrape_sglang(b) for b in gbases}
+    _dt_real = max(1e-3, time.monotonic() - _t0)
     out = []
     for m in disco:
         vb = m.get("vllm_bases") or []
@@ -1618,7 +1625,7 @@ async def models_list():
         if vb:                                  # 真实 vLLM 指标（可能多副本汇总）
             a = _merge_scrape([s1.get(b) or {} for b in vb])
             b = _merge_scrape([s2.get(b) or {} for b in vb])
-            dt = 0.5
+            dt = _dt_real
             tps = _rate(a, b, "vllm:generation_tokens_total", dt)
             rps = _rate(a, b, "vllm:request_success_total", dt)
             tcnt = b.get("vllm:time_to_first_token_seconds_count", 0)
@@ -1644,7 +1651,7 @@ async def models_list():
         elif lb:                                # llama.cpp 真实指标（可能多副本汇总）
             a = _merge_scrape([l1.get(b) or {} for b in lb])
             b = _merge_scrape([l2.get(b) or {} for b in lb])
-            dt = 0.5
+            dt = _dt_real
             tps = _rate(a, b, "llamacpp:tokens_predicted_total", dt)
             # tpot: 解码耗时差 / 解码 token 差 → ms/token(两采样齐备才算,缺则留 0)
             d_tok = _rate(a, b, "llamacpp:tokens_predicted_total", 1.0)
@@ -1665,7 +1672,7 @@ async def models_list():
         elif gb:                                # SGLang 真实指标(含 TTFT/e2e, 接近 vLLM)
             a = _merge_scrape([g1.get(b) or {} for b in gb])
             b = _merge_scrape([g2.get(b) or {} for b in gb])
-            dt = 0.5
+            dt = _dt_real
             tps = _rate(a, b, "sglang:generation_tokens_total", dt)
             tcnt = b.get("sglang:time_to_first_token_seconds_count", 0)
             tsum = b.get("sglang:time_to_first_token_seconds_sum", 0)
