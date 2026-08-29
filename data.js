@@ -513,7 +513,7 @@
         // 延迟量现在是【滑动窗口】值：窗口内没有完成的请求时后端整组不返回。
         // 必须跟着清掉，否则会把上一个有流量的窗口的 p99 挂在这里当作当前值 ——
         // 与 MBU 那处同一类误读，而且延迟更容易被当成实时值来读。
-        ["latencyWindowSec","latencySampleN","p50","p95","p99",
+        ["latencyWindowSec","latencySampleN","latencyLowSample","p50","p95","p99",
          "ttft","tpot","ttftP50","ttftP90","ttftP99","tpotP50","tpotP90","tpotP99",
          "queue","queueP50","queueP90","queueP99",
          "prefill","prefillP50","prefillP90","prefillP99",

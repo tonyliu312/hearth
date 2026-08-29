@@ -758,6 +758,12 @@ function ModelDetail({ model }) {
                   而且读数的人要能判断这个 p99 是几条样本撑起来的。 */}
               <span style={{ color: "var(--ink-3)", textTransform: "none" }}>
                 {" · "}{t("window")} {model.latencyWindowSec}s · n={model.latencySampleN}
+                {/* 样本偏少时给值+标注(同 sloJointWide 的做法)；数学上无意义的那些
+                    分位数则直接缺席、显示「—」。两者是互补不是二选一：
+                    藏掉的是「算不出」，标注的是「算得出但别当准数读」。 */}
+                {model.latencyLowSample
+                  ? <span style={{ color: "var(--hot)" }}> · {t("low sample")}</span>
+                  : null}
               </span>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "auto repeat(4, 1fr)",
@@ -767,6 +773,8 @@ function ModelDetail({ model }) {
               <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p50</span>
               <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p90</span>
               <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p99</span>
+              {/* 缺席的分位数由 PctRow 渲染成「—」：样本不足以支撑该分位数时，
+                  宁可留白也不给一个看起来正常、实际是桶沿的数字。 */}
               {/* 排队 / prefill / decode 三段分开：prefill 算力受限、decode 内存
                   带宽受限、queue 是容量不够。混着报，"变慢了"看不出该查哪一侧。 */}
               <PctRow label={t("Queue")}   mean={model.queue}   p50={model.queueP50}   p90={model.queueP90}   p99={model.queueP99} />

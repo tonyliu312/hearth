@@ -2203,9 +2203,11 @@ def _lat_window(key: str, merged: dict, now: float,
     # ⚠️ 累加器不能叫 means —— 那会遮蔽同名入参，循环立刻在空字典上迭代，
     # 所有窗口均值静默丢成 0（而 0 恰好会被读成「延迟 0 毫秒」）。
     out_means: dict = {}
+    counts: dict = {}
     for short, base_name in means.items():
         dc = cur["s"][base_name + "_count"] - b_snap["s"][base_name + "_count"]
         ds = cur["s"][base_name + "_sum"] - b_snap["s"][base_name + "_sum"]
+        counts[short] = int(dc)
         if dc > 0:
             out_means[short] = ds / dc * 1000.0
     # 样本数用 e2e(按请求计)；ITL 是按 token 间隔计的，量级不同，不拿它当请求数
@@ -2213,8 +2215,34 @@ def _lat_window(key: str, merged: dict, now: float,
     n = int(cur["s"].get(_e2e_cnt, 0.0) - b_snap["s"].get(_e2e_cnt, 0.0))
     if n <= 0 and not out_means:
         return None                     # 窗口内没有完成的请求 → 整组缺席
-    return {"b": diff_b, "mean": out_means,
+    return {"b": diff_b, "mean": out_means, "n": counts,
             "windowSec": round(now - b_ts, 1), "sampleN": max(0, n)}
+
+
+# 小样本下分位数无意义 —— 而且失效方式很有欺骗性:样本不够时 _hquant 走
+# `if c == prev_c: return le` 那条路,直接吐【桶沿】。实测窗口内只有 4 条样本时
+# e2e p50 报 5000.0ms(真实约 700ms,误差 7 倍),因为 5.0 正是 e2e 直方图的桶边界。
+# 它看起来是个完全正常的数字,不看样本数根本发现不了。
+#
+# 判据用样本数不用窗口时长:300 秒窗口里只有 2 条请求同样不可信。
+# 分位数 q 只有在窗口内至少有一个样本能落到尾部时才有意义:
+#     n * (1 - q) >= 1   →   p50 需 n>=2, p90 需 n>=10, p95 需 n>=20, p99 需 n>=100
+# 【逐个分位数分别判定】:不够的那个单独缺席,够的照常出(n=12 时 p50/p90 出、
+# p99 缺席),比整组一起藏或一起出都更准确。
+_LOW_SAMPLE_N = 20          # 低于此值给值但标注可疑(照 sloJointWide 的先例)
+
+
+def _q_ok(n: int, q: float) -> bool:
+    # 容差不是装饰:1-0.9 在二进制里是 0.09999999999999998,10*(1-0.9) < 1,
+    # 不给容差的话 p90 会要求 n>=11 而不是判据说的 10 —— 只差一个样本,
+    # 但那正好是"刚够"与"不够"的分界,会让边界情形静默地少一个分位数。
+    return n * (1.0 - q) >= 1.0 - 1e-9
+
+
+def _put_q(live: dict, name: str, buckets: dict, n: int, q: float, nd: int) -> None:
+    """样本量够才写入该分位数;不够则字段【缺席】,不给一个像模像样的桶沿。"""
+    if _q_ok(n, q):
+        live[name] = round(_hquant(buckets, q) * 1000, nd)
 
 
 def _spec_stats(a: dict, b: dict) -> dict | None:
@@ -2317,25 +2345,31 @@ async def models_list():
                 # 窗口长度与样本数必须暴露:读数的人要能判断这个 p99 是几条样本
                 # 撑起来的。样本数按【请求】计(e2e),ITL 是按 token 间隔计的,
                 # 量级不同,不拿它冒充请求数。
+                _ln = lat["n"]
                 live["latencyWindowSec"] = lat["windowSec"]
                 live["latencySampleN"] = lat["sampleN"]
+                # 样本偏少时仍给值,但标注可疑 —— 与 sloJointWide 同一套做法
+                # (给值+标注,而不是藏起来)。数学上无意义的那些分位数才真的缺席。
+                live["latencyLowSample"] = lat["sampleN"] < _LOW_SAMPLE_N
                 # e2e 这组历史字段沿用 p50/p95/p99 命名(不动),但语义已从
                 # 「开机以来」修正为「窗口内」。
                 for _q, _n in ((0.50, "p50"), (0.95, "p95"), (0.99, "p99")):
-                    live[_n] = round(_hquant(_lb["__e2e_buckets"], _q) * 1000, 0)
+                    _put_q(live, _n, _lb["__e2e_buckets"], _ln.get("e2e", 0), _q, 0)
                 # 均值同样是窗口差分(Δsum/Δcount),与分位数同源同窗 —— 一半窗口
-                # 一半生命周期比全错更难查。样本量小时分位数会偏高,均值做对照。
-                live["ttft"] = round(_lm.get("ttft", 0.0), 1)
-                live["tpot"] = round(_lm.get("tpot", 0.0), 1)
-                for _q, _suf in ((0.50, "P50"), (0.90, "P90"), (0.99, "P99")):
-                    live["ttft" + _suf] = round(_hquant(_lb["__ttft_buckets"], _q) * 1000, 0)
-                    live["tpot" + _suf] = round(_hquant(_lb["__tpot_buckets"], _q) * 1000, 1)
-                # 请求耗时分解:排队 → prefill → decode。三段分开报,"变慢了"才知道
-                # 该查哪一侧(排队 = 容量不够 / prefill = 上下文太长 / decode = 带宽)。
-                for _k in ("queue", "prefill", "decode", "itl"):
-                    live[_k] = round(_lm.get(_k, 0.0), 1)
+                # 一半生命周期比全错更难查。⛔ 均值缺失时也不能填 0
+                # (同「延迟 0 毫秒」那类误读),没有就整个不给。
+                # 逐族取各自的样本数:ITL 是按 token 间隔计的,比请求数大两个数量级,
+                # 用请求数去判定它会把本来足够可信的 ITL 分位数误藏掉。
+                for _k, _bk, _nd in (("ttft", "__ttft_buckets", 0),
+                                     ("tpot", "__tpot_buckets", 1),
+                                     ("queue", "__queue_buckets", 1),
+                                     ("prefill", "__prefill_buckets", 1),
+                                     ("decode", "__decode_buckets", 1),
+                                     ("itl", "__itl_buckets", 1)):
+                    if _k in _lm:
+                        live[_k] = round(_lm[_k], 1)
                     for _q, _suf in ((0.50, "P50"), (0.90, "P90"), (0.99, "P99")):
-                        live[_k + _suf] = round(_hquant(_lb[f"__{_k}_buckets"], _q) * 1000, 1)
+                        _put_q(live, _k + _suf, _lb[_bk], _ln.get(_k, 0), _q, _nd)
             spec = _spec_stats(a, b)
             if spec:                    # 未开投机解码 → 键整个缺席,前端 if (live.spec)
                 live["spec"] = spec
@@ -2350,8 +2384,10 @@ async def models_list():
             # "持续"在单次调用内只能取两次采样都 > 0 —— 这是本接口能拿到的
             # 最强证据,不做跨调用状态。
             live["waitingCapacity"] = int(_gauge(a, b, "__waiting_capacity"))
-            if lat:                     # 同样只在有窗口数据时才给,不拿 0 冒充
-                _qr = (live["queueP90"] / live["ttftP90"]) if live["ttftP90"] > 0 else 0.0
+            # queueP90/ttftP90 现在可能因样本不足而缺席 → 派生量跟着缺席,
+            # 不用 0 顶替(那会让"排队占比 0%"看起来像系统很健康)。
+            if lat and live.get("queueP90") is not None and live.get("ttftP90"):
+                _qr = live["queueP90"] / live["ttftP90"]
                 live["queueShareP90"] = round(_qr * 100, 1)
                 live["saturated"] = bool(
                     min(a.get("vllm:num_requests_waiting", 0),
@@ -2433,12 +2469,15 @@ async def models_list():
                     "resident": True}
             if lat:                     # None → 整组延迟字段缺席，不填 0
                 _lb, _lm = lat["b"], lat["mean"]
+                _ln = lat["n"]
                 live["latencyWindowSec"] = lat["windowSec"]
                 live["latencySampleN"] = lat["sampleN"]
-                live["ttft"] = round(_lm.get("ttft", 0.0), 1)
-                live["tpot"] = round(_lm.get("tpot", 0.0), 1)
+                live["latencyLowSample"] = lat["sampleN"] < _LOW_SAMPLE_N
+                for _k in ("ttft", "tpot"):
+                    if _k in _lm:
+                        live[_k] = round(_lm[_k], 1)
                 for _q, _n in ((0.50, "p50"), (0.95, "p95"), (0.99, "p99")):
-                    live[_n] = round(_hquant(_lb["__e2e_buckets"], _q) * 1000, 0)
+                    _put_q(live, _n, _lb["__e2e_buckets"], _ln.get("e2e", 0), _q, 0)
         elif m.get("up"):                       # 网关健康但无可识别 /metrics
             state = "online"                    # 在线·服务中，无详细指标（不伪造）
             live = {"metrics": "none", "resident": True}
