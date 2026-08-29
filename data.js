@@ -485,7 +485,14 @@
         // 分位数 / 耗时分解 / 投机解码：逐字段判 undefined 再写。
         // 目录里的冷启动占位条目没有这些键，无条件赋值会把 undefined 写进去，
         // 面板会显示 NaN。llama.cpp 后端同理（引擎根本不暴露）→ 键缺席即不渲染。
-        [ "ttftP50","ttftP90","ttftP99", "tpotP50","tpotP90","tpotP99",
+        // ⛔ ttft/tpot(窗口均值)必须在这张【拷贝】名单里 —— 它们同时出现在下方的
+        //    【清理】名单中。只删不写会让它们在模型第一次空闲后永久消失:
+        //    e 的初始值只有 `ttft: 0` 占位,此后无任何赋值路径,
+        //    第 532 行的 upd("ttft", ...) 写的是 sparkline 存储 ms 不是 e。
+        //    症状: 详情面板 TTFT/TPOT 恒显示 "—"(sections-b.jsx 的 model.ttft 判 undefined)。
+        [ "ttft","tpot",
+          "latencyWindowSec","latencySampleN","latencyLowSample",
+          "ttftP50","ttftP90","ttftP99", "tpotP50","tpotP90","tpotP99",
           "queue","queueP50","queueP90","queueP99",
           "prefill","prefillP50","prefillP90","prefillP99",
           "decode","decodeP50","decodeP90","decodeP99",
