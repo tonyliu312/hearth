@@ -815,6 +815,19 @@ function ModelDetail({ model }) {
                   带宽受限、queue 是容量不够。混着报，"变慢了"看不出该查哪一侧。 */}
               <PctRow label={t("Queue")}   mean={model.queue}   p50={model.queueP50}   p90={model.queueP90}   p99={model.queueP99} />
               <PctRow label={t("Prefill")} mean={model.prefill} p50={model.prefillP50} p90={model.prefillP90} p99={model.prefillP99} />
+              {/* prefill 的性能对照是【吞吐】不是耗时：原始耗时随 prompt 长度线性
+                  变化，量的是负载不是引擎速度。紧贴 Prefill 行放，好把两者对上。
+                  decode 一侧不加吞吐 —— 它的对照是下面的 TPOT 与 ITL，加了是重复。 */}
+              {model.prefillTokPerS !== undefined ? (
+                <div style={{ display: "contents" }}>
+                  <span />
+                  <span style={{ gridColumn: "span 4", color: "var(--ink-3)", fontSize: 10.5,
+                                 marginTop: -2, marginBottom: 2 }}>
+                    <b style={{ color: "var(--ink-2)" }}>{model.prefillTokPerS.toLocaleString()}</b>
+                    {" "}tok/s · {t("per-request normalised, not wall-clock")}
+                  </span>
+                </div>
+              ) : null}
               <PctRow label={t("Decode")}  mean={model.decode}  p50={model.decodeP50}  p90={model.decodeP90}  p99={model.decodeP99} />
               {/* 均值用 model.ttft/tpot（窗口 Δsum/Δcount），不用 sparkline 的 now：
                   分位数和均值必须同源同窗，一半窗口一半别的比全错更难查。 */}

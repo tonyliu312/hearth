@@ -2137,7 +2137,11 @@ _LAT_MEANS_SGLANG = {
 }
 
 
-def _lat_snapshot(merged: dict, means: dict) -> dict:
+# 算 prefill 吞吐要用的原始计数器。放进同一份窗口快照，才能与延迟指标同源同窗。
+_LAT_EXTRA_VLLM = ("vllm:iteration_tokens_total_sum", "vllm:generation_tokens_total")
+
+
+def _lat_snapshot(merged: dict, means: dict, extra: tuple = ()) -> dict:
     """从一次(已跨副本合并的)抓取里抠出算延迟要用的全部累积量。"""
     snap: dict = {"b": {}, "s": {}}
     for k in _LAT_BUCKETS:
@@ -2145,11 +2149,13 @@ def _lat_snapshot(merged: dict, means: dict) -> dict:
     for base in means.values():
         for suf in ("_sum", "_count"):
             snap["s"][base + suf] = float(merged.get(base + suf, 0.0) or 0.0)
+    for name in extra:
+        snap["s"][name] = float(merged.get(name, 0.0) or 0.0)
     return snap
 
 
-def _lat_window(key: str, merged: dict, now: float,
-                means: dict | None = None, e2e_prefix: str = "vllm") -> dict | None:
+def _lat_window(key: str, merged: dict, now: float, means: dict | None = None,
+                e2e_prefix: str = "vllm", extra: tuple = ()) -> dict | None:
     """滑动窗口差分。返回 差分桶 + 窗口均值 + 窗口长度 + 样本数；不可用返回 None。
 
     ⛔ 锚点建在【_merge_scrape 之后】的口径上（跨副本已求和）。副作用：某个副本
@@ -2164,7 +2170,7 @@ def _lat_window(key: str, merged: dict, now: float,
     """
     means = means or _LAT_MEANS
     hist = _LAT_HIST.setdefault(key, deque())
-    cur = _lat_snapshot(merged, means)
+    cur = _lat_snapshot(merged, means, extra)
     base = None
     # 取窗口内最老的一份做基准；顺手 trim 掉过期的
     while hist and now - hist[0][0] > _LAT_MAX_WIN:
@@ -2203,11 +2209,13 @@ def _lat_window(key: str, merged: dict, now: float,
     # ⚠️ 累加器不能叫 means —— 那会遮蔽同名入参，循环立刻在空字典上迭代，
     # 所有窗口均值静默丢成 0（而 0 恰好会被读成「延迟 0 毫秒」）。
     out_means: dict = {}
+    out_sums: dict = {}          # 每族的 Δsum(秒)：prefill 吞吐要原始量，不是均值
     counts: dict = {}
     for short, base_name in means.items():
         dc = cur["s"][base_name + "_count"] - b_snap["s"][base_name + "_count"]
         ds = cur["s"][base_name + "_sum"] - b_snap["s"][base_name + "_sum"]
         counts[short] = int(dc)
+        out_sums[short] = ds
         if dc > 0:
             out_means[short] = ds / dc * 1000.0
     # 样本数用 e2e(按请求计)；ITL 是按 token 间隔计的，量级不同，不拿它当请求数
@@ -2215,7 +2223,8 @@ def _lat_window(key: str, merged: dict, now: float,
     n = int(cur["s"].get(_e2e_cnt, 0.0) - b_snap["s"].get(_e2e_cnt, 0.0))
     if n <= 0 and not out_means:
         return None                     # 窗口内没有完成的请求 → 整组缺席
-    return {"b": diff_b, "mean": out_means, "n": counts,
+    return {"b": diff_b, "mean": out_means, "n": counts, "sum": out_sums,
+            "d": {k: cur["s"].get(k, 0.0) - b_snap["s"].get(k, 0.0) for k in extra},
             "windowSec": round(now - b_ts, 1), "sampleN": max(0, n)}
 
 
@@ -2326,7 +2335,7 @@ async def models_list():
             kv = b.get("vllm:kv_cache_usage_perc", 0) * 100 / max(1, len(vb))
             # 全部延迟量走【滑动窗口差分】。None = 刚起/引擎重启/窗口内无请求,
             # 此时整组延迟字段缺席 —— 不填 0(会被读成"延迟 0 毫秒")。
-            lat = _lat_window(m["id"], b, _t_now)
+            lat = _lat_window(m["id"], b, _t_now, extra=_LAT_EXTRA_VLLM)
             tps_sus, tps_win = _tps_sustained(vb, _tps_roll)
             running = _gauge(a, b, "vllm:num_requests_running")
             waiting = _gauge(a, b, "vllm:num_requests_waiting")
@@ -2360,6 +2369,29 @@ async def models_list():
                 # (同「延迟 0 毫秒」那类误读),没有就整个不给。
                 # 逐族取各自的样本数:ITL 是按 token 间隔计的,比请求数大两个数量级,
                 # 用请求数去判定它会把本来足够可信的 ITL 分位数误藏掉。
+                # prefill 吞吐(tok/s)。业界不用【阶段耗时】衡量 prefill/decode 性能:
+                # 原始耗时随 prompt/输出长度线性变化，量的是负载不是引擎速度
+                # (实测 code 那条输出 1907 token 用约 19s、structured 那条 414 token
+                #  用约 5s，decode 耗时差 4 倍而速度几乎一样 99.8 vs 87.7 t/s)。
+                # prefill 看吞吐，decode 看 ms/token —— decode 一侧的对照就是同表下面
+                # 的 TPOT 与 ITL，不在 decode 行重复造一个吞吐。
+                #
+                # ⛔ 分子必须用 iteration_sum - generation(vLLM 的
+                # prompt_token_stats.computed，见 loggers.py:1205-1208)，这是【实算的】
+                # prefill token，天然排除 prefix cache 命中。
+                # ⛔ 不能用 prompt_tokens_total：本机实测 prefix cache 命中率 93.4%，
+                # 该口径 61.6M 对实算 4.09M，会把吞吐夸大约 15 倍。这不是"日后才会
+                # 分叉"，是当前就错。实算值恰好等于
+                # prompt_tokens_total - prompt_tokens_cached_total，两条路径互为佐证。
+                #
+                # ⚠️ 分母 request_prefill_time_seconds_sum 是【跨请求求和】的：并发时
+                # 各请求在墙钟上重叠，所以这是【每请求归一化】的速率，不是墙钟吞吐。
+                # 别拿它跟 tps 比 —— 界面上也标了这句。
+                _pf_sec = lat["sum"].get("prefill", 0.0)
+                _pf_tok = (lat["d"].get("vllm:iteration_tokens_total_sum", 0.0)
+                           - lat["d"].get("vllm:generation_tokens_total", 0.0))
+                if _pf_sec > 0 and _pf_tok > 0:      # 窗口内无 prefill → 字段缺席
+                    live["prefillTokPerS"] = round(_pf_tok / _pf_sec, 0)
                 for _k, _bk, _nd in (("ttft", "__ttft_buckets", 0),
                                      ("tpot", "__tpot_buckets", 1),
                                      ("queue", "__queue_buckets", 1),
