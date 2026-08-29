@@ -669,7 +669,12 @@ section.page > .lede {
   border-bottom: 0.5px solid var(--line);
   background: var(--bg-2);
   display: grid;
-  grid-template-columns: 1.4fr 1fr 1fr;
+  /* 列宽按【内容密度】分配，不是按第一列有张图就给它最宽:
+     列1 概览(吞吐图 + 进度条)、列2 密集表格(延迟分解/SLO/响应构成)、
+     列3 路由与效率。密集表格最吃宽度 —— 给窄了会折行，折行又把列撑高。
+     align-items:start 让各列按自身内容高度收住，不被最高的一列拉伸。 */
+  grid-template-columns: 1fr 1.35fr 1fr;
+  align-items: start;
   gap: 22px;
 }
 

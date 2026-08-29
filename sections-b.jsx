@@ -725,6 +725,40 @@ function GatewayStat({ label, value, sub }) {
   );
 }
 
+// 概览进度条。与吞吐图同属"一眼看"的性质，所以和图放同一列；
+// 密集表格(延迟分解/SLO/响应构成)留在中间列，那里给了更多宽度。
+function MetricBars({ model, ms }) {
+  const { t } = useLang();
+  const src = model.metricsSource;
+  if (src === "vllm" || src === "sglang") {
+    return (
+      <>
+        {/* 窗口内没有完成的请求 → 显示「—」而不是上一个窗口的残值。
+            「延迟未知」和「延迟很低」是两件事，混起来最容易误判。 */}
+        <DetailMetric label={t("TTFT (first token)")} value={model.ttft !== undefined ? model.ttft.toFixed(0) : "—"} unit={model.ttft !== undefined ? " ms" : ""} bar={Math.min(100, (model.ttft || 0) / 8)} color="violet" />
+        <DetailMetric label={t("TPOT (per token)")}   value={model.tpot !== undefined ? model.tpot.toFixed(0) : "—"} unit={model.tpot !== undefined ? " ms" : ""} bar={Math.min(100, (model.tpot || 0) / 5)} color="teal" />
+        <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 10)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
+        <DetailMetric label={t("Requests / sec")}     value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
+        <DetailMetric label={t("KV-cache")}           value={ms.kv.now.toFixed(1)} unit="%" bar={Math.min(100, ms.kv.now)} color={ms.kv.now > 80 ? "bad" : ms.kv.now > 65 ? "hot" : "violet"} />
+        {model.kvTokens ? <div style={{ marginTop: -6, fontFamily: "var(--mono)",
+                                        fontSize: 10.5, color: "var(--ink-3)" }}>
+          {t("pool")} {(model.kvTokens / 1e6).toFixed(2)}M {t("tokens")} · {(model.kvBytes / 2 ** 30).toFixed(1)} GiB · {t("max concurrency")} {model.kvMaxConc}×
+        </div> : null}
+      </>
+    );
+  }
+  if (src === "llamacpp") {
+    return (
+      <>
+        {/* llama.cpp /metrics 暴露 TPOT/throughput/running, 不暴露 TTFT/KV/e2e */}
+        <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
+        <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit="" bar={Math.min(100, ms.running.now * 10)} color="ok" />
+      </>
+    );
+  }
+  return null;
+}
+
 function ModelDetail({ model }) {
   const { t } = useLang();
   const ms = _live.models[model.id];
@@ -747,20 +781,12 @@ function ModelDetail({ model }) {
             : null}
         </div>
         <AreaChart series={[ms.tps.hist]} colors={["var(--accent)"]} height={140} unit={model.kind === "embed" ? " e/s" : " t/s"} padding={{l:42,r:14,t:10,b:18}} ticks={3} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 18 }}>
+          <MetricBars model={model} ms={ms} />
+        </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         {(model.metricsSource === "vllm" || model.metricsSource === "sglang") ? <>
-          {/* 窗口内没有完成的请求 → 显示「—」而不是上一个窗口的残值。
-              「延迟未知」和「延迟很低」是两件事，混起来最容易误判。 */}
-          <DetailMetric label={t("TTFT (first token)")} value={model.ttft !== undefined ? model.ttft.toFixed(0) : "—"} unit={model.ttft !== undefined ? " ms" : ""} bar={Math.min(100, (model.ttft || 0) / 8)} color="violet" />
-          <DetailMetric label={t("TPOT (per token)")}   value={model.tpot !== undefined ? model.tpot.toFixed(0) : "—"} unit={model.tpot !== undefined ? " ms" : ""} bar={Math.min(100, (model.tpot || 0) / 5)} color="teal" />
-          <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 10)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
-          <DetailMetric label={t("Requests / sec")}     value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
-          <DetailMetric label={t("KV-cache")}           value={ms.kv.now.toFixed(1)} unit="%" bar={Math.min(100, ms.kv.now)} color={ms.kv.now > 80 ? "bad" : ms.kv.now > 65 ? "hot" : "violet"} />
-          {model.kvTokens ? <div style={{ marginTop: -6, fontFamily: "var(--mono)",
-                                          fontSize: 10.5, color: "var(--ink-3)" }}>
-            {t("pool")} {(model.kvTokens / 1e6).toFixed(2)}M {t("tokens")} · {(model.kvBytes / 2 ** 30).toFixed(1)} GiB · {t("max concurrency")} {model.kvMaxConc}×
-          </div> : null}
           {model.latencyWindowSec !== undefined ? <div>
             <div className="metric-l" style={{ marginBottom: 8 }}>
               {t("Latency breakdown · mean vs percentiles")}
@@ -806,9 +832,6 @@ function ModelDetail({ model }) {
               第 3 栏留给 路由 / 效率 / 投机解码，两栏高度才不至于一边空一半。 */}
           <ResponseBlock model={model} />
         </> : model.metricsSource === "llamacpp" ? <>
-          {/* llama.cpp /metrics 暴露 TPOT/throughput/running, 不暴露 TTFT/KV/e2e */}
-          <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
-          <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit="" bar={Math.min(100, ms.running.now * 10)} color="ok" />
           <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)", lineHeight: 1.7 }}>
             {t("llama.cpp /metrics does not expose TTFT / KV% / e2e histograms · shown as — honestly")}
           </div>
