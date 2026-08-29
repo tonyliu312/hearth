@@ -1749,17 +1749,24 @@ def _slo_rates(ttft_b: dict, tpot_b: dict) -> dict | None:
 
 
 def _efficiency(meta: dict, steps_ps: float, tok_ps: float,
-                proc_tok_ps: float, spec_len: int) -> dict | None:
+                proc_tok_ps: float, draft_tok_ps: float) -> dict | None:
     """MBU(内存带宽利用率) / MFU(算力利用率)。需要按模型配激活参数量,
     没配就整块不返回 —— 不估算、不编造。
 
     MBU: decode 每步把激活权重完整读一遍 → 激活字节数 × 步频 / 理论带宽。
+    ⚠️ 这是【纯权重口径】(weight-MBU),不含 KV cache 的读写。长上下文下总线
+    实际占用会明显高于这个数,所以别把「100% - MBU」当成可用余量去解读。
+    公式不动,只是读数时要知道它量的是什么。
     MFU 给两个口径,回答的是不同问题:
       mfu          verify pass 实际处理的 token(草稿长度+1)。硬件确实为全部
                    位置做了 FLOPs,被拒的草稿也真烧了算力 —— MFU 按定义是
                    「硬件利用率」,这个是主口径。
       mfuDelivered 实际吐出的 token。回答「每个有用 token 花了多少算力」。
-    两者比值就是接受率(已有 acceptRate),故不单列成字段。
+    两者比值【不等于】接受率,是它的仿射变换:
+        mfuDelivered / mfu = (k × acceptRate + 1) / (k + 1)
+    实测 k=7、acceptRate=0.246 时比值 = (1.72+1)/8 = 0.340,而直接观察到的
+    吐出/前向位置 = 1047/3080 = 0.340 —— 吻合。把它当成"比值即接受率"去反推,
+    反推出来的接受率会偏高约 38%。仍不单列字段(可从两个已有字段直接看出)。
     FLOPs 用前向 MAC 近似 2 × 激活参数 × token 数。"""
     ap = meta.get("active_params_b")
     if not ap:
@@ -1795,17 +1802,22 @@ def _efficiency(meta: dict, steps_ps: float, tok_ps: float,
         # 代价是 prefill 阶段 mfu 会冲高 —— 那是真实的算力消耗,不是失真。
         peak_f = float(peak) * 1e12 * tp        # 同 MBU：分母按 TP 聚合
         fl = 2 * ap_n * proc_tok_ps
-        if dp_n and spec_len:
+        if dp_n and draft_tok_ps > 0:
             # FLOPs 只数【位置】不数【前向次数】：7 次串行单 token 前向
             # = 7 × (2·P·1) = 14P，1 次并行 7 token 前向 = 2·P·7 = 14P，完全相同。
             # block-diffusion 省的是步时(墙钟)，不是 FLOP 计数。
-            # 此处 spec_len 是每步经过 drafter 的位置数。
+            # ⛔ 位置数直接用 draft_tokens 速率，不要用 步频 × spec_len：
+            # drafts 是【每请求每步】计数，连续批处理下 drafts = B × 步数
+            # (实测 385/77 = 批量 5)，用步频算会把 drafter FLOPs 少算 B 倍。
+            # 这与 MBU 步频那处是同一类错误(每请求计数 vs 引擎计数)，方向相反。
+            # 用速率还有个好处：窗口内没发生投机解码时它自然为 0，与下面
+            # verify 位置的回落判据一致，不会一个按生命周期、一个按窗口。
             # 待核：config.json 的 dflash_config.block_size = 8 而
             # num_speculative_tokens = 7。若 drafter 前向实际覆盖 8 个位置，
-            # 这一项偏低 14%；但该项仅占总 FLOPs 约 6.5%，净影响 <1%。
-            # 未证实前保持 7，不猜。
-            fl += 2 * dp_n * steps_ps * spec_len
-        elif spec_len:
+            # 这一项偏低 14%；但该项仅占总 FLOPs 约 5-6%，净影响 <1%。
+            # 未证实前不猜，直接采信引擎自报的 draft_tokens。
+            fl += 2 * dp_n * draft_tok_ps
+        elif draft_tok_ps > 0:
             out["mfuDrafterMissing"] = True   # 未配 drafter 参数量 → mfu 偏低估
         out["mfu"] = round(fl / peak_f * 100, 1)
         out["mfuDelivered"] = round(2 * ap_n * tok_ps / peak_f * 100, 1)
@@ -2024,10 +2036,30 @@ async def models_list():
             # MBU / MFU。步频:开了投机解码时一步 = 一次 draft,用 drafts 速率;
             # 否则一步出一个 token,用 token 速率。
             _steps = _rate(a, b, "vllm:iteration_tokens_total_count", dt)
-            _proc = _rate(a, b, "vllm:iteration_tokens_total_sum", dt)
             live["stepsPerSec"] = round(_steps, 2)
+            # MFU 的分子 = 目标模型【真正做过前向的位置数】。
+            # ⛔ 不能直接用 iteration_tokens_total_sum:vLLM 源码
+            # (vllm/v1/metrics/loggers.py:1205-1208) 里它 =
+            #   prompt_token_stats.computed + num_generation_tokens
+            # 也就是「实算 prefill + 吐出的 token」,**不含被拒的草稿位置**。
+            # 硬件为 k+1 个位置烧了算力,它只数了吐出的那 ~2.7 个 —— 实测低估
+            # 2.94-3.03 倍。(注意 iteration_sum - prompt == generation 是上式
+            # 构造出来的恒等式,拿它做验证是循环论证,不构成证据。)
+            _gen_ps = tps
+            _iter_ps = _rate(a, b, "vllm:iteration_tokens_total_sum", dt)
+            # 实算 prefill:天然排除 prefix cache 命中的部分,正是"真的算了的"那些
+            _prefill_ps = max(0.0, _iter_ps - _gen_ps)
+            _dtok_ps = _rate(a, b, "vllm:spec_decode_num_draft_tokens_total", dt)
+            _drafts_ps = _rate(a, b, "vllm:spec_decode_num_drafts_total", dt)
+            # verify 位置 = 草稿位置 + 每(请求,步)一个的 bonus token。
+            # num_drafts_total 正是「每请求每步 1 个」的计数,恰好补上 bonus。
+            # 实测两轮 verify位置/drafts 都精确 = 8.00 = k+1。
+            # 未开投机解码时 drafts 为 0,此时 decode 位置就是吐出的 token ——
+            # 不能让关掉投机解码的模型算出 0。
+            _verify_ps = (_dtok_ps + _drafts_ps) if _drafts_ps > 0 else _gen_ps
+            _proc = _prefill_ps + _verify_ps
             eff = _efficiency((HEARTH_CFG.get("model_meta") or {}).get(m["id"]) or {},
-                              _steps, tps, _proc, (spec or {}).get("specLen", 0))
+                              _steps, tps, _proc, _dtok_ps)
             if eff:
                 live.update(eff)
         elif lb:                                # llama.cpp 真实指标（可能多副本汇总）
