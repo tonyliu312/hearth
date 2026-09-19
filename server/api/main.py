@@ -695,12 +695,24 @@ def _attach_node_throughput(nodes: list, models: list) -> None:
             continue                     # 没有实时指标源的模型不参与
         span = m.get("nodes") or []
         api = set(m.get("apiNodes") or [])
-        name = lv.get("loadedModel") or m.get("servedName") or m.get("display") or m.get("id")
+        # 卡片上要显示的是【后端自报名】对应的官方主名, 不是网关路由别名
+        # (别名带思考档位后缀 DGX-Spark-{none,auto,high,...}, 那不是模型身份)。
+        # ⛔ 变体/量化(heretic-vision、OptiQ-4bit)不许丢: 它说的是"实际加载的是
+        #    哪份权重"。主名放 name, 变体放 variant, 完整自报名放 served,
+        #    前端主行显示主名、次级灰显示变体、title 给自报名。
+        # 元信息里没有条目 → name 就是自报名原样, 不猜不截断。
+        served = lv.get("loadedModel") or m.get("servedName") or ""
+        meta = _meta_for(served) if served else {}
+        info = {"name": (meta.get("display") if served else None)
+                        or served or m.get("display") or m.get("id"),
+                "variant": meta.get("variant") or "",
+                "served": served}
         for nid in span:
             d = agg.setdefault(nid, {"role": None, "models": [], "tps": None, "pf": None,
                                      "pfSource": None})
-            if name not in d["models"]:
-                d["models"].append(name)
+            if not any(x["name"] == info["name"] and x["served"] == info["served"]
+                       for x in d["models"]):
+                d["models"].append(info)
             if api and nid not in api:
                 # TP/PP 成员但不对外提供 API → 只标归属, 不给数字
                 d["role"] = d["role"] or "worker"
@@ -1620,6 +1632,15 @@ MODEL_META = {
         "vendor": "Alibaba", "kind": "vision", "tags": ["vision", "abliterated"]},
 }
 
+# 配置覆盖/追加: hearth.yaml 的 model_meta 合并进来, 运维改配置就能改显示名,
+# 不必改代码(此前那份配置只被效率口径读, 显示名还在代码里, 两处容易走散)。
+# 键可以是网关路由名, 也可以是后端自报名(served model name)。
+for _k, _v in (HEARTH_CFG.get("model_meta") or {}).items():
+    if isinstance(_v, dict):
+        MODEL_META[_k] = {**MODEL_META.get(_k, {}), **_v}
+# 小写索引: 自报名常带大小写(Qwen3.8-27B-heretic-vision), 精确匹配会漏。
+MODEL_META_LOW = {k.lower(): v for k, v in MODEL_META.items()}
+
 
 def _host_of(api_base: str) -> str:
     m = re.search(r"//([^:/]+)", api_base or "")
@@ -1627,8 +1648,19 @@ def _host_of(api_base: str) -> str:
 
 
 def _meta_for(route: str) -> dict:
-    if route in MODEL_META:
-        return dict(MODEL_META[route])
+    """route 可以是网关路由名, 也可以是后端自报名(served model name)。
+    ⛔ 大小写不敏感匹配: 自报名常带大小写(Qwen3.8-27B-heretic-vision),
+       而 YAML 键习惯小写, 精确匹配会漏掉从而退回 title 化的猜测名。
+    ⛔ 匹配不到就【原样返回自报名】, 不猜不截断 —— 把 OptiQ-4bit 这类
+       "实际加载的是哪份权重"的信息截掉, 就是又一次"看着正常但不是真相"。"""
+    m = MODEL_META.get(route) or MODEL_META_LOW.get(route.lower())
+    if m:
+        d = dict(m)
+        d.setdefault("display", route)     # 配置里只写了 display 之外的字段时
+        d.setdefault("vendor", "—")
+        d.setdefault("kind", "chat")
+        d.setdefault("tags", [])
+        return d
     low = route.lower()
     vendor = ("Alibaba" if "qwen" in low else "DeepSeek" if "deepseek" in low
               else "MiniMax" if "minimax" in low else "Google" if "gemma" in low

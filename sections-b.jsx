@@ -64,6 +64,25 @@ function NodesSection() {
   );
 }
 
+// 一台节点上跑的模型: 主行是官方主名, 变体/量化用次级灰跟在后面, 完整的
+// 后端自报名放 title。⛔ 三者都不许丢 —— 主名去掉的是思考档位后缀(那不是模型
+// 身份), 变体说的是"实际加载的是哪份权重", 截掉它就是又一次"看着正常但不是真相"。
+function _modelLine(models) {
+  const arr = (models || []).filter(Boolean);
+  if (!arr.length) return null;
+  return arr.map((m, i) => (
+    <React.Fragment key={(m.served || m.name) + i}>
+      {i ? " · " : ""}
+      {m.name}
+      {m.variant ? <span style={{ color: "var(--ink-4)" }}>{" · "}{m.variant}</span> : null}
+    </React.Fragment>
+  ));
+}
+
+function _servedTitle(models) {
+  return (models || []).map((m) => m.served).filter(Boolean).join(", ");
+}
+
 // 节点 id → 显示名。⛔ 界面上任何位置都不要直接渲染 id: id 是内部标识(Prometheus
 // 标签 / 配置引用 / 落盘 key 都在用, 不改), 显示名可以随时改。2026-09-19 把 atlas
 // 的显示名改成 GPU-HOST 后, 只有这台会露馅 —— 四台 Spark 的 id 恰好与显示名一致。
@@ -131,7 +150,8 @@ function NodeCompactList({ nodes, onPick }) {
         const noTel = n.gpuTelemetry === false;
         return (
           <div key={n.id} onClick={() => onPick(n)}
-               title={t("open the full forensic view")}
+               title={[_servedTitle(n.throughputModels), t("open the full forensic view")]
+                      .filter(Boolean).join(" · ")}
                style={{ display: "grid", gridTemplateColumns: COLS, gap: "0 14px",
                         padding: "10px 16px", cursor: "pointer", alignItems: "baseline",
                         borderTop: i ? "0.5px solid var(--line)" : "none" }}>
@@ -144,7 +164,7 @@ function NodeCompactList({ nodes, onPick }) {
             <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--ink-3)",
                           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {n.throughputRole === "worker"
-                ? <>{t("worker")} · {(n.throughputModels || []).join(", ")}</>
+                ? <>{t("worker")} · {_modelLine(n.throughputModels)}</>
                 : "—"}
             </div>
             <div className="num" style={{ fontSize: 11.5, color: "var(--ink-2)", textAlign: "right" }}>
@@ -172,6 +192,16 @@ function NodeCard({ node, onClick }) {
         <div>
           <div className="node-class">{node.class}</div>
           <div className="node-name">{node.name}</div>
+          {/* 设备名下面一行真实的后端模型名(官方主名, 不带思考档位后缀)。
+              层级: 设备名是主、模型名是次、IP 最次 —— 不与英雄数字抢注意力,
+              不加颜色不加徽章。 */}
+          {(node.throughputModels || []).length > 0 && (
+            <div title={_servedTitle(node.throughputModels)}
+                 style={{ marginTop: 3, fontSize: 11, color: "var(--ink-2)", maxWidth: 215,
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {_modelLine(node.throughputModels)}
+            </div>
+          )}
           <div className="node-ip">{node.ip}</div>
         </div>
         <div style={{ textAlign: "right" }}>
@@ -267,7 +297,7 @@ function NodeCard({ node, onClick }) {
           <div className="k">{t("Throughput")}</div>
           <div className="v" style={{ color: "var(--ink-3)" }}
                title={t("this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API")}>
-            {t("worker")} · {node.throughputModels.join(", ")}
+            {t("worker")} · {_modelLine(node.throughputModels)}
           </div>
         </> : null}
       </div>
