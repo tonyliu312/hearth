@@ -683,6 +683,16 @@
     } catch (e) { /* keep last successful snapshot */ }
   }
 
+  // ── 日峰值(后端落盘, 重启不丢)────────────────────────────────────
+  // 120s 一次: 它是按天聚的标量, 没必要跟着 SSE 抖。
+  async function loadPeaks() {
+    try {
+      const r = await fetch("/api/peaks", { cache: "no-store",
+        signal: AbortSignal.timeout(8000) });
+      if (r.ok) { live.peaks = await r.json(); emit(); }
+    } catch (e) { /* keep last successful snapshot */ }
+  }
+
   // ── Public API ──────────────────────────────────────────────────────
   window.AIData = {
     NODES, MODELS, live, totals, subscribe,
@@ -707,6 +717,8 @@
   setInterval(loadEnergyTrends, 60_000);
   loadSelfTest();
   setInterval(loadSelfTest, 120_000);
+  loadPeaks();
+  setInterval(loadPeaks, 120_000);
   pickMode().then((m) => {
     if (m === "live") startLive(); else startMock();
   });

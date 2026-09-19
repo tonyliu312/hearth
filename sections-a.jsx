@@ -204,10 +204,28 @@ function Hero() {
           <span>KV-CACHE <b className="num">{cluster.kvNow.toFixed(0)}%</b></span>
           <span>CLUSTER POWER <b className="num">{(cluster.powNow / 1000).toFixed(2)} kW</b></span>
           <span>HOTTEST GPU <b className="num">{cluster.tempNow.toFixed(0)}°C</b></span>
+          {/* 日峰值来自后端落盘(重启不丢)。⛔ 没有峰值时【不显示这一格】,
+              而不是显示 0 —— "今天还没跑过请求"和"峰值 0 tok/s"不是一回事。
+              口径是各引擎解码 tok/s 之和, 与左边网关口径的 TOKENS/SEC 不同,
+              后者含 prompt token, 数值会高出一截(实测 1936 vs 58)。 */}
+          {_peakToday() != null && (
+            <span title="Peak of summed engine-side decode tok/s today · persisted by the backend">
+              PEAK TODAY <b className="num">{_peakToday().toFixed(0)}</b>
+              <span style={{ color: "var(--ink-4)" }}> tok/s decode</span>
+            </span>
+          )}
         </div>
       </div>
     </section>
   );
+}
+
+// 今天的解码峰值。后端还没攒到(刚启动/今天没跑过请求)→ null, 调用方整格不渲染。
+function _peakToday() {
+  const p = live.peaks;
+  if (!p || !p.days) return null;
+  const v = ((p.days[p.today] || {}).decodeTps || {}).value;
+  return typeof v === "number" && v > 0 ? v : null;
 }
 
 function HeroStat({ label, value, decimals = 0, unit, spark, color, sub, fake }) {

@@ -228,9 +228,16 @@ function NodeDetail({ node, onClose }) {
               <span style={{ color: "var(--ink-3)" }}>XID</span>
               <span style={{ color: gh.xid ? "var(--bad)" : "var(--ink)" }}>
                 {gh.xid}{gh.xid && gh.xidMsg ? ` · ${gh.xidMsg}` : ""}</span>
+              {/* ECC 计数器缺席 = 该 GPU 没有 ECC(GB10 的 LPDDR5X 就没有),
+                  不是"0 个错误"。2026-09-19 起采集端不再伪造 0, 这里如实写 n/a。 */}
               <span style={{ color: "var(--ink-3)" }}>ECC</span>
-              <span style={{ color: gh.eccDbe ? "var(--bad)" : gh.eccSbe ? "var(--hot)" : "var(--ink)" }}>
-                {gh.eccSbe} {t("correctable")} / {gh.eccDbe} {t("uncorrectable")}</span>
+              {(gh.eccSbe !== undefined || gh.eccDbe !== undefined) ? (
+                <span style={{ color: gh.eccDbe ? "var(--bad)" : gh.eccSbe ? "var(--hot)" : "var(--ink)" }}>
+                  {gh.eccSbe ?? "—"} {t("correctable")} / {gh.eccDbe ?? "—"} {t("uncorrectable")}</span>
+              ) : (
+                <span style={{ color: "var(--ink-3)" }} title={t("this GPU exposes no ECC counters")}>
+                  {t("n/a · no ECC counters")}</span>
+              )}
             </> : null}
           </div>
         </div>

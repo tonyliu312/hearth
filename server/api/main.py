@@ -590,8 +590,14 @@ async def _node_facts() -> dict[str, dict]:
         if nd in upt:
             d["uptimeSec"] = int(upt[nd])
         if nd in xids:                           # 有 DCGM 源才给, 否则整块缺席
-            d["gpuHealth"] = {"xid": int(xids[nd]), "eccSbe": int(sbes.get(nd, 0)),
-                              "eccDbe": int(dbes.get(nd, 0))}
+            # ⛔ ECC 两项【有序列才给】。四台 Spark 的 LPDDR5X 统一内存没有 ECC,
+            # 2026-09-19 已把采集端写死的 0 删掉(机主裁定) —— 这里再 .get(nd, 0)
+            # 就等于把采集端刚治好的假 0 在 API 层重新造一遍。
+            d["gpuHealth"] = {"xid": int(xids[nd])}
+            if nd in sbes:
+                d["gpuHealth"]["eccSbe"] = int(sbes[nd])
+            if nd in dbes:
+                d["gpuHealth"]["eccDbe"] = int(dbes[nd])
             if xid_msg.get(nd):
                 d["gpuHealth"]["xidMsg"] = xid_msg[nd]
         data[nd] = d
@@ -3674,6 +3680,32 @@ async def _alerts(nodes=None, log=None):
             out.append({"key": f"{nid}:disk", "sev": "warn",
                         "msg": f"{nm} disk {dsk:.0f}%",
                         "sub": "root filesystem filling up", "when": "live"})
+        # 逐挂载点容量。原先只有 live.disk(根分区)一条, 数据盘/模型盘写满看不见 ——
+        # 五台机器上 /data、/mnt/models 这类分区才是真会被撑爆的。
+        # ⛔ 用的是现有 node_filesystem_* 序列, 零新增探针。
+        # ⛔ 不依赖任何持久化状态(机主 2026-09-19 裁定): 只看当前值, 不做"增长速率"
+        #    判断 —— 那需要历史基线, 而历史归 Prometheus 管, 不归告警规则。
+        # ⛔ 按【设备】去重, 不是按挂载点: Atlas 的 /dev/nvme3n1p1 同时挂在 /data、
+        #    /out、/workspace/artifacts/... 四处(bind mount), 按挂载点报会把一个
+        #    满盘刷成四条告警, 把真正的其它问题挤出列表。代表挂载点取最短路径。
+        _fs: dict = {}
+        for mnt in (n.get("facts") or {}).get("mounts") or []:
+            up_, mp = mnt.get("usedPct"), mnt.get("mount") or ""
+            if up_ is None or mp == "/" or up_ < 90:
+                continue              # 根分区上面那条 disk 规则已经覆盖, 不重复报
+            dv = mnt.get("device") or mp
+            cur = _fs.get(dv)
+            if cur is None or len(mp) < len(cur["mount"]):
+                _fs[dv] = {**mnt, "mount": mp, "n": (cur or {}).get("n", 0) + 1}
+            else:
+                cur["n"] += 1
+        for dv, mnt in _fs.items():
+            more = f" (+{mnt['n'] - 1} more mounts)" if mnt["n"] > 1 else ""
+            out.append({"key": f"{nid}:fs:{dv}",
+                        "sev": "bad" if mnt["usedPct"] >= 95 else "warn",
+                        "msg": f"{nm} {mnt['mount']} {mnt['usedPct']:.0f}%{more}",
+                        "sub": f"{mnt.get('availGb')} GB left on {dv}",
+                        "when": "live"})
         # GPU 硬件健康。XID 是 NVIDIA 驱动报的致命/非致命错误码, 非零一律当事故看;
         # ECC 双比特(DBE)不可纠, 单比特(SBE)可纠但持续增长说明显存在退化。
         # 这三个计数器现有 DCGM 采集里就有(五台全覆盖), 不额外增加被监控机负担。
@@ -3827,6 +3859,147 @@ async def _notify_alerts(alerts_list: list) -> None:
 # ── 全量快照缓存：解耦 SSE 发送节奏与重活构建 ───────────────────────
 # 一个 tick 重活 ~7s(nodes 双采样+obs 串行 + alerts 旧版重复跑 node)。
 # 改为：重活每 _SNAP_TTL 算一次(nodes 只算一次, alerts 复用)，SSE 每
+# ── 日峰值落盘 ──────────────────────────────────────────────────────
+# 机主 2026-09-19 裁定: 只落「每日最高解码/预填 tok/s」这类小标量, 写独立 JSON,
+# 不混进 hearth.yaml; 曲线历史继续交给 Prometheus(job=vllm 存 180 天),
+# Hearth 其余部分保持无状态。
+# ⛔ 文件可删: 删掉后 Hearth 必须照常启动, 只是日峰值从头开始。所以这里【所有】
+#    读写异常都就地降级成"内存里记着", 绝不往上抛。
+# ⛔ 告警规则不许依赖这份状态(同一条裁定) —— 本模块只被 _build_snapshot 与
+#    /api/peaks 使用, _alerts 不读它。
+PEAKS_FILE = os.environ.get(
+    "HEARTH_PEAKS_FILE", os.path.expanduser("~/.local/state/hearth/daily-peaks.json"))
+PEAKS_KEEP_DAYS = 14
+_PEAKS_WRITE_EVERY = 60.0        # 峰值变了也最多每分钟落一次盘, 避免 2.5s 写一次
+# error    = 最近一次【写入】失败的原因(写成功就清掉)
+# load_note = 启动时【读取】发现的问题(文件损坏/没权限), 写成功【不】清 —— 那是
+#             两件事: "这次写进去了"不代表"上次那份没丢"。实测踩过: 损坏文件被
+#             丢弃后第一次落盘成功, note 被清成 None, 外面就看不出丢过数据。
+_PEAKS: dict = {"data": None, "dirty": False, "last_write": 0.0,
+                "persisted": True, "error": None, "load_note": None}
+
+
+def _peaks_day() -> str:
+    """按 display.timezone 算"今天"。配置没给时区就用 UTC —— 不猜浏览器时区,
+    否则同一份落盘文件会因为看的人不同而跨日错位。"""
+    tz = (HEARTH_CFG.get("display") or {}).get("timezone")
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(tz)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _peaks_load() -> dict:
+    """读落盘文件。文件不存在 / 损坏 / 没权限 → 空结构 + 记下原因, 不抛。"""
+    if _PEAKS["data"] is not None:
+        return _PEAKS["data"]
+    data = {"version": 1, "days": {}}
+    try:
+        with open(PEAKS_FILE, "r") as f:
+            got = json.load(f)
+        if isinstance(got, dict) and isinstance(got.get("days"), dict):
+            data = {"version": 1, "days": got["days"]}
+    except FileNotFoundError:
+        pass                                   # 正常: 第一次跑, 或被人删了
+    except Exception as e:
+        _PEAKS["load_note"] = (f"上次的落盘文件读不出来({e.__class__.__name__}), "
+                               f"已丢弃并从头开始: {PEAKS_FILE}")
+    _PEAKS["data"] = data
+    return data
+
+
+def _peaks_save(force: bool = False) -> None:
+    now = time.time()
+    if not _PEAKS["dirty"]:
+        return
+    if not force and now - _PEAKS["last_write"] < _PEAKS_WRITE_EVERY:
+        return
+    try:
+        os.makedirs(os.path.dirname(PEAKS_FILE) or ".", exist_ok=True)
+        tmp = f"{PEAKS_FILE}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(_PEAKS["data"], f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, PEAKS_FILE)            # 原子替换: 半截文件读起来是损坏
+        _PEAKS["dirty"], _PEAKS["last_write"] = False, now
+        _PEAKS["persisted"], _PEAKS["error"] = True, None
+    except Exception as e:
+        # 写不进去(只读挂载 / 无权限)不是致命错: 面板照常跑, 只是重启后丢。
+        _PEAKS["persisted"] = False
+        _PEAKS["error"] = f"写入失败({e.__class__.__name__}): {PEAKS_FILE}"
+
+
+def _peak_bump(bucket: dict, key: str, value, when: str) -> bool:
+    """value 更高才覆盖。⛔ None / 非数 / <=0 一律不记 —— 0 不是峰值, 记进去
+    会让"今天还没跑过任何请求"看起来像"今天峰值 0 tok/s"。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    if v <= 0:
+        return False
+    old = bucket.get(key)
+    if isinstance(old, dict) and float(old.get("value", 0)) >= v:
+        return False
+    bucket[key] = {"value": round(v, 1), "at": when}
+    return True
+
+
+def _record_peaks(models: list, cl: dict) -> None:
+    """每轮快照更新当日峰值。只记小标量, 不记曲线。"""
+    data = _peaks_load()
+    day = _peaks_day()
+    d = data["days"].setdefault(day, {})
+    when = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # ⛔ 两个集群口径【不是一回事】, 分开存, 名字里写清楚:
+    #   gatewayTokensTps = sum(rate(litellm_total_tokens_metric_total[1m])),
+    #     LiteLLM 记的是每请求【总 token(prompt+completion)】, 长 prompt 会让它
+    #     远高于真实解码速度(实测 874.8 vs 引擎侧解码 70)。
+    #   decodeTps = 各模型引擎侧 live.tps 之和, 才是真的"每秒吐出多少 token"。
+    changed = _peak_bump(d, "gatewayTokensTps", (cl.get("live") or {}).get("tpsNow"), when)
+    _dec = sum(float((m.get("live") or {}).get("tps") or 0) for m in (models or []))
+    changed |= _peak_bump(d, "decodeTps", _dec, when)
+    per = d.setdefault("models", {})
+    for m in models or []:
+        lv = m.get("live") or {}
+        mid = m.get("id")
+        if not mid:
+            continue
+        mb = per.setdefault(mid, {})
+        changed |= _peak_bump(mb, "decodeTps", lv.get("tps"), when)
+        changed |= _peak_bump(mb, "prefillTps", lv.get("prefillTokPerS"), when)
+        if not mb:                             # 一天下来一个峰值都没有 → 不留空壳
+            per.pop(mid, None)
+    if len(data["days"]) > PEAKS_KEEP_DAYS:    # 只留最近 N 天, 文件恒定大小
+        for k in sorted(data["days"])[:-PEAKS_KEEP_DAYS]:
+            data["days"].pop(k, None)
+        changed = True
+    if changed:
+        _PEAKS["dirty"] = True
+    _peaks_save()
+
+
+@app.get("/api/peaks")
+async def peaks():
+    """最近 PEAKS_KEEP_DAYS 天的日峰值。文件被删 → days 为空, 不是错误。"""
+    data = _peaks_load()
+    days = data.get("days") or {}
+    best = {}
+    for day, d in days.items():
+        for k, v in d.items():
+            if k == "models" or not isinstance(v, dict):
+                continue
+            if float(v.get("value", 0)) > float((best.get(k) or {}).get("value", 0)):
+                best[k] = {"value": v["value"], "day": day, "at": v.get("at")}
+    return {"today": _peaks_day(), "keepDays": PEAKS_KEEP_DAYS,
+            "days": days, "best": best,
+            # 落盘状态如实暴露: persisted=false 表示这批峰值重启会丢。
+            "file": PEAKS_FILE, "persisted": _PEAKS["persisted"],
+            "note": _PEAKS["error"], "loadNote": _PEAKS["load_note"]}
+
+
 # TICK_SEC 发最新快照 → 前端每 1.5s 收帧平滑重渲染，数据 ~2.5s 新鲜。
 _SNAP = {"ts": 0.0, "data": None}
 _SNAP_TTL = 2.5
@@ -3839,6 +4012,10 @@ async def _build_snapshot() -> dict:
         cluster(), models_list(), _training_payload(), _infra_payload())
     al = await _alerts(nodes, log)                # 复用 nodes/log, 不重复跑
     await _notify_alerts(al)                       # 推送渠道(跳变才发, 不阻塞失败)
+    try:
+        _record_peaks(models, cl)                  # 日峰值落盘; 失败只降级不影响快照
+    except Exception:
+        pass
     return {"ts": time.time(), "cluster": cl, "nodes": nodes,
             "models": models, "alerts": al, "log": log, "training": training,
             "infra": infra_dev}
@@ -4228,6 +4405,19 @@ async def selftest():
                             "无节点事实数据",
                             "直采节点不在 obs 里, 这些事实查不到, 属预期"
                             if src == "exporter" else "查 node_filesystem_* / node_network_info 序列"))
+        # GPU 硬件健康。ECC 计数器缺席【不是故障】: GB10 的 LPDDR5X 没有 ECC,
+        # 采集端 2026-09-19 起不再伪造 0。只要 XID 在, 这条信号就是全的。
+        gh = (n.get("facts") or {}).get("gpuHealth") or {}
+        if gh:
+            has_ecc = ("eccSbe" in gh) or ("eccDbe" in gh)
+            out.append(_chk(u, "gpu_health", "pass",
+                            f"XID={gh.get('xid')} · ECC 计数器"
+                            + ("有" if has_ecc else "无(该 GPU 不导出, 非故障)")))
+        elif n.get("gpuTelemetry") is False:
+            out.append(_chk(u, "gpu_health", "skipped", "该节点没有 GPU 健康数据源"))
+        else:
+            out.append(_chk(u, "gpu_health", "fail", "有 GPU 遥测源但取不到 XID",
+                            "查 DCGM_FI_DEV_XID_ERRORS 该 node= 的序列"))
         # SSH GPU 探针(只有配了的节点才判)
         if probe_cfg.get(n["id"]):
             got = (_GPU_PROBE.get("data") or {}).get(n["id"])

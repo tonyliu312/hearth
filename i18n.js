@@ -46,6 +46,8 @@
       "Accelerator activity": "加速器活跃度", "VRAM": "显存",
       // 能耗口径(2026-09-19): DCGM 只量 GPU, 整机功耗要靠智能插座, 后者现在挂着。
       "GPU power": "GPU 功耗", "smart-plug": "智能插座",
+      "n/a · no ECC counters": "不适用 · 无 ECC 计数器",
+      "this GPU exposes no ECC counters": "该 GPU 不导出 ECC 计数器(统一内存无 ECC), 不是 0 个错误",
       "Connectivity self-test · per unit": "逐单元连通性自检",
       "Each capability is pass / fail / skipped. skipped = no such source on this unit — not the same as healthy.":
         "每项能力分 通过 / 失败 / 跳过 三态。跳过 = 这台单元本来就没有这个数据源, 不等于健康。",
@@ -258,6 +260,8 @@
       "Model": "模型", "Throughput": "吞吐", "State": "狀態",
       "Accelerator activity": "加速器活躍度", "VRAM": "顯存",
       "GPU power": "GPU 功耗", "smart-plug": "智慧插座",
+      "n/a · no ECC counters": "不適用 · 無 ECC 計數器",
+      "this GPU exposes no ECC counters": "該 GPU 不匯出 ECC 計數器(統一記憶體無 ECC), 不是 0 個錯誤",
       "Connectivity self-test · per unit": "逐單元連通性自檢",
       "Each capability is pass / fail / skipped. skipped = no such source on this unit — not the same as healthy.":
         "每項能力分 通過 / 失敗 / 跳過 三態。跳過 = 這台單元本來就沒有這個資料源, 不等於健康。",
