@@ -3758,10 +3758,20 @@ async def models_list():
                 live_steps = round(_steps, 2)
             else:
                 live_steps = None
-            if _steps is not None and running <= 1:
+            # ⛔ 2026-09-19 修: 原先是"steps 有值且 running<=1 就用 steps", 结果把
+            #    /api/status 窗口里真实的吞吐覆盖成 0 —— MBP 的真实用法是 0.5-2 秒的
+            #    短请求(Codex 在用, /api/status 今天已 2538 次请求), 每次都在调度器
+            #    快照刷新前就结束, scheduler.step 整段冻住(实测 22 秒不动、
+            #    snapshot_age 到 49 秒), 于是 steps 恒 0 → 面板恒 0。
+            #    这是一种【新形态的假数】: 不是口径错, 是【数据源的快照 TTL 长于被测
+            #    事件的持续时间】—— 采样率不匹配。判据: 引擎自报的累计请求数在涨而
+            #    面板速率恒 0。
+            #    现在以 /api/status 的累计计数器窗口为准(它即时且精确, 实测一次 15
+            #    token 的回复 total_completion_tokens 正好 +15); steps 只在
+            #    【窗口还没跳但确实有请求在跑】时补位(长生成的前几十秒), 并标明来源。
+            _tps_src = "window"
+            if (not tps) and _steps and running >= 1:
                 tps, _tps_src = _steps, "steps"
-            else:
-                _tps_src = "window"
             state = "serving" if running > 0 or tps > 0 else "idle"
             # ⛔ kv 留 0:oMLX 只给 model_memory_used/max(权重+KV 对内存上限),那不是
             #    KV 池占用率,填进 kv 会被读成"KV 用了 75%"。
@@ -3782,13 +3792,23 @@ async def models_list():
             # prefill 吞吐与缓存命中率只有 oMLX 自报的【生命周期】均值 —— 不做窗口差分:
             # Δ(prompt-cached)/Δt 是墙钟吞吐,与面板上"每请求归一化"的 prefill 口径
             # 不是一回事,同名不同义比缺失更糟。
-            # oMLX 没有 prefill token 计数器(/api/status 与 /v1/router/state 都没有),
-            # 只有引擎自报的【历史均值】avg_prefill_tps。⛔ 不拿 best_prefill_tps 或
-            # fairness 的 ema 顶替实时值 —— 那些同样是历史量。实时口径在此【无源】。
+            # prefill 实时: /api/status 的 total_prompt_tokens 减去命中部分, 即实算量。
+            # (2026-09-19 由 w1W:p1 指出该接口可用; 此前以为 oMLX 无 prefill 计数器。)
+            # ⛔ cached 必须减, 不能假设它恒为 0 —— 当前构建是 0, 换构建就不是。
+            # ⛔ 不用 avg_prefill_tps / avg_generation_tps / cache_efficiency 当实时值:
+            #    那三个是生命周期平均, 正是"恒定的大数"形态。
+            _om_pt = b.get("omlx:total_prompt_tokens", 0.0)
+            _om_ct = b.get("omlx:total_cached_tokens", 0.0)
+            if _om_pt > 0:
+                _put_prefill_rt(live, m["id"], max(0.0, _om_pt - _om_ct), _t_now)
+                if "prefillTokPerS" not in live:
+                    live["prefillSource"] = "window"   # 窗口没攒够/窗口内无 prefill
+            else:
+                # 计数器缺席(该构建不导出) → 实时口径无源, 字段整组缺席。
+                live["prefillSource"] = "none"
             _pf = b.get("omlx:avg_prefill_tps", 0.0)
             if _pf > 0:
                 live["prefillTokPerSLifetime"] = round(_pf, 0)
-            live["prefillSource"] = "none"
             # oMLX 只给引擎自报的【生命周期】cache_efficiency, 没有 prefill token
             # 计数器 → 实时命中率无源, 字段缺席(cacheHitSource 也不给)。
             _ce = b.get("omlx:cache_efficiency", 0.0)
