@@ -11,6 +11,7 @@
   // 字典：key = 英文原串。en 用原串本身（表里不重复列）。
   const DICT = {
     "zh-CN": {
+      "Unified entry": "统一入口",
       // nav
       "Overview": "总览", "Cluster": "集群", "Nodes": "节点", "Models": "模型",
       "Telemetry": "遥测", "Fabric": "网络", "Search": "搜索",
@@ -49,6 +50,8 @@
       // prefill 两个口径(2026-09-19): 实时=墙钟速率空闲即 0; 累计平均=引擎速度。
       "Per-unit live throughput": "逐单元实时吞吐",
       "Decode": "解码", "Prefill": "预填", "Throughput": "吞吐", "worker": "worker",
+      "Serving": "服务中", "Cluster members": "集群成员",
+      "tok/s · decode": "tok/s · 解码", "prefill": "预填",
       "this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API":
         "该节点是 TP/PP 成员, 整组只产出一份吞吐, 数字显示在对外提供 API 的那台上",
       "decode tok/s": "解码 tok/s", "prefill tok/s": "预填 tok/s",
@@ -245,6 +248,7 @@
         "抓取失败 —— 宁可留空也不显示陈旧值。",
     },
     "zh-TW": {
+      "Unified entry": "統一入口",
       "Overview": "總覽", "Cluster": "叢集", "Nodes": "節點", "Models": "模型",
       "Telemetry": "遙測", "Fabric": "網路", "Search": "搜尋",
       "nodes online": "節點在線", "OFFLINE": "離線", "reconnecting…": "重連中…",
@@ -275,6 +279,8 @@
       "GPU power": "GPU 功耗", "smart-plug": "智慧插座",
       "Per-unit live throughput": "逐單元即時吞吐",
       "Decode": "解碼", "Prefill": "預填", "Throughput": "吞吐", "worker": "worker",
+      "Serving": "服務中", "Cluster members": "叢集成員",
+      "tok/s · decode": "tok/s · 解碼", "prefill": "預填",
       "this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API":
         "該節點是 TP/PP 成員, 整組只產出一份吞吐, 數字顯示在對外提供 API 的那台上",
       "decode tok/s": "解碼 tok/s", "prefill tok/s": "預填 tok/s",

@@ -30,19 +30,49 @@ function NodesSection() {
         </div>
       </div>
 
-      {/* 列数随 hearth.yaml nodes 数量动态: 1-6 节点对应 .g-1 ~ .g-6;
-          7+ 节点用 .g-auto (auto-fill minmax 220px) 自动换行。
-          响应式塌缩交给 CSS 媒体查询(≤1180→3 列, ≤820→2 列, 手机→1 列)。 */}
-      <div className={"grid " + (_NODES.length <= 6 ? "g-" + _NODES.length : "g-auto")}>
-        {_orderNodes(_NODES.filter((n) => nfilter === "All" ? true
+      {/* 分组代替"靠顺序暗示": 有实时吞吐数字的一组、集群成员(TP worker/无归属)一组,
+          各自带标题与计数。顺序只是隐含信息, 标题才是明示(补丁 3 只排序, 机主反馈
+          "视觉上太不明显", 根因是层级不是顺序)。
+          ⛔ 不给卡片加彩色边框/阴影/SERVING 徽章: 装饰性强调会让整页更吵, 也与
+             09-15 定的"数值统一颜色"冲突。分组靠标题与留白, 不靠颜色。
+          列数按【本组】数量取 g-1~g-6, 7+ 用 g-auto; 响应式塌缩仍交给 CSS 媒体查询。 */}
+      {(() => {
+        const shown = _orderNodes(_NODES.filter((n) => nfilter === "All" ? true
               : nfilter === "RTX" ? (n.kind || "discrete") === "discrete"
               : nfilter === "DGX" ? n.kind === "unified-arm-soc"   // 只算 GB10;apple-silicon 不是 DGX
-              : (_live.nodes[n.id] && _live.nodes[n.id].cpu.now > 0)))
-          .map((n) => <NodeCard key={n.id} node={n} onClick={() => setActive(n)} />)}
-      </div>
+              : (_live.nodes[n.id] && _live.nodes[n.id].cpu.now > 0)));
+        const serving = shown.filter((n) => n.throughputRole === "api");
+        const members = shown.filter((n) => n.throughputRole !== "api");
+        const grid = (g) => "grid " + (g.length <= 6 ? "g-" + g.length : "g-auto");
+        const card = (n) => <NodeCard key={n.id} node={n} onClick={() => setActive(n)} />;
+        return (
+          <>
+            {serving.length > 0 && <>
+              <NodeGroupHead label={t("Serving")} count={serving.length} first />
+              <div className={grid(serving)}>{serving.map(card)}</div>
+            </>}
+            {members.length > 0 && <>
+              <NodeGroupHead label={t("Cluster members")} count={members.length} />
+              <div className={grid(members)}>{members.map(card)}</div>
+            </>}
+          </>
+        );
+      })()}
 
       {active && <NodeDetail node={active} onClose={() => setActive(null)} />}
     </section>
+  );
+}
+
+// 分组标题。克制: 只有一行小字 + 计数, 无底色无边框, 靠留白分段。
+function NodeGroupHead({ label, count, first }) {
+  return (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 8,
+                  margin: first ? "2px 0 12px" : "34px 0 12px" }}>
+      <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, letterSpacing: ".12em",
+                     textTransform: "uppercase", color: "var(--ink-3)" }}>{label}</span>
+      <span className="num" style={{ fontSize: 10.5, color: "var(--ink-4)" }}>· {count}</span>
+    </div>
   );
 }
 
@@ -85,6 +115,31 @@ function NodeCard({ node, onClick }) {
         </div>
       </div>
 
+      {/* 英雄数字: 这张卡最该被一眼看到的量。规格表(GPU/VRAM/CPU/Net/功耗/温度)
+          降到下面 —— 补丁 3 之前 Decode 是规格表的最后一行, 与 GPU 温度同级,
+          排到第一张也还是第七行小字, 主次是反的。
+          ⛔ 单位只在标签行出现一次(09-15 机主定的规矩), prefill 副行不再重复。
+          ⛔ 等宽 tabular figures + 固定行高: 数值跳动时布局不抖。
+          ⛔ 空闲显示 0.0 不隐藏: 判据是能力不是数值(与补丁 3 一致)。 */}
+      {node.throughputRole === "api" && (
+        <div style={{ margin: "14px 0 4px" }}>
+          <div className="num" style={{ fontSize: 30, lineHeight: "34px", fontWeight: 500,
+                                        letterSpacing: "-.02em", color: "var(--ink)" }}>
+            {(node.decodeTps ?? 0).toFixed(1)}
+          </div>
+          <div style={{ marginTop: 5, fontFamily: "var(--mono)", fontSize: 10,
+                        letterSpacing: ".1em", textTransform: "uppercase", color: "var(--ink-3)" }}>
+            {t("tok/s · decode")}
+          </div>
+          <div className="num" style={{ marginTop: 6, fontSize: 11, color: "var(--ink-3)" }}
+               title={node.prefillTokPerS == null ? t("this backend exposes no realtime prefill counter") : ""}>
+            <span style={{ letterSpacing: ".1em", textTransform: "uppercase" }}>{t("prefill")}</span>
+            {"  "}
+            {node.prefillTokPerS == null ? "—" : node.prefillTokPerS.toLocaleString("en-US")}
+          </div>
+        </div>
+      )}
+
       <div className="node-rings">
         <div>
           {node.gpuPending
@@ -119,14 +174,9 @@ function NodeCard({ node, onClick }) {
             ⛔ TP 组只有对外提供 API 的那台显示数字(后端按 /v1/models 实测判定),
                其余成员显示归属 —— 四张卡各写一遍同一个数会被读成四倍。
             ⛔ 没有模型归属的节点整两行不渲染: 那种情况下 0 是假数, 不是"空闲"。 */}
-        {node.throughputRole === "api" ? <>
-          <div className="k">{t("Decode")}</div>
-          <div className="v num">{(node.decodeTps ?? 0).toFixed(1)} tok/s</div>
-          <div className="k">{t("Prefill")}</div>
-          <div className="v num" title={node.prefillTokPerS == null ? t("this backend exposes no realtime prefill counter") : ""}>
-            {node.prefillTokPerS == null ? "—" : node.prefillTokPerS.toLocaleString("en-US") + " tok/s"}
-          </div>
-        </> : node.throughputRole === "worker" ? <>
+        {/* api 节点的吞吐已提到卡片顶部当英雄数字, 这里不再重复一遍。
+            worker 只有归属说明, 仍留在规格表里(它不是"数字"这一档)。 */}
+        {node.throughputRole === "worker" ? <>
           <div className="k">{t("Throughput")}</div>
           <div className="v" style={{ color: "var(--ink-3)" }}
                title={t("this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API")}>
