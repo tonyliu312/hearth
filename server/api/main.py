@@ -498,8 +498,12 @@ async def cluster():
     total_ram  = sum(n["ram"] for n in NODES)
     (tps, rps, g_avg, g_max, fb_u, fb_t, pw, gt,
      cpu, memu, memt) = await asyncio.gather(
-        promql("sum(rate(litellm_total_tokens_metric[1m]))"),
-        promql("sum(rate(litellm_total_requests_metric[1m]))"),
+        # ⛔ 指标名必须带 _total:LiteLLM 用 prometheus_client 的 Counter,导出名是
+        # litellm_total_tokens_metric_total。少了后缀 → 查不到序列 → tpsNow/rpsNow 恒 0。
+        # 2026-09-19 实测:抓取任务此前还因 401 down 着,两层问题叠在一起,界面看不出来
+        # (前端用各模型吞吐自行重算了集群值,见 data.js 的 cluster tps 段)。
+        promql("sum(rate(litellm_total_tokens_metric_total[1m]))"),
+        promql("sum(rate(litellm_proxy_total_requests_metric_total[1m]))"),
         promql("avg(DCGM_FI_DEV_GPU_UTIL)"),
         promql("max(DCGM_FI_DEV_GPU_UTIL)"),
         promql("sum(DCGM_FI_DEV_FB_USED)/1024"),                                  # atlas 独显 FB (GiB)
@@ -511,7 +515,7 @@ async def cluster():
         promql("sum(node_memory_MemTotal_bytes)/1073741824"),
     )
     tps_h, pow_h, temp_h = await asyncio.gather(
-        promql_range("sum(rate(litellm_total_tokens_metric[1m]))"),
+        promql_range("sum(rate(litellm_total_tokens_metric_total[1m]))"),
         promql_range("sum(DCGM_FI_DEV_POWER_USAGE)"),
         promql_range("max(DCGM_FI_DEV_GPU_TEMP)"),
     )
@@ -1089,7 +1093,7 @@ async def _ha_power() -> dict:
     # calendar-aligned, but immune to HA-side counter resets / TZ confusion.
     gpu, eff, per_node_w, per_node_24h, per_node_30d = await asyncio.gather(
         promql("sum(DCGM_FI_DEV_POWER_USAGE)"),
-        promql("sum(rate(litellm_total_tokens_metric[1m])) "
+        promql("sum(rate(litellm_total_tokens_metric_total[1m])) "
                "/ clamp_min(sum(ha_node_wall_power_watts), 1)"),
         promql("ha_node_wall_power_watts"),
         # sum_over_time × step / 3600 / 1000 — integrates only the seconds
