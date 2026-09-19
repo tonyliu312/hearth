@@ -516,7 +516,11 @@
           "latencyWindowSec","latencySampleN","latencyLowSample",
           "ttftP50","ttftP90","ttftP99", "tpotP50","tpotP90","tpotP99",
           "queue","queueP50","queueP90","queueP99",
-          "prefill","prefillP50","prefillP90","prefillP99","cacheHitRate",
+          "prefill","prefillP50","prefillP90","prefillP99",
+          // 前缀缓存命中率两个口径: cacheHitRate 是【窗口实时】(空窗要清掉),
+          // cacheHitRateLifetime 是累计(空闲时依然成立, 不清)。
+          // cacheHitSource 在场 = 该后端有实时源, 界面就渲染这一行(空窗显示 "—")。
+          "cacheHitRate","cacheHitWindowSec","cacheHitSource","cacheHitRateLifetime",
           // prefill 两个口径分开传: 实时(墙钟, 空闲=0) 与 累计平均(引擎速度)。
           // ⛔ 不要把 Lifetime 也放进下面的【清理】名单 —— 它是累计量, 空闲时依然成立;
           //    实时值才必须跟着窗口一起清掉。
@@ -551,7 +555,7 @@
          "ttft","tpot","ttftP50","ttftP90","ttftP99","tpotP50","tpotP90","tpotP99",
          "queue","queueP50","queueP90","queueP99",
          "prefill","prefillP50","prefillP90","prefillP99",
-         "prefillTokPerS","prefillWindowSec",
+         "prefillTokPerS","prefillWindowSec","cacheHitRate","cacheHitWindowSec",
          "decode","decodeP50","decodeP90","decodeP99",
          "itl","itlP50","itlP90","itlP99",
          "sloTtftMs","sloTpotMs","sloTtftRate","sloTpotRate",

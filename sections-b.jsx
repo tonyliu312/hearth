@@ -1079,8 +1079,9 @@ function MetricBars({ model, ms }) {
           <DetailMetric label={t("Prefill · lifetime avg")} value={model.prefillTokPerSLifetime.toLocaleString("en-US")} unit=" tok/s" bar={Math.min(100, model.prefillTokPerSLifetime / 20)} color="violet"
                         note={t("no realtime source")} />
         ) : null}
-        {model.cacheHitRate !== undefined ? (
-          <DetailMetric label={t("Prompt cache hit")} value={model.cacheHitRate.toFixed(0)} unit={`% · ${t("lifetime")}`} bar={model.cacheHitRate} color="teal" />
+        {model.cacheHitRateLifetime !== undefined ? (
+          <DetailMetric label={t("Prompt cache hit · lifetime avg")} value={model.cacheHitRateLifetime.toFixed(0)} unit="%" bar={model.cacheHitRateLifetime} color="teal"
+                        note={t("no realtime source")} />
         ) : null}
       </>
     );
@@ -1107,8 +1108,18 @@ function MetricBars({ model, ms }) {
         {model.prefillTokPerSLifetime !== undefined ? (
           <DetailMetric label={t("Prefill · lifetime avg")} value={model.prefillTokPerSLifetime.toLocaleString("en-US")} unit=" tok/s" bar={Math.min(100, model.prefillTokPerSLifetime / 20)} color="violet" />
         ) : null}
-        {model.cacheHitRate !== undefined ? (
-          <DetailMetric label={t("Prompt cache hit")} value={model.cacheHitRate.toFixed(0)} unit={`% · ${t("lifetime")}`} bar={model.cacheHitRate} color="teal" />
+        {/* 命中率两行: 上面是【窗口实时】(窗口内没有 prefill 活动就显示 "—",
+            不填 0 也不 latch), 下面是【累计平均】(空闲时依然成立)。 */}
+        {model.cacheHitSource ? (
+          <DetailMetric label={t("Prompt cache hit · now")}
+                        value={model.cacheHitRate !== undefined ? model.cacheHitRate.toFixed(0) : "—"}
+                        unit={model.cacheHitRate !== undefined ? "%" : ""}
+                        bar={model.cacheHitRate || 0} color="teal"
+                        note={model.cacheHitRate === undefined ? t("no prefill in window")
+                              : model.cacheHitWindowSec ? `${t("window")} ${model.cacheHitWindowSec}s` : null} />
+        ) : null}
+        {model.cacheHitRateLifetime !== undefined ? (
+          <DetailMetric label={t("Prompt cache hit · lifetime avg")} value={model.cacheHitRateLifetime.toFixed(0)} unit="%" bar={model.cacheHitRateLifetime} color="teal" />
         ) : null}
       </>
     );
@@ -1210,6 +1221,24 @@ function ModelDetail({ model }) {
                   {t("Prefill · lifetime avg")}{" "}
                   <b style={{ color: "var(--ink-2)" }}>{model.prefillTokPerSLifetime.toLocaleString("en-US")}</b>
                   {" "}tok/s
+                </div>
+              ) : null}
+              {/* 前缀缓存命中率。⛔ 分母是 命中+实算, 不是 prompt_tokens_total
+                  (后者已含命中, 会把命中率算成约一半)。默认给窗口实时值,
+                  窗口内没有 prefill 活动就显示 "—", 不填 0 也不 latch。 */}
+              {model.cacheHitSource ? (
+                <div title={model.cacheHitRate === undefined ? t("no prefill in window") : ""}>
+                  {t("Prompt cache hit · now")}{" "}
+                  <b style={{ color: "var(--ink-2)" }}>
+                    {model.cacheHitRate !== undefined ? model.cacheHitRate.toFixed(0) + "%" : "—"}</b>
+                  {model.cacheHitRate !== undefined && model.cacheHitWindowSec
+                    ? ` · ${t("window")} ${model.cacheHitWindowSec}s` : ""}
+                </div>
+              ) : null}
+              {model.cacheHitRateLifetime !== undefined ? (
+                <div>
+                  {t("Prompt cache hit · lifetime avg")}{" "}
+                  <b style={{ color: "var(--ink-2)" }}>{model.cacheHitRateLifetime.toFixed(0)}%</b>
                 </div>
               ) : null}
               {/* SGLang 的 TPOT 桶按 token 加权(输出块内均摊)，Decode / ITL 引擎不导出

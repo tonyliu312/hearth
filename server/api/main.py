@@ -2204,6 +2204,13 @@ async def _scrape_sglang(base: str) -> dict:
                     # prefill_cache)，与 vLLM 那边 iteration_sum - generation 同口径
                     key = "__sglang_prefill_compute_tokens_total"
                     out[key] = out.get(key, 0.0) + v
+                elif mm and mm.group(1) == "prefill_cache":
+                    # 前缀缓存命中的 token。命中率 = cache / (cache + compute)。
+                    # ⛔ 分母绝不能用 sglang:prompt_tokens_total —— 它【已含命中】,
+                    #    用它当分母会把命中率算成约一半(对照方 2026-09-19 实测
+                    #    0.4895 对真值 0.937)。
+                    key = "__sglang_prefill_cache_tokens_total"
+                    out[key] = out.get(key, 0.0) + v
             elif hkey:
                 mle = re.search(r'le="([^"]+)"', head)
                 if mle:
@@ -3324,6 +3331,37 @@ _PREFILL_WIN = 30.0
 _PREFILL_MIN = 5.0
 
 
+def _win_hit_rate(key: str, cache, compute, now: float):
+    """(窗口命中率 %, 窗口秒)。前缀缓存命中率的【实时】口径。
+
+    ⛔ 默认口径必须是窗口而不是生命周期累计: 累计值长期稳定在 0.93 附近,
+       引擎空转一周也不动 —— 又一个"恒定的大数"形态的假数。
+    ⛔ 窗口内 Δcache + Δcompute == 0(没有任何 prefill 活动) → 返回 None,
+       调用方让字段缺席、界面显示"—"; 既不填 0 也不 latch 上一次的值。
+    窗口与 prefill 实时速率共用 _PREFILL_WIN/_PREFILL_MIN, 不引第二套。"""
+    if cache is None or compute is None:
+        return (None, None)
+    h = _GEN_HIST.setdefault(key, deque())
+    while h and now - h[0][0] > _PREFILL_WIN:
+        h.popleft()
+    old = h[0] if h else None
+    h.append((now, float(cache), float(compute)))
+    while len(h) > _GEN_MAX_SNAPS:
+        h.popleft()
+    if old is None:
+        return (None, None)
+    if float(cache) < old[1] or float(compute) < old[2]:     # 引擎重启 → 丢历史
+        h.clear(); h.append((now, float(cache), float(compute)))
+        return (None, None)
+    age = now - old[0]
+    if age < _PREFILL_MIN:
+        return (None, None)
+    d_c, d_p = float(cache) - old[1], float(compute) - old[2]
+    if d_c + d_p <= 0:                      # 窗口内没有 prefill 活动
+        return (None, round(age, 1))
+    return (round(d_c / (d_c + d_p) * 100, 1), round(age, 1))
+
+
 def _put_prefill_rt(live: dict, model_id: str, tokens, now: float,
                     source: str = "window") -> None:
     """实时 prefill 速率(tok/s, 墙钟口径)。计数器缺席 → 字段整个缺席, 不填 0。"""
@@ -3595,10 +3633,17 @@ async def models_list():
             #    (同日实测 20s 窗口 732 对实算 115), 那边要用
             #    realtime_tokens_total{mode=prefill_compute} 当实算分子。
             #    sparkDash 就是在这一步把命中率算成了 0.4895(真值 0.937)。
-            _pc = b.get("llamacpp:prompt_tokens_cached_total", 0.0)
-            _pp = b.get("llamacpp:prompt_tokens_total", 0.0)
-            if _pc + _pp > 0:
-                live["cacheHitRate"] = round(_pc / (_pc + _pp) * 100, 1)
+            _pc = b.get("llamacpp:prompt_tokens_cached_total")
+            _pp = b.get("llamacpp:prompt_tokens_total")
+            if _pc is not None and _pp is not None:
+                live["cacheHitSource"] = "window"
+                _hr, _hw = _win_hit_rate("hit:" + m["id"], _pc, _pp, _t_now)
+                if _hr is not None:
+                    live["cacheHitRate"] = _hr
+                if _hw is not None:
+                    live["cacheHitWindowSec"] = _hw
+                if _pc + _pp > 0:
+                    live["cacheHitRateLifetime"] = round(_pc / (_pc + _pp) * 100, 1)
             spec = _spec_stats(a, b, "llamacpp")
             if spec:                    # 未开投机解码 → 键缺席,前端整块不渲染
                 live["spec"] = spec
@@ -3631,6 +3676,21 @@ async def models_list():
             # 分子分母错位的问题了(见 _put_prefill_tps 的说明)。
             _put_prefill_rt(live, m["id"],
                             b.get("__sglang_prefill_compute_tokens_total"), _t_now)
+            # 前缀缓存命中率。⛔ 默认给【窗口实时】值, 生命周期另开一个字段与标签
+            # (与 prefill 的 实时/累计平均 一致, 不共用一个名字)。
+            # cacheHitSource 只要在场, 界面就渲染这一行: 窗口内没有 prefill 活动时
+            # cacheHitRate 缺席 → 显示"—", 不填 0 也不 latch。
+            _sg_ca = b.get("__sglang_prefill_cache_tokens_total")
+            _sg_cp = b.get("__sglang_prefill_compute_tokens_total")
+            if _sg_ca is not None and _sg_cp is not None:
+                live["cacheHitSource"] = "window"
+                _hr, _hw = _win_hit_rate("hit:" + m["id"], _sg_ca, _sg_cp, _t_now)
+                if _hr is not None:
+                    live["cacheHitRate"] = _hr
+                if _hw is not None:
+                    live["cacheHitWindowSec"] = _hw
+                if _sg_ca + _sg_cp > 0:
+                    live["cacheHitRateLifetime"] = round(_sg_ca / (_sg_ca + _sg_cp) * 100, 1)
             # ⛔ SLO 达标率对 SGLang 【不给】：_slo_rates 的联合区间(Fréchet 边界)
             # 要求 TTFT 与 TPOT 是同一批【请求】上的边缘分布，而 SGLang 的 TPOT 桶
             # 按 token 加权(长请求权重大)，两个分量总体不同，区间不成立。
@@ -3697,9 +3757,11 @@ async def models_list():
             if _pf > 0:
                 live["prefillTokPerSLifetime"] = round(_pf, 0)
             live["prefillSource"] = "none"
+            # oMLX 只给引擎自报的【生命周期】cache_efficiency, 没有 prefill token
+            # 计数器 → 实时命中率无源, 字段缺席(cacheHitSource 也不给)。
             _ce = b.get("omlx:cache_efficiency", 0.0)
             if _ce > 0:
-                live["cacheHitRate"] = round(_ce, 1)
+                live["cacheHitRateLifetime"] = round(_ce, 1)
             # 已加载权重的真身与常驻大小:路由名(mbp-none)看不出载的是什么模型
             _lm = b.get("__omlx_model")
             if _lm:
@@ -3734,8 +3796,15 @@ async def models_list():
                 live["prefillSource"] = "none"
             else:
                 _put_prefill_rt(live, m["id"], _ds4_pf, _t_now)
-            if _ds4_pf is not None and _ds4_ca is not None and (_ds4_pf + _ds4_ca) > 0:
-                live["cacheHitRate"] = round(_ds4_ca / (_ds4_ca + _ds4_pf) * 100, 1)
+            if _ds4_pf is not None and _ds4_ca is not None:
+                live["cacheHitSource"] = "window"
+                _hr, _hw = _win_hit_rate("hit:" + m["id"], _ds4_ca, _ds4_pf, _t_now)
+                if _hr is not None:
+                    live["cacheHitRate"] = _hr
+                if _hw is not None:
+                    live["cacheHitWindowSec"] = _hw
+                if (_ds4_pf + _ds4_ca) > 0:
+                    live["cacheHitRateLifetime"] = round(_ds4_ca / (_ds4_ca + _ds4_pf) * 100, 1)
         elif qb:                                # q27(未经真实实例验证)
             a = _merge_scrape([q1.get(x) or {} for x in qb])
             b = _merge_scrape([q2.get(x) or {} for x in qb])
@@ -3752,10 +3821,17 @@ async def models_list():
                 live["slotsTotal"] = int(b["q27_slots_total"])
             # 前缀缓存命中 = 命中 token / (命中 + 实算) —— 两个都是累计量, 给的是
             # 生命周期口径(与 llama.cpp/oMLX 同), 不做窗口差分。
-            _cc = b.get("q27_prefill_cached_tokens_total", 0.0)
-            _cp = b.get("q27_prefill_computed_tokens_total", 0.0)
-            if _cc + _cp > 0:
-                live["cacheHitRate"] = round(_cc / (_cc + _cp) * 100, 1)
+            _cc = b.get("q27_prefill_cached_tokens_total")
+            _cp = b.get("q27_prefill_computed_tokens_total")
+            if _cc is not None and _cp is not None:
+                live["cacheHitSource"] = "window"
+                _hr, _hw = _win_hit_rate("hit:" + m["id"], _cc, _cp, _t_now)
+                if _hr is not None:
+                    live["cacheHitRate"] = _hr
+                if _hw is not None:
+                    live["cacheHitWindowSec"] = _hw
+                if _cc + _cp > 0:
+                    live["cacheHitRateLifetime"] = round(_cc / (_cc + _cp) * 100, 1)
             _put_prefill_rt(live, m["id"],
                             b.get("q27_prefill_computed_tokens_total"), _t_now)
             _sa = b.get("q27_spec_accept_ratio")

@@ -62,6 +62,9 @@
         "均为实时口径 · 空闲即 0 · 累计平均见模型页",
       "this backend exposes no realtime prefill counter": "该后端没有实时预填计数器, 无源",
       "Prefill · now": "预填 · 实时", "Prefill · lifetime avg": "预填 · 累计平均",
+      "Prompt cache hit · now": "前缀缓存命中 · 实时",
+      "Prompt cache hit · lifetime avg": "前缀缓存命中 · 累计平均",
+      "no prefill in window": "窗口内没有预填活动",
       "no realtime source": "无实时源", "window": "窗口",
       "wall-clock rate over the sliding window; 0 when nothing is prefilling":
         "滑动窗口的墙钟速率; 没有请求在预填时就是 0",
@@ -294,6 +297,9 @@
         "皆為即時口徑 · 閒置即 0 · 累計平均見模型頁",
       "this backend exposes no realtime prefill counter": "該後端沒有即時預填計數器, 無來源",
       "Prefill · now": "預填 · 即時", "Prefill · lifetime avg": "預填 · 累計平均",
+      "Prompt cache hit · now": "前綴快取命中 · 即時",
+      "Prompt cache hit · lifetime avg": "前綴快取命中 · 累計平均",
+      "no prefill in window": "視窗內沒有預填活動",
       "no realtime source": "無即時來源", "window": "視窗",
       "wall-clock rate over the sliding window; 0 when nothing is prefilling":
         "滑動視窗的牆鐘速率; 沒有請求在預填時就是 0",
