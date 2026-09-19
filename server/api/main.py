@@ -673,6 +673,60 @@ async def _gpu_probes() -> dict[str, dict]:
     return _GPU_PROBE["data"]
 
 
+# ── 节点吞吐归属 ────────────────────────────────────────────────────
+# 2026-09-19 机主反馈: node card 上看不到 tok/s 与 prefill。吞吐本来只按模型算
+# (/api/models), 节点侧没有。这里做【模型 → 节点】的归属, 口径与首屏那块完全同源
+# (都读 models 的 live.tps / live.prefillTokPerS), 不引第二套算法。
+#
+# ⛔ 归属规则的要害: TP 组整组只产出一份吞吐。deepseek-v41-flash 跨四台 Spark,
+#    若四张卡各写 91 tok/s, 看起来就是 364。所以只有【真正对外提供 API 的那台】
+#    显示数字(apiNodes, 由 /v1/models 实测判定), 其余成员标成 worker + 所属模型。
+# ⛔ 空闲显示 0 而不是隐藏整行 —— 卡片要能回答"这台此刻在不在出 token"。
+#    但【没有任何模型归属】的节点不渲染这两行: 那种情况下 0 是假数, 不是"空闲"。
+_MODELS_LAST: dict = {"ts": 0.0, "data": []}
+
+
+def _attach_node_throughput(nodes: list, models: list) -> None:
+    """把 models 的实时吞吐按节点归属写进 nodes[*]['live']。就地修改。"""
+    agg: dict = {}
+    for m in models or []:
+        lv = m.get("live") or {}
+        if (lv.get("metrics") or "none") == "none":
+            continue                     # 没有实时指标源的模型不参与
+        span = m.get("nodes") or []
+        api = set(m.get("apiNodes") or [])
+        name = lv.get("loadedModel") or m.get("servedName") or m.get("display") or m.get("id")
+        for nid in span:
+            d = agg.setdefault(nid, {"role": None, "models": [], "tps": None, "pf": None,
+                                     "pfSource": None})
+            if name not in d["models"]:
+                d["models"].append(name)
+            if api and nid not in api:
+                # TP/PP 成员但不对外提供 API → 只标归属, 不给数字
+                d["role"] = d["role"] or "worker"
+                continue
+            d["role"] = "api"
+            d["tps"] = (d["tps"] or 0.0) + float(lv.get("tps") or 0.0)
+            _pf = lv.get("prefillTokPerS")
+            if _pf is None:
+                # 该后端没有实时 prefill 源(oMLX): 标明无源, 不拿 0 顶替
+                d["pfSource"] = d["pfSource"] or lv.get("prefillSource") or "none"
+            else:
+                d["pf"] = (d["pf"] or 0.0) + float(_pf)
+                d["pfSource"] = "window"
+    for n in nodes:
+        d = agg.get(n["id"])
+        if not d or not d["role"]:
+            continue
+        live = n.setdefault("live", {})
+        live["throughputRole"] = d["role"]
+        live["throughputModels"] = d["models"]
+        if d["role"] == "api":
+            live["decodeTps"] = round(d["tps"] or 0.0, 1)
+            live["prefillTokPerS"] = None if d["pf"] is None else round(d["pf"], 0)
+            live["prefillSource"] = d["pfSource"] or "window"
+
+
 async def _node_payload() -> list[dict]:
     exp_nodes = [n for n in NODES if n.get("node_source") == "exporter"]
     obs_live, direct, facts, gpu_probe, *exp_lives = await asyncio.gather(
@@ -753,7 +807,11 @@ async def _node_payload() -> list[dict]:
 
 @app.get("/api/nodes")
 async def nodes_list():
-    return await _node_payload()
+    nodes = await _node_payload()
+    # 吞吐用最近一轮 models 缓存(见 _attach_node_throughput 上方注释)。缓存空
+    # (进程刚起、还没跑过 models_list)→ 这两行字段整组缺席, 卡片不渲染, 不填 0。
+    _attach_node_throughput(nodes, _MODELS_LAST["data"])
+    return nodes
 
 
 @app.get("/api/nodes/{node_id}")
@@ -1720,7 +1778,7 @@ async def _discover() -> list[dict]:
             "framework": "—", "vram": 0, "ctx": 0,
             "identityUnverified": False, "identityCandidates": [],
             "servedName": "",
-            "_nodes": set(), "_aliases": set(), "_bases": [],
+            "_nodes": set(), "_aliases": set(), "_bases": [], "_api_nodes": set(),
             "up": False, "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": [],
             "omlx_bases": [], "ds4_bases": [], "q27_bases": [], "exl3_bases": []})
         # 后端自报的 served-model-name。网关路由可能是"档位别名"(DGX-Spark-auto),
@@ -1728,6 +1786,14 @@ async def _discover() -> list[dict]:
         # "你调的是哪条路由 / 它背后是什么模型"。
         if served.get(b) and not mm.get("servedName"):
             mm["servedName"] = served[b]
+        # 真正对外提供 OpenAI API 的是哪台: /v1/models 有 data 才算(_served_name
+        # 拿得到 id 就意味着 200 且有模型)。⛔ 判据用实测不用配置 —— 四台 Spark 的
+        # 8004 全都导出 sglang:* 指标, 但只有 rank0(.188) 的 /v1/models 是 200,
+        # 另外三台 404。吞吐是【整个 TP 组产出一份】, 四台各显示一遍会被读成四倍。
+        if served.get(b):
+            _h = _host_of(b)
+            if _h in IP_TO_ID:
+                mm["_api_nodes"].add(IP_TO_ID[_h])
         if not verified:
             mm["identityUnverified"] = True
             mm["identityCandidates"] = sorted(set(mm["identityCandidates"]) | set(cands))
@@ -1820,6 +1886,12 @@ async def _discover() -> list[dict]:
                 mm["tags"] = mm["tags"] + [topo["parallelism"]]
         mm.pop("_aliases", None)
         known_bases.update(mm.pop("_bases", []))
+        _api = mm.pop("_api_nodes", set())
+        # 网关下一跳是回环地址(经隧道的 MBP)时映射不到节点 → 单节点模型兜底认它自己;
+        # 多节点(TP 组)且判不出 API 在哪时宁可【都不标】, 也不四张卡各显示一遍。
+        if not _api and len(mm["nodes"]) == 1:
+            _api = set(mm["nodes"])
+        mm["apiNodes"] = sorted(_api)
 
     # ── 未挂网关的引擎(配置里声明要直探的地址)────────────────────────
     # 冲突 3 的解法: 【以 base URL 为主键去重】。网关已经覆盖的地址在这里跳过,
@@ -1875,6 +1947,7 @@ async def _discover() -> list[dict]:
                  "params": "—", "quant": "—", "framework": "—", "vram": 0, "ctx": 0,
                  "identityUnverified": not bool(sv), "identityCandidates": [],
                  "servedName": sv or "",
+                 "apiNodes": sorted(nodes) if sv else [],
                  "nodes": sorted(nodes), "up": kind != "none" or status == 200,
                  "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": [],
                  "omlx_bases": [], "ds4_bases": [], "q27_bases": [], "exl3_bases": []}
@@ -3363,7 +3436,7 @@ async def models_list():
         base_keys = ("id", "display", "vendor", "kind", "params", "quant",
                      "ctx", "framework", "nodes", "vram", "route", "tags",
                      "identityUnverified", "identityCandidates", "source",
-                     "servedName")
+                     "servedName", "apiNodes")
         card = {k: m.get(k) for k in base_keys}
         if vb:                                  # 真实 vLLM 指标（可能多副本汇总）
             a = _merge_scrape([s1.get(b) or {} for b in vb])
@@ -3684,6 +3757,10 @@ async def models_list():
         if _sv and not live.get("loadedModel") and _sv != m.get("id"):
             live["loadedModel"] = _sv
         out.append({**card, "state": state, "live": live})
+    # 最近一轮结果缓存: /api/nodes 要按模型给节点算吞吐, 但 models_list 每次调用
+    # 都做两轮 1.2s 采样(贵), 不能在节点路径上再跑一次。SSE 快照里两者同轮生成,
+    # 走 _build_snapshot 注入; 单独访问 /api/nodes 时用这份最近缓存(最旧 2.5s)。
+    _MODELS_LAST["ts"], _MODELS_LAST["data"] = time.time(), out
     return out
 
 
@@ -4072,6 +4149,7 @@ async def _build_snapshot() -> dict:
     log = await _litellm_request_log(40)
     cl, models, training, infra_dev = await asyncio.gather(
         cluster(), models_list(), _training_payload(), _infra_payload())
+    _attach_node_throughput(nodes, models)         # 同轮数据, 节点与模型口径一致
     al = await _alerts(nodes, log)                # 复用 nodes/log, 不重复跑
     await _notify_alerts(al)                       # 推送渠道(跳变才发, 不阻塞失败)
     try:

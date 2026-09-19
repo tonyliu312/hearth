@@ -101,6 +101,25 @@ function NodeCard({ node, onClick }) {
         {/* 没有 GPU 遥测源(node.gpuTelemetry === false)时显示「—」:0 W / 0 °C 会被读成真实读数 */}
         <div className="k">{t("Power")}</div><div className="v num">{node.gpuPending ? t("GPU pending · maintenance window") : node.gpuTelemetry === false ? "—" : ns.power.now.toFixed(0) + " W"}</div>
         <div className="k">{t("GPU temp")}</div><div className="v num" style={{ color: !node.gpuPending && node.gpuTelemetry !== false && ns.tempGpu.now > 80 ? "var(--hot)" : "var(--ink)" }}>{node.gpuPending || node.gpuTelemetry === false ? "—" : ns.tempGpu.now.toFixed(0) + " °C"}</div>
+        {/* 实时吞吐(2026-09-19 机主要求放到卡片上)。口径与首屏那块同源:
+            墙钟负载, 空闲即 0, 无源显示「—」。
+            ⛔ TP 组只有对外提供 API 的那台显示数字(后端按 /v1/models 实测判定),
+               其余成员显示归属 —— 四张卡各写一遍同一个数会被读成四倍。
+            ⛔ 没有模型归属的节点整两行不渲染: 那种情况下 0 是假数, 不是"空闲"。 */}
+        {node.throughputRole === "api" ? <>
+          <div className="k">{t("Decode")}</div>
+          <div className="v num">{(node.decodeTps ?? 0).toFixed(1)} tok/s</div>
+          <div className="k">{t("Prefill")}</div>
+          <div className="v num" title={node.prefillTokPerS == null ? t("this backend exposes no realtime prefill counter") : ""}>
+            {node.prefillTokPerS == null ? "—" : node.prefillTokPerS.toLocaleString("en-US") + " tok/s"}
+          </div>
+        </> : node.throughputRole === "worker" ? <>
+          <div className="k">{t("Throughput")}</div>
+          <div className="v" style={{ color: "var(--ink-3)" }}
+               title={t("this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API")}>
+            {t("worker")} · {node.throughputModels.join(", ")}
+          </div>
+        </> : null}
       </div>
     </article>
   );

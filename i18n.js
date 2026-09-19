@@ -48,6 +48,9 @@
       "GPU power": "GPU 功耗", "smart-plug": "智能插座",
       // prefill 两个口径(2026-09-19): 实时=墙钟速率空闲即 0; 累计平均=引擎速度。
       "Per-unit live throughput": "逐单元实时吞吐",
+      "Decode": "解码", "Prefill": "预填", "Throughput": "吞吐", "worker": "worker",
+      "this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API":
+        "该节点是 TP/PP 成员, 整组只产出一份吞吐, 数字显示在对外提供 API 的那台上",
       "decode tok/s": "解码 tok/s", "prefill tok/s": "预填 tok/s",
       "realtime · idle reads 0 · lifetime averages live on the model page":
         "均为实时口径 · 空闲即 0 · 累计平均见模型页",
@@ -271,6 +274,9 @@
       "Accelerator activity": "加速器活躍度", "VRAM": "顯存",
       "GPU power": "GPU 功耗", "smart-plug": "智慧插座",
       "Per-unit live throughput": "逐單元即時吞吐",
+      "Decode": "解碼", "Prefill": "預填", "Throughput": "吞吐", "worker": "worker",
+      "this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API":
+        "該節點是 TP/PP 成員, 整組只產出一份吞吐, 數字顯示在對外提供 API 的那台上",
       "decode tok/s": "解碼 tok/s", "prefill tok/s": "預填 tok/s",
       "realtime · idle reads 0 · lifetime averages live on the model page":
         "皆為即時口徑 · 閒置即 0 · 累計平均見模型頁",

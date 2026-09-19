@@ -431,6 +431,14 @@
         // 后端显式给 false = 该节点没有任何 GPU 遥测源(按节点直采 node_exporter 的机器,
         // 如 MBP)。缺省按有处理,老后端不带这个字段时行为不变。
         e.gpuTelemetry = n.gpuTelemetry !== false;
+        // 节点吞吐(后端按模型归属算好, 与首屏那块同源同口径)。
+        // role=api → 有数字; role=worker → 只有归属说明; 缺席 → 这两行不渲染。
+        // ⛔ 不在前端按模型再算一遍: 两套算法迟早对不上, 那就是下一个假数。
+        e.throughputRole = lv.throughputRole || null;
+        e.throughputModels = lv.throughputModels || [];
+        e.decodeTps = lv.decodeTps;                 // undefined = 该节点无归属
+        e.prefillTokPerS = lv.prefillTokPerS;       // null = 该后端无实时 prefill 源
+        e.prefillSource = lv.prefillSource || null;
         if (e.os === undefined) { e.os = "—"; e.kernel = "—"; e.driver = "NVIDIA —"; e.cuda = "—"; }
         if (!live.nodes[n.id]) live.nodes[n.id] = makeNodeMetrics();
         if (!live.nodeMeta[n.id]) live.nodeMeta[n.id] = { temps: [], fans: [] };
