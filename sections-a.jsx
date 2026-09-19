@@ -216,7 +216,66 @@ function Hero() {
           )}
         </div>
       </div>
+
+      <UnitThroughput />
     </section>
+  );
+}
+
+// ── 逐单元实时吞吐(首屏)──────────────────────────────────────────
+// 2026-09-19 机主反馈: 首页只有全集群汇总, "现在哪台在出 token、多快"要点进
+// Models 页才看得到。这块把最常看的两个数字提到第一屏。
+// ⛔ 两列都是【实时】口径: 解码 = 各引擎自己的实时速率, prefill = 墙钟滑动窗口,
+//    空闲就是 0。累计平均(prefillTokPerSLifetime)不在这里出现 —— 那是引擎速度,
+//    放在首屏会让空闲的机器看起来在满负荷 prefill(改之前就是这个毛病)。
+// ⛔ 没有实时 prefill 源的后端(oMLX)显示"—"并在 title 写明, 不拿累计值顶替。
+// 样式沿用用户 2026-09-15 选定的那套: 单位只在表头出现一次, 数值统一颜色,
+// 辅助说明放表外。列宽写死, 不用 repeat() —— styles.css:891 的窄屏规则会把
+// 含 repeat( 的 grid 压成单列。
+function UnitThroughput() {
+  const { t } = useLang();
+  const rows = MODELS.filter((m) => m.metricsSource && m.metricsSource !== "none");
+  if (!rows.length) return null;
+  const nodeName = (id) => (NODES.find((n) => n.id === id) || {}).name || id;
+  const where = (m) => {
+    const ns = m.nodes || [];
+    if (!ns.length) return "—";
+    if (ns.length <= 2) return ns.map(nodeName).join(" + ");
+    return `${nodeName(ns[0])} …+${ns.length - 1}`;
+  };
+  const cell = { fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--ink)", textAlign: "right" };
+  const head = { fontFamily: "var(--mono)", fontSize: 10, letterSpacing: ".08em",
+                 color: "var(--ink-4)", textTransform: "uppercase", textAlign: "right" };
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "auto 7em 7em", gap: "6px 18px", alignItems: "baseline" }}>
+        <div style={{ ...head, textAlign: "left" }}>{t("Per-unit live throughput")}</div>
+        <div style={head}>{t("decode tok/s")}</div>
+        <div style={head}>{t("prefill tok/s")}</div>
+        {rows.map((m) => {
+          const ms = live.models[m.id] || {};
+          const dec = ms.tps ? ms.tps.now : 0;
+          const pf = m.prefillTokPerS;
+          return (
+            <React.Fragment key={m.id}>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--ink-2)",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <span style={{ color: "var(--ink)" }}>{m.loadedModel || m.display || m.id}</span>
+                <span style={{ color: "var(--ink-4)" }}>{" · "}{where(m)}{" · "}{m.framework}</span>
+              </div>
+              <div style={cell}>{dec.toFixed(dec >= 10 ? 0 : 1)}</div>
+              <div style={cell} title={pf === undefined ? t("this backend exposes no realtime prefill counter") : ""}>
+                {pf === undefined ? <span style={{ color: "var(--ink-4)" }}>—</span>
+                                  : pf.toLocaleString("en-US")}
+              </div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: 6, fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-4)" }}>
+        {t("realtime · idle reads 0 · lifetime averages live on the model page")}
+      </div>
+    </div>
   );
 }
 

@@ -2414,15 +2414,18 @@ _GEN_MIN = 8.0
 _GEN_MAX_SNAPS = 200
 
 
-def _gen_rate(key: str, value, now: float):
+def _gen_rate(key: str, value, now: float, win: float = None, min_age: float = None):
     """(速率/秒, 窗口秒)。窗口不够 / 抓取失败 / 计数器回退 → (None, None)。
 
     给"只在请求完成时跳"的计数器用(exl3 的 completion_tokens_total 就是)。
-    1.2s 双采样在这种计数器上不是 0 就是尖峰, 见 _lc_rates 上方那段实测。"""
+    1.2s 双采样在这种计数器上不是 0 就是尖峰, 见 _lc_rates 上方那段实测。
+    win/min_age 可覆盖默认窗口: prefill 实时速率用更短的窗口(见 _PREFILL_WIN)。"""
     if value is None:
         return (None, None)
+    win = _GEN_WIN if win is None else win
+    min_age = _GEN_MIN if min_age is None else min_age
     h = _GEN_HIST.setdefault(key, deque())
-    while h and now - h[0][0] > _GEN_WIN:
+    while h and now - h[0][0] > win:
         h.popleft()
     old = h[0] if h else None
     h.append((now, float(value)))
@@ -2434,7 +2437,7 @@ def _gen_rate(key: str, value, now: float):
         h.clear(); h.append((now, float(value)))
         return (None, None)
     age = now - old[0]
-    if age < _GEN_MIN:
+    if age < min_age:
         return (None, None)
     return ((float(value) - old[1]) / age, round(age, 1))
 
@@ -3216,6 +3219,36 @@ def _put_saturation(live: dict, waiting_min: float) -> None:
                              and _qr > float(_SLO.get("queue_share_warn", 0.5)))
 
 
+# ── prefill 的两个口径 ──────────────────────────────────────────────
+# 2026-09-19 机主反馈: 首页要能一眼看出"现在哪台在 prefill、多快"。原先只有
+# 【生命周期累计平均】一个口径, 三台全空闲时它仍显示 1699 / 1011 / 2037 ——
+# 这是"值在但不动"的另一种形态(恒定的大数, 比恒 0 更能骗人)。
+# 现在分成两个字段, 名字自带口径:
+#   prefillTokPerS          实时(墙钟)速率, 空闲就是 0。量的是【此刻负载】。
+#   prefillTokPerSLifetime  累计 prefill token / 累计 prefill 耗时, 每请求归一化。
+#                           量的是【引擎速度】, 与负载无关, 空闲时不会掉。
+# ⛔ 两者不可互相顶替, 也不可共用一个标签(界面上分别标"实时""累计平均")。
+# 窗口取 30s: 太短(1.2s)在 prefill 这种突发量上不是 0 就是尖峰; 太长(45s+)空闲后
+# 要等半分多钟才回落到 0, 首页看起来就像"还在跑"。min_age 5s 是为了刚启动时
+# 给 None(界面显示"—")而不是把半个窗口当成一整个窗口算。
+_PREFILL_WIN = 30.0
+_PREFILL_MIN = 5.0
+
+
+def _put_prefill_rt(live: dict, model_id: str, tokens, now: float,
+                    source: str = "window") -> None:
+    """实时 prefill 速率(tok/s, 墙钟口径)。计数器缺席 → 字段整个缺席, 不填 0。"""
+    if tokens is None:
+        return
+    r, w = _gen_rate(f"prefill:{model_id}", tokens, now,
+                     win=_PREFILL_WIN, min_age=_PREFILL_MIN)
+    if r is None:                      # 窗口还没攒够 → 缺席, 界面显示"—"
+        return
+    live["prefillTokPerS"] = round(max(0.0, r), 0)
+    live["prefillWindowSec"] = w
+    live["prefillSource"] = source
+
+
 def _put_prefill_tps(live: dict, tokens: float, seconds: float) -> None:
     """prefill 吞吐(tok/s)，只给【生命周期】口径(与 _spec_stats 的 perPos 同理)。
     入参是第二次抓取的累积值：实算 prefill token 总数、prefill 耗时总和(秒)。
@@ -3233,7 +3266,7 @@ def _put_prefill_tps(live: dict, tokens: float, seconds: float) -> None:
     ⚠️ 分母是【跨请求求和】的：并发时各请求在墙钟上重叠，所以这是【每请求归一化】
     的速率，不是墙钟吞吐。别拿它跟 tps 比 —— 界面上也标了这句。"""
     if tokens > 0 and seconds > 0:
-        live["prefillTokPerS"] = round(tokens / seconds, 0)
+        live["prefillTokPerSLifetime"] = round(tokens / seconds, 0)
 
 
 def _spec_stats(a: dict, b: dict, prefix: str = "vllm") -> dict | None:
@@ -3374,10 +3407,12 @@ async def models_list():
             # prompt_tokens_total - prompt_tokens_cached_total，两条路径互为佐证。
             #
             # 为什么只给生命周期口径、为什么是每请求归一化 —— 见 _put_prefill_tps。
-            _put_prefill_tps(live,
-                             b.get("vllm:iteration_tokens_total_sum", 0.0)
-                             - b.get("vllm:generation_tokens_total", 0.0),
+            _pf_num = (b.get("vllm:iteration_tokens_total_sum", 0.0)
+                       - b.get("vllm:generation_tokens_total", 0.0))
+            _put_prefill_tps(live, _pf_num,
                              b.get("vllm:request_prefill_time_seconds_sum", 0.0))
+            # 实时口径用同一个分子(实算 prefill token), 分母换成墙钟 → 空闲即 0。
+            _put_prefill_rt(live, m["id"], _pf_num, _t_now)
             spec = _spec_stats(a, b)
             if spec:                    # 未开投机解码 → 键整个缺席,前端 if (live.spec)
                 live["spec"] = spec
@@ -3459,6 +3494,9 @@ async def models_list():
             # 所以这个比值不会被缓存命中夸大 —— 与 vLLM 侧那条口径一致。
             _put_prefill_tps(live, b.get("llamacpp:prompt_tokens_total", 0.0),
                              b.get("llamacpp:prompt_seconds_total", 0.0))
+            # 实时: prompt_tokens_total 的墙钟差分。这个计数器与 tokens_predicted
+            # 一样【只在请求完成时跳】, 所以必须走窗口, 不能用 1.2s 双采样。
+            _put_prefill_rt(live, m["id"], b.get("llamacpp:prompt_tokens_total"), _t_now)
             _pc = b.get("llamacpp:prompt_tokens_cached_total", 0.0)
             _pp = b.get("llamacpp:prompt_tokens_total", 0.0)
             if _pc + _pp > 0:
@@ -3490,6 +3528,11 @@ async def models_list():
             # 那种错位 —— 只给生命周期口径，理由见 _put_prefill_tps。
             _put_prefill_tps(live, b.get("__sglang_prefill_compute_tokens_total", 0.0),
                              b.get(_SGLANG_PREFILL + "_sum", 0.0))
+            # 实时: 同一个分子(每个 prefill 批次就累加, 天然适合墙钟差分), 分母是墙钟。
+            # 这正是生命周期口径【不能】做窗口差分的那个分子 —— 换成墙钟分母就没有
+            # 分子分母错位的问题了(见 _put_prefill_tps 的说明)。
+            _put_prefill_rt(live, m["id"],
+                            b.get("__sglang_prefill_compute_tokens_total"), _t_now)
             # ⛔ SLO 达标率对 SGLang 【不给】：_slo_rates 的联合区间(Fréchet 边界)
             # 要求 TTFT 与 TPOT 是同一批【请求】上的边缘分布，而 SGLang 的 TPOT 桶
             # 按 token 加权(长请求权重大)，两个分量总体不同，区间不成立。
@@ -3549,9 +3592,13 @@ async def models_list():
             # prefill 吞吐与缓存命中率只有 oMLX 自报的【生命周期】均值 —— 不做窗口差分:
             # Δ(prompt-cached)/Δt 是墙钟吞吐,与面板上"每请求归一化"的 prefill 口径
             # 不是一回事,同名不同义比缺失更糟。
+            # oMLX 没有 prefill token 计数器(/api/status 与 /v1/router/state 都没有),
+            # 只有引擎自报的【历史均值】avg_prefill_tps。⛔ 不拿 best_prefill_tps 或
+            # fairness 的 ema 顶替实时值 —— 那些同样是历史量。实时口径在此【无源】。
             _pf = b.get("omlx:avg_prefill_tps", 0.0)
             if _pf > 0:
-                live["prefillTokPerS"] = round(_pf, 0)
+                live["prefillTokPerSLifetime"] = round(_pf, 0)
+            live["prefillSource"] = "none"
             _ce = b.get("omlx:cache_efficiency", 0.0)
             if _ce > 0:
                 live["cacheHitRate"] = round(_ce, 1)
@@ -3577,9 +3624,13 @@ async def models_list():
             live = {"tps": round(tps, 1), "rps": 0.0, "kv": 0,
                     "running": int(running), "waiting": 0,
                     "metrics": "ds4", "resident": True, "tpsSource": tps_src}
+            # ds4 自报的 ~60s 窗口 gauge 当实时用(比我们 1.2s 双采样稳), 来源写明。
             g_pf = b.get("ds4_prefill_tok_s")
             if g_pf and g_pf > 0:
                 live["prefillTokPerS"] = round(float(g_pf), 0)
+                live["prefillSource"] = "engine-gauge"
+            else:
+                _put_prefill_rt(live, m["id"], b.get("ds4_tokens_prefilled_total"), _t_now)
         elif qb:                                # q27(未经真实实例验证)
             a = _merge_scrape([q1.get(x) or {} for x in qb])
             b = _merge_scrape([q2.get(x) or {} for x in qb])
@@ -3600,6 +3651,8 @@ async def models_list():
             _cp = b.get("q27_prefill_computed_tokens_total", 0.0)
             if _cc + _cp > 0:
                 live["cacheHitRate"] = round(_cc / (_cc + _cp) * 100, 1)
+            _put_prefill_rt(live, m["id"],
+                            b.get("q27_prefill_computed_tokens_total"), _t_now)
             _sa = b.get("q27_spec_accept_ratio")
             if _sa is not None:
                 live["specAcceptRate"] = round(float(_sa) * 100, 1)
@@ -3618,6 +3671,7 @@ async def models_list():
                     "running": 1 if busy else 0, "waiting": 0,
                     "metrics": "exl3", "resident": True,
                     "tpsSource": "window", "tpsWindowSec": _w}
+            _put_prefill_rt(live, m["id"], b.get("exl3:prompt_tokens_total"), _t_now)
         elif m.get("up"):                       # 网关健康但无可识别 /metrics
             state = "online"                    # 在线·服务中，无详细指标（不伪造）
             live = {"metrics": "none", "resident": True}
@@ -3907,6 +3961,12 @@ def _peaks_load() -> dict:
     except Exception as e:
         _PEAKS["load_note"] = (f"上次的落盘文件读不出来({e.__class__.__name__}), "
                                f"已丢弃并从头开始: {PEAKS_FILE}")
+    # 迁移: 2026-09-19 之前 prefillTps 记的是【生命周期累计平均】(空闲也有值),
+    # 改名后实时值另存 prefillTpsRealtime。旧键留着会让面板/接口把 1700 当成
+    # "今天最高预填 1700 tok/s" —— 同一类假数, 读到就丢掉, 不做换算。
+    for _d in (data.get("days") or {}).values():
+        for _mb in (_d.get("models") or {}).values():
+            _mb.pop("prefillTps", None)
     _PEAKS["data"] = data
     return data
 
@@ -3969,7 +4029,9 @@ def _record_peaks(models: list, cl: dict) -> None:
             continue
         mb = per.setdefault(mid, {})
         changed |= _peak_bump(mb, "decodeTps", lv.get("tps"), when)
-        changed |= _peak_bump(mb, "prefillTps", lv.get("prefillTokPerS"), when)
+        # 键名自带口径: 记的是【实时】prefill 速率的当日最高值, 不是累计平均。
+        # (2026-09-19 改名; 旧键 prefillTps 在历史文件里最多再留 14 天自然过期)
+        changed |= _peak_bump(mb, "prefillTpsRealtime", lv.get("prefillTokPerS"), when)
         if not mb:                             # 一天下来一个峰值都没有 → 不留空壳
             per.pop(mid, None)
     if len(data["days"]) > PEAKS_KEEP_DAYS:    # 只留最近 N 天, 文件恒定大小

@@ -46,6 +46,16 @@
       "Accelerator activity": "加速器活跃度", "VRAM": "显存",
       // 能耗口径(2026-09-19): DCGM 只量 GPU, 整机功耗要靠智能插座, 后者现在挂着。
       "GPU power": "GPU 功耗", "smart-plug": "智能插座",
+      // prefill 两个口径(2026-09-19): 实时=墙钟速率空闲即 0; 累计平均=引擎速度。
+      "Per-unit live throughput": "逐单元实时吞吐",
+      "decode tok/s": "解码 tok/s", "prefill tok/s": "预填 tok/s",
+      "realtime · idle reads 0 · lifetime averages live on the model page":
+        "均为实时口径 · 空闲即 0 · 累计平均见模型页",
+      "this backend exposes no realtime prefill counter": "该后端没有实时预填计数器, 无源",
+      "Prefill · now": "预填 · 实时", "Prefill · lifetime avg": "预填 · 累计平均",
+      "no realtime source": "无实时源", "window": "窗口",
+      "wall-clock rate over the sliding window; 0 when nothing is prefilling":
+        "滑动窗口的墙钟速率; 没有请求在预填时就是 0",
       "n/a · no ECC counters": "不适用 · 无 ECC 计数器",
       "this GPU exposes no ECC counters": "该 GPU 不导出 ECC 计数器(统一内存无 ECC), 不是 0 个错误",
       "Connectivity self-test · per unit": "逐单元连通性自检",
@@ -260,6 +270,15 @@
       "Model": "模型", "Throughput": "吞吐", "State": "狀態",
       "Accelerator activity": "加速器活躍度", "VRAM": "顯存",
       "GPU power": "GPU 功耗", "smart-plug": "智慧插座",
+      "Per-unit live throughput": "逐單元即時吞吐",
+      "decode tok/s": "解碼 tok/s", "prefill tok/s": "預填 tok/s",
+      "realtime · idle reads 0 · lifetime averages live on the model page":
+        "皆為即時口徑 · 閒置即 0 · 累計平均見模型頁",
+      "this backend exposes no realtime prefill counter": "該後端沒有即時預填計數器, 無來源",
+      "Prefill · now": "預填 · 即時", "Prefill · lifetime avg": "預填 · 累計平均",
+      "no realtime source": "無即時來源", "window": "視窗",
+      "wall-clock rate over the sliding window; 0 when nothing is prefilling":
+        "滑動視窗的牆鐘速率; 沒有請求在預填時就是 0",
       "n/a · no ECC counters": "不適用 · 無 ECC 計數器",
       "this GPU exposes no ECC counters": "該 GPU 不匯出 ECC 計數器(統一記憶體無 ECC), 不是 0 個錯誤",
       "Connectivity self-test · per unit": "逐單元連通性自檢",

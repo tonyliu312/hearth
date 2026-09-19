@@ -508,7 +508,11 @@
           "latencyWindowSec","latencySampleN","latencyLowSample",
           "ttftP50","ttftP90","ttftP99", "tpotP50","tpotP90","tpotP99",
           "queue","queueP50","queueP90","queueP99",
-          "prefill","prefillP50","prefillP90","prefillP99","prefillTokPerS","cacheHitRate",
+          "prefill","prefillP50","prefillP90","prefillP99","cacheHitRate",
+          // prefill 两个口径分开传: 实时(墙钟, 空闲=0) 与 累计平均(引擎速度)。
+          // ⛔ 不要把 Lifetime 也放进下面的【清理】名单 —— 它是累计量, 空闲时依然成立;
+          //    实时值才必须跟着窗口一起清掉。
+          "prefillTokPerS","prefillWindowSec","prefillSource","prefillTokPerSLifetime",
           "decode","decodeP50","decodeP90","decodeP99",
           "itl","itlP50","itlP90","itlP99",
           "tpsWindowSec","tpsSustained","tpsSustainedWindowSec",
@@ -538,7 +542,8 @@
         ["latencyWindowSec","latencySampleN","latencyLowSample","p50","p95","p99",
          "ttft","tpot","ttftP50","ttftP90","ttftP99","tpotP50","tpotP90","tpotP99",
          "queue","queueP50","queueP90","queueP99",
-         "prefill","prefillP50","prefillP90","prefillP99","prefillTokPerS",
+         "prefill","prefillP50","prefillP90","prefillP99",
+         "prefillTokPerS","prefillWindowSec",
          "decode","decodeP50","decodeP90","decodeP99",
          "itl","itlP50","itlP90","itlP99",
          "sloTtftMs","sloTpotMs","sloTtftRate","sloTpotRate",

@@ -903,8 +903,11 @@ function MetricBars({ model, ms }) {
             自报的【生命周期】均值(标出来,别当此刻值读);没有 TTFT/TPOT/KV 占用。 */}
         <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 25)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
         <DetailMetric label={t("Requests / sec")} value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
-        {model.prefillTokPerS !== undefined ? (
-          <DetailMetric label={t("Prefill throughput")} value={model.prefillTokPerS.toLocaleString("en-US")} unit={` tok/s · ${t("lifetime")}`} bar={Math.min(100, model.prefillTokPerS / 20)} color="violet" />
+        {/* oMLX 没有 prefill token 计数器 → 实时口径【无源】。只给引擎自报的历史
+            均值, 并明写无实时源, 免得把 2037 当成"此刻在以 2037 tok/s 预填"。 */}
+        {model.prefillTokPerSLifetime !== undefined ? (
+          <DetailMetric label={t("Prefill · lifetime avg")} value={model.prefillTokPerSLifetime.toLocaleString("en-US")} unit=" tok/s" bar={Math.min(100, model.prefillTokPerSLifetime / 20)} color="violet"
+                        note={t("no realtime source")} />
         ) : null}
         {model.cacheHitRate !== undefined ? (
           <DetailMetric label={t("Prompt cache hit")} value={model.cacheHitRate.toFixed(0)} unit={`% · ${t("lifetime")}`} bar={model.cacheHitRate} color="teal" />
@@ -925,8 +928,14 @@ function MetricBars({ model, ms }) {
         {model.stepsPerSec !== undefined ? (
           <DetailMetric label={t("Engine steps")} value={model.stepsPerSec.toFixed(1)} unit={` /s · ${t("instantaneous")}`} bar={Math.min(100, model.stepsPerSec * 10)} color="accent" />
         ) : null}
+        {/* prefill 两行分开: 上面是【此刻】(空闲即 0), 下面是【引擎速度】(空闲不掉)。
+            2026-09-19 前只有下面那行, 空闲时显示 1699 被当成实时值读。 */}
         {model.prefillTokPerS !== undefined ? (
-          <DetailMetric label={t("Prefill throughput")} value={model.prefillTokPerS.toLocaleString("en-US")} unit={` tok/s · ${t("lifetime")}`} bar={Math.min(100, model.prefillTokPerS / 20)} color="violet" />
+          <DetailMetric label={t("Prefill · now")} value={model.prefillTokPerS.toLocaleString("en-US")} unit=" tok/s" bar={Math.min(100, model.prefillTokPerS / 20)} color="violet"
+                        note={model.prefillWindowSec ? `${t("window")} ${model.prefillWindowSec}s` : null} />
+        ) : null}
+        {model.prefillTokPerSLifetime !== undefined ? (
+          <DetailMetric label={t("Prefill · lifetime avg")} value={model.prefillTokPerSLifetime.toLocaleString("en-US")} unit=" tok/s" bar={Math.min(100, model.prefillTokPerSLifetime / 20)} color="violet" />
         ) : null}
         {model.cacheHitRate !== undefined ? (
           <DetailMetric label={t("Prompt cache hit")} value={model.cacheHitRate.toFixed(0)} unit={`% · ${t("lifetime")}`} bar={model.cacheHitRate} color="teal" />
@@ -1020,10 +1029,17 @@ function ModelDetail({ model }) {
                   插在表里不属于任何一列，是用户说「乱」的原因之一。必须带「累计」字样。
                   「每请求归一化，非墙钟」放 title：用户选定的样式里这行只有数值与累计。 */}
               {model.prefillTokPerS !== undefined ? (
-                <div title={t("per-request normalised, not wall-clock")}>
-                  {t("Prefill throughput")}{" "}
+                <div title={t("wall-clock rate over the sliding window; 0 when nothing is prefilling")}>
+                  {t("Prefill · now")}{" "}
                   <b style={{ color: "var(--ink-2)" }}>{model.prefillTokPerS.toLocaleString("en-US")}</b>
-                  {" "}tok/s · {t("lifetime")}
+                  {" "}tok/s{model.prefillWindowSec ? ` · ${t("window")} ${model.prefillWindowSec}s` : ""}
+                </div>
+              ) : null}
+              {model.prefillTokPerSLifetime !== undefined ? (
+                <div title={t("per-request normalised, not wall-clock")}>
+                  {t("Prefill · lifetime avg")}{" "}
+                  <b style={{ color: "var(--ink-2)" }}>{model.prefillTokPerSLifetime.toLocaleString("en-US")}</b>
+                  {" "}tok/s
                 </div>
               ) : null}
               {/* SGLang 的 TPOT 桶按 token 加权(输出块内均摊)，Decode / ITL 引擎不导出
