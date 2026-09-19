@@ -4500,9 +4500,25 @@ async def energy_trends():
 #    探针结果),不新增任何对被监控机的命令或请求 —— 自检本身不能变成负载。
 # ⛔ skipped ≠ pass。"这台机器本来就没有 GPU 遥测源"是 skipped,要和"有源但探
 #    不到"分开,否则自检会把缺能力伪装成健康。
-def _chk(unit: str, cap: str, status: str, detail: str, hint: str = "") -> dict:
-    return {"unit": unit, "capability": cap, "status": status,
-            "detail": detail, "hint": hint}
+def _chk(unit: str, cap: str, status: str, detail: str, hint: str = "",
+         label: str | None = None) -> dict:
+    """unit 是【内部标识】(node:<id> / model:<id>), 给工具与日志用, 不随显示名变;
+    unitLabel 是给人看的显示名, 界面优先渲染它。
+    2026-09-19: atlas 的显示名改成 GPU-HOST 后, 只渲染 id 的地方会出现
+    "卡片写 GPU-HOST、自检写 atlas" 的不一致 —— 两个字段并存最省事。"""
+    return {"unit": unit, "unitLabel": label or _unit_label(unit), "capability": cap,
+            "status": status, "detail": detail, "hint": hint}
+
+
+def _unit_label(unit: str) -> str:
+    """node:<id> → node:<显示名>; 其余原样。显示名只在这里解析一次,
+    调用点不必逐个传 label。"""
+    kind, _, ident = unit.partition(":")
+    if kind == "node":
+        n = NODE_BY_ID.get(ident) or {}
+        if n.get("name"):
+            return f"node:{n['name']}"
+    return unit
 
 
 @app.get("/api/selftest")
@@ -4541,6 +4557,7 @@ async def selftest():
     probe_cfg = {n["id"]: n.get("gpu_probe_ssh") for n in NODES}
     for n in nodes:
         u, lv = f"node:{n['id']}", n.get("live") or {}
+        ulabel = f"node:{n.get('name') or n['id']}"
         src = next((x.get("node_source") for x in NODES if x["id"] == n["id"]), None)
         out.append(_chk(u, "reachable", "pass" if n.get("up") else "fail",
                         f"来源={src or 'obs'} · up={n.get('up')}",
@@ -4566,7 +4583,7 @@ async def selftest():
                             if n.get("gpuTelemetry") is False else
                             "查 DCGM_FI_DEV_POWER_USAGE 该节点序列"))
         else:
-            out.append(_chk(u, "power", "pass", f"{lv['power']} W"))
+            out.append(_chk(u, "power", "pass", f"{lv['power']} W", label=ulabel))
         # 慢变事实(存储/网卡/开机时长/GPU 健康)
         f = n.get("facts") or {}
         if f:
@@ -4586,7 +4603,7 @@ async def selftest():
                             f"XID={gh.get('xid')} · ECC 计数器"
                             + ("有" if has_ecc else "无(该 GPU 不导出, 非故障)")))
         elif n.get("gpuTelemetry") is False:
-            out.append(_chk(u, "gpu_health", "skipped", "该节点没有 GPU 健康数据源"))
+            out.append(_chk(u, "gpu_health", "skipped", "该节点没有 GPU 健康数据源", label=ulabel))
         else:
             out.append(_chk(u, "gpu_health", "fail", "有 GPU 遥测源但取不到 XID",
                             "查 DCGM_FI_DEV_XID_ERRORS 该 node= 的序列"))
@@ -4600,6 +4617,7 @@ async def selftest():
     # ── 逐模型 ─────────────────────────────────────────────────
     for m in disco:
         u = f"model:{m['id']}"
+        mlabel = f"model:{m.get('servedName') or m.get('display') or m['id']}"
         kinds = [k for k in ("vllm_bases", "llamacpp_bases", "sglang_bases", "omlx_bases",
                              "ds4_bases", "q27_bases", "exl3_bases") if m.get(k)]
         out.append(_chk(u, "engine_metrics", "pass" if kinds else ("fail" if m.get("up") else "skipped"),

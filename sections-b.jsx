@@ -64,6 +64,14 @@ function NodesSection() {
   );
 }
 
+// 节点 id → 显示名。⛔ 界面上任何位置都不要直接渲染 id: id 是内部标识(Prometheus
+// 标签 / 配置引用 / 落盘 key 都在用, 不改), 显示名可以随时改。2026-09-19 把 atlas
+// 的显示名改成 GPU-HOST 后, 只有这台会露馅 —— 四台 Spark 的 id 恰好与显示名一致。
+function _nodeName(id) {
+  const n = _NODES.find((x) => x.id === id);
+  return (n && n.name) || id;
+}
+
 // 这台此刻在不在出 token。⛔ 只用已有数据在展示层推导, 不为此改 /api/nodes:
 //   实时解码/预填 > 0, 或归属到这台的模型有请求在跑(running > 0)。
 //   prefill > 0 也算活跃 —— 正在 prefill 但还没吐出第一个 token 的那几秒不能算空闲。
@@ -996,7 +1004,8 @@ function ModelsSection() {
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-2)" }}>{m.framework}</div>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                  {m.nodes.map((nid) => <span key={nid} className="chip" style={{ fontSize: 9.5 }}>{nid}</span>)}
+                  {m.nodes.map((nid) => <span key={nid} className="chip" style={{ fontSize: 9.5 }}
+                                               title={nid}>{_nodeName(nid)}</span>)}
                 </div>
               </div>
               <div style={{ textAlign: "right" }}>
@@ -1243,7 +1252,8 @@ function ModelDetail({ model }) {
           <span style={{ color: "var(--ink-3)" }}>{t("Quant")}</span><span>{model.quant}</span>
           <span style={{ color: "var(--ink-3)" }}>{t("VRAM")}</span><span>{model.vram} GB</span>
           <span style={{ color: "var(--ink-3)" }}>{t("Context")}</span><span>{model.ctx === 0 ? "—" : model.ctx >= 1e6 ? `${(model.ctx/1e6).toFixed(0)}M tokens` : `${(model.ctx/1024).toFixed(0)}K tokens`}</span>
-          <span style={{ color: "var(--ink-3)" }}>{t("Placement")}</span><span>{model.nodes.join(", ")}</span>
+          <span style={{ color: "var(--ink-3)" }}>{t("Placement")}</span>
+          <span title={model.nodes.join(", ")}>{model.nodes.map(_nodeName).join(", ")}</span>
         </div>
         <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 5 }}>
           {model.tags.map((t) => <span key={t} className="chip violet" style={{ fontSize: 9.5 }}>{t}</span>)}
@@ -1587,7 +1597,7 @@ function TelemetrySection() {
                   <tbody>
                     {rows.map((c, i) => (
                       <tr key={i}>
-                        <td style={{ fontFamily: "var(--mono)", fontSize: 10.5 }}>{c.unit}</td>
+                        <td style={{ fontFamily: "var(--mono)", fontSize: 10.5 }} title={c.unit}>{c.unitLabel || c.unit}</td>
                         <td style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--ink-2)" }}>{c.capability}</td>
                         <td style={{ fontFamily: "var(--mono)", fontSize: 10.5,
                                      color: c.status === "fail" ? "var(--hot)" : "var(--ink-3)" }}>{c.status}</td>

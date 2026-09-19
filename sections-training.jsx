@@ -6,6 +6,13 @@
 // SmallStat/DetailMetric 未导出到 window,故内联 _TStat。可用 window 全局:Ring/Sparkline/useLive/useLang。
 
 const _tLive = window.AIData.live;
+// 训练侧的 rank 用的是 Hearth 节点 id(spark-01 / atlas ...)。界面上要显示【显示名】:
+// 2026-09-19 起 atlas 的显示名是 GPU-HOST, 直接渲染 id 会和 nodes 页对不上。
+// 四台 Spark 的 id 恰好等于显示名, 所以以前看不出来。
+const _tNodeName = (id) => {
+  const n = (window.AIData.NODES || []).find((x) => x.id === id);
+  return (n && n.name) || id;
+};
 
 function _fmtBw(mbps) {
   if (mbps >= 1000) return (mbps / 1000).toFixed(1) + " GB/s";
@@ -122,7 +129,7 @@ function _RankCard({ n, slowest }) {
               label={n.util.toFixed(0)} sub={t("util")} />
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-            <strong style={{ fontSize: 14 }}>{n.id}</strong>
+            <strong style={{ fontSize: 14 }} title={n.id}>{_tNodeName(n.id)}</strong>
             {n.stallSuspect ? <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--bad)" }}>{t("stall?")}</span>
              : isSlow ? <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--hot)" }}>{t("straggler")}</span> : null}
           </div>
