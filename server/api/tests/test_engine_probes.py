@@ -49,10 +49,13 @@ q27_ttft_seconds_sum{api="chat"} 0.9
 q27_ttft_seconds_count{api="chat"} 2
 """
 
+# ds4 的实算 prefill 是 label 不是独立指标名(对照 LlmProbe.js:625-632):
+# kind="computed" 才是实算, kind="cached" 是命中, 不带 label 求和 = 两者之和。
 DS4_METRICS = """# TYPE ds4_tokens_decoded_total counter
 ds4_tokens_decoded_total 12345
 # TYPE ds4_tokens_prefilled_total counter
-ds4_tokens_prefilled_total 6789
+ds4_tokens_prefilled_total{kind="computed"} 1000
+ds4_tokens_prefilled_total{kind="cached"} 9000
 # TYPE ds4_requests_inflight gauge
 ds4_requests_inflight 1
 # TYPE ds4_decode_tok_s gauge
@@ -60,6 +63,16 @@ ds4_decode_tok_s 61.5
 # TYPE ds4_prefill_tok_s gauge
 ds4_prefill_tok_s 1830.0
 """
+
+DS4_METRICS_NOLABEL = """# TYPE ds4_tokens_decoded_total counter
+ds4_tokens_decoded_total 12345
+# TYPE ds4_tokens_prefilled_total counter
+ds4_tokens_prefilled_total 10000
+"""
+
+DS4_LABELED = {"ds4_tokens_prefilled_total":
+               ("kind", {"computed": "__ds4_prefill_computed",
+                         "cached": "__ds4_prefill_cached"})}
 
 VLLM_METRICS = 'vllm:generation_tokens_total{model_name="x"} 10.0\n'
 
@@ -87,9 +100,19 @@ hit = q["q27_prefill_cached_tokens_total"] / (q["q27_prefill_cached_tokens_total
 check("前缀缓存命中 50/(50+200)=20%", round(hit * 100, 1) == 20.0, round(hit * 100, 1))
 
 print("ds4 解析")
-d = main._prom_parse(DS4_METRICS, main._DS4_SCALARS, {})
+d = main._prom_parse(DS4_METRICS, main._DS4_SCALARS, {}, DS4_LABELED)
 check("decoded=12345", d.get("ds4_tokens_decoded_total") == 12345.0, d.get("ds4_tokens_decoded_total"))
 check("decode_tok_s=61.5", d.get("ds4_decode_tok_s") == 61.5, d.get("ds4_decode_tok_s"))
+check("kind=computed 单独取出 1000", d.get("__ds4_prefill_computed") == 1000.0, d.get("__ds4_prefill_computed"))
+check("kind=cached 单独取出 9000", d.get("__ds4_prefill_cached") == 9000.0, d.get("__ds4_prefill_cached"))
+check("不带 label 的总量仍是两者之和 10000",
+      d.get("ds4_tokens_prefilled_total") == 10000.0, d.get("ds4_tokens_prefilled_total"))
+check("命中率 9000/(9000+1000)=90%",
+      round(d["__ds4_prefill_cached"] / (d["__ds4_prefill_cached"] + d["__ds4_prefill_computed"]) * 100, 1) == 90.0)
+# 旧构建没有 kind label: 实算量取不到 → 整个缺席, 不许退回含命中的总量
+d2 = main._prom_parse(DS4_METRICS_NOLABEL, main._DS4_SCALARS, {}, DS4_LABELED)
+check("无 label 时实算量缺席(不退回总量)", d2.get("__ds4_prefill_computed") is None, d2.get("__ds4_prefill_computed"))
+check("无 label 时总量仍可读=10000", d2.get("ds4_tokens_prefilled_total") == 10000.0, d2.get("ds4_tokens_prefilled_total"))
 
 print("识别标记(与 sparkDash 同一条判据)")
 check("ds4 标记命中", bool(re.search(r"(?m)^ds4_tokens_decoded_total[{\s]", DS4_METRICS)))

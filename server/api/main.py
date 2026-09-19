@@ -2447,7 +2447,7 @@ _Q27_SCALARS = {
 }
 
 
-def _prom_parse(text: str, scalars: set, hists: dict) -> dict:
+def _prom_parse(text: str, scalars: set, hists: dict, labeled: dict | None = None) -> dict:
     """Prometheus 文本 → {标量名: 求和值} (+ 直方图桶存进 hists 指定的键)。
 
     同名多 label 的行【求和】(q27 按 api="chat"/"messages" 分组), 与 Hearth
@@ -2466,6 +2466,14 @@ def _prom_parse(text: str, scalars: set, hists: dict) -> dict:
             v = float(sp[1])
         except ValueError:
             continue
+        if labeled and name in labeled:
+            # 同名指标按 label 拆语义(ds4 的 kind="computed" 才是实算量)。
+            # 这类字段【不能】按名字求和当成一个量用, 见下面 _scrape_ds4 的注释。
+            _lbl, _map = labeled[name]
+            _m = re.search(rf'{_lbl}="([^"]+)"', head)
+            if _m and _m.group(1) in _map:
+                _k = _map[_m.group(1)]
+                out[_k] = out.get(_k, 0.0) + v
         if name in scalars:
             out[name] = out.get(name, 0.0) + v
             continue
@@ -2525,7 +2533,15 @@ async def _scrape_ds4(base: str) -> dict:
         return {}
     if not re.search(r"(?m)^ds4_tokens_decoded_total[{\s]", txt):
         return {}
-    return _prom_parse(txt, _DS4_SCALARS, {})
+    # ⛔ ds4 的实算 prefill 是【label】不是独立指标名:
+    #    ds4_tokens_prefilled_total{kind="computed"} 才是实算,
+    #    不带 label 的总量含缓存命中(对照实现:
+    #    /home/user/dev/sparkDash/server/collectors/LlmProbe.js:625-632)。
+    #    按名字求和会把命中算进去 —— 与 SGLang 的 prompt_tokens_total 同形的坑。
+    return _prom_parse(txt, _DS4_SCALARS, {},
+                       {"ds4_tokens_prefilled_total":
+                        ("kind", {"computed": "__ds4_prefill_computed",
+                                  "cached": "__ds4_prefill_cached"})})
 
 
 async def _scrape_q27(base: str) -> dict:
@@ -3694,25 +3710,26 @@ async def models_list():
         elif db:                                # ds4-server(未经真实实例验证)
             a = _merge_scrape([d1.get(b) or {} for b in db])
             b = _merge_scrape([d2.get(b) or {} for b in db])
-            # 引擎自报的 ~60s 窗口 gauge 优先: 它比我们 1.2s 双采样稳。
-            # 没有 gauge(旧版本) 才退回双采样, 并用 tpsSource 标明来源。
-            g_tps = b.get("ds4_decode_tok_s")
-            if g_tps and g_tps > 0:
-                tps, tps_src = float(g_tps), "engine-gauge"
-            else:
-                tps, tps_src = _rate(a, b, "ds4_tokens_decoded_total", _dt_real), "window1.2s"
+            # ⛔ 不用引擎自报的 ds4_decode_tok_s / ds4_prefill_tok_s 当实时值:
+            #    它们是 ~60s 窗口 gauge, 请求结束后还会【长时间维持非零】(对照实现
+            #    LlmProbe.js:616-620 明确写了 "do not use them for the live panel")。
+            #    那正是"值在但不动"的假数形态 —— 一律走计数器差分。
+            tps = _rate(a, b, "ds4_tokens_decoded_total", _dt_real)
             running = _gauge(a, b, "ds4_requests_inflight")
             state = "serving" if running > 0 or tps > 0 else "idle"
             live = {"tps": round(tps, 1), "rps": 0.0, "kv": 0,
                     "running": int(running), "waiting": 0,
-                    "metrics": "ds4", "resident": True, "tpsSource": tps_src}
-            # ds4 自报的 ~60s 窗口 gauge 当实时用(比我们 1.2s 双采样稳), 来源写明。
-            g_pf = b.get("ds4_prefill_tok_s")
-            if g_pf and g_pf > 0:
-                live["prefillTokPerS"] = round(float(g_pf), 0)
-                live["prefillSource"] = "engine-gauge"
+                    "metrics": "ds4", "resident": True, "tpsSource": "window1.2s"}
+            # 实算 prefill 只认 kind="computed" 那条。取不到就【整个不给】,
+            # 不退回不带 label 的总量 —— 那含缓存命中, 悄悄换口径比缺数据更糟。
+            _ds4_pf = b.get("__ds4_prefill_computed")
+            if _ds4_pf is None:
+                live["prefillSource"] = "none"
             else:
-                _put_prefill_rt(live, m["id"], b.get("ds4_tokens_prefilled_total"), _t_now)
+                _put_prefill_rt(live, m["id"], _ds4_pf, _t_now)
+            _ds4_ca = b.get("__ds4_prefill_cached")
+            if _ds4_pf is not None and _ds4_ca is not None and (_ds4_pf + _ds4_ca) > 0:
+                live["cacheHitRate"] = round(_ds4_ca / (_ds4_ca + _ds4_pf) * 100, 1)
         elif qb:                                # q27(未经真实实例验证)
             a = _merge_scrape([q1.get(x) or {} for x in qb])
             b = _merge_scrape([q2.get(x) or {} for x in qb])
