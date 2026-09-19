@@ -34,16 +34,29 @@ function NodesSection() {
           7+ 节点用 .g-auto (auto-fill minmax 220px) 自动换行。
           响应式塌缩交给 CSS 媒体查询(≤1180→3 列, ≤820→2 列, 手机→1 列)。 */}
       <div className={"grid " + (_NODES.length <= 6 ? "g-" + _NODES.length : "g-auto")}>
-        {_NODES.filter((n) => nfilter === "All" ? true
+        {_orderNodes(_NODES.filter((n) => nfilter === "All" ? true
               : nfilter === "RTX" ? (n.kind || "discrete") === "discrete"
               : nfilter === "DGX" ? n.kind === "unified-arm-soc"   // 只算 GB10;apple-silicon 不是 DGX
-              : (_live.nodes[n.id] && _live.nodes[n.id].cpu.now > 0))
+              : (_live.nodes[n.id] && _live.nodes[n.id].cpu.now > 0)))
           .map((n) => <NodeCard key={n.id} node={n} onClick={() => setActive(n)} />)}
       </div>
 
       {active && <NodeDetail node={active} onClose={() => setActive(null)} />}
     </section>
   );
+}
+
+// 卡片顺序: 有实时吞吐【数字】的排前面, 只有归属说明的(TP worker)排后面。
+// ⛔ 判据是【能力】不是【数值】: 空闲时 decode 是 0 也算有数字, 仍排前面。
+//    按当前数值排会让卡片随负载跳来跳去, 没法看。
+// ⛔ 档内不再引入第二层排序, 保持配置顺序 —— 用两个数组拼接而不是 sort,
+//    显式稳定, 不依赖引擎的 sort 稳定性。
+// ⛔ 只改展示顺序: hearth.yaml 的 nodes 顺序表达拓扑, /api/nodes 的返回顺序也不动。
+// 首帧(models 还没到)所有节点都没有 throughputRole → 保持配置顺序, 数据到了重排一次。
+function _orderNodes(list) {
+  const withNumbers = [], rest = [];
+  list.forEach((n) => (n.throughputRole === "api" ? withNumbers : rest).push(n));
+  return withNumbers.concat(rest);
 }
 
 function NodeCard({ node, onClick }) {
