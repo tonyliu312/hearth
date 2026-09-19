@@ -65,11 +65,11 @@
       "tok/s · decode · load": "tok/s · 解码 · 负载", "engine": "引擎",
       "Engine speed": "引擎速度", "per busy second": "每忙碌秒",
       "per req": "單請求", "per request · busy seconds": "單請求 · 按忙碌秒計",
-      "one request stream's decode speed; LOAD ÷ ENGINE ≈ concurrent streams":
-        "一個請求流的解碼速度; 負載 ÷ 引擎速度 ≈ 併發流數",
+      "one request stream's decode speed; the more concurrent streams, the higher LOAD sits above it":
+        "一個請求流的解碼速度; 併發越多, 負載比它高得越多(兩者之比只是粗略指示, 不是公式)",
       "per req": "单请求", "per request · busy seconds": "单请求 · 按忙碌秒计",
-      "one request stream's decode speed; LOAD ÷ ENGINE ≈ concurrent streams":
-        "一个请求流的解码速度; 负载 ÷ 引擎速度 ≈ 并发流数",
+      "one request stream's decode speed; the more concurrent streams, the higher LOAD sits above it":
+        "一个请求流的解码速度; 并发越多, 负载比它高得越多(两者之比只是粗略指示, 不是公式)",
       "per busy second · source: ": "每忙碌秒 · 来源: ",
       "no engine-speed source on this backend": "该后端没有引擎速度口径的数据源",
       "request in flight; counter updates on completion": "有请求在跑, 计数器要等请求结束才更新",

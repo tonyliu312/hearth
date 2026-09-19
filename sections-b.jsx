@@ -264,7 +264,7 @@ function NodeCard({ node, onClick }) {
                 0 会被读成"引擎变慢了", 而事实是"没让它干活"。 */}
             <div className="num" style={{ marginTop: 3, fontSize: 11, color: inkSub }}
                  title={node.engineTpsSource
-                        ? t("one request stream's decode speed; LOAD ÷ ENGINE ≈ concurrent streams")
+                        ? t("one request stream's decode speed; the more concurrent streams, the higher LOAD sits above it")
                           + " · " + node.engineTpsSource
                         : t("no engine-speed source on this backend")}>
               <span style={{ letterSpacing: ".1em", textTransform: "uppercase" }}>{t("engine")}</span>
