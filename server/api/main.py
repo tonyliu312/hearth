@@ -709,7 +709,8 @@ def _attach_node_throughput(nodes: list, models: list) -> None:
                 "served": served}
         for nid in span:
             d = agg.setdefault(nid, {"role": None, "models": [], "tps": None, "pf": None,
-                                     "pfSource": None})
+                                     "pfSource": None, "engineTps": None,
+                                     "engineTpsSource": None, "tpsInFlightUnknown": False})
             if not any(x["name"] == info["name"] and x["served"] == info["served"]
                        for x in d["models"]):
                 d["models"].append(info)
@@ -719,6 +720,14 @@ def _attach_node_throughput(nodes: list, models: list) -> None:
                 continue
             d["role"] = "api"
             d["tps"] = (d["tps"] or 0.0) + float(lv.get("tps") or 0.0)
+            # 引擎速度是【速率】不是【总量】: 多个模型时求和没有意义, 取最大的那个
+            # (这台上跑得最快的引擎)。同时把口径来源带上, 面板要标清楚。
+            _et = lv.get("engineTps")
+            if _et is not None and (d.get("engineTps") is None or _et > d["engineTps"]):
+                d["engineTps"] = float(_et)
+                d["engineTpsSource"] = lv.get("engineTpsSource")
+            if lv.get("tpsInFlightUnknown"):
+                d["tpsInFlightUnknown"] = True
             _pf = lv.get("prefillTokPerS")
             if _pf is None:
                 # 该后端没有实时 prefill 源(oMLX): 标明无源, 不拿 0 顶替
@@ -735,6 +744,11 @@ def _attach_node_throughput(nodes: list, models: list) -> None:
         live["throughputModels"] = d["models"]
         if d["role"] == "api":
             live["decodeTps"] = round(d["tps"] or 0.0, 1)
+            if d.get("engineTps") is not None:
+                live["engineTps"] = round(d["engineTps"], 1)
+                live["engineTpsSource"] = d.get("engineTpsSource")
+            if d.get("tpsInFlightUnknown"):
+                live["tpsInFlightUnknown"] = True
             live["prefillTokPerS"] = None if d["pf"] is None else round(d["pf"], 0)
             live["prefillSource"] = d["pfSource"] or "window"
 
@@ -2431,6 +2445,14 @@ async def _scrape_omlx(base: str) -> dict:
             out["omlx:sched_slots_total"] = float(sch["configured_max_concurrency"])
         if mdl.get("scheduler_snapshot_age_s") is not None:
             out["omlx:snapshot_age_s"] = float(mdl["scheduler_snapshot_age_s"])
+        # 引擎速度口径(每【解码秒】多少 token, 不含空闲): 调度器自报的 EMA。
+        # ⛔ 它空闲时会 latch —— 实测 idle_confirmed=true 时仍报 99-111。所以
+        #    必须连 idle_confirmed 一起带回去, 由调用方在空闲时置空, 不能直接显示。
+        _fair = (sch.get("fairness") or {})
+        if _fair.get("solo_decode_tps_ema") is not None:
+            out["omlx:solo_decode_tps_ema"] = float(_fair["solo_decode_tps_ema"])
+        if mdl.get("idle_confirmed") is not None:
+            out["omlx:idle_confirmed"] = 1.0 if mdl["idle_confirmed"] else 0.0
     except Exception:
         pass            # 老版本 oMLX 无该端点 → 相关字段缺席, 回落完成计数器窗口
     return out
@@ -3363,6 +3385,37 @@ _PREFILL_WIN = 30.0
 _PREFILL_MIN = 5.0
 
 
+def _win_ratio(key: str, num, den, now: float, win: float = None, min_age: float = None):
+    """(Δ分子/Δ分母, 窗口秒)。【引擎速度】口径专用: 分母是引擎真正在干活的秒数,
+    所以结果是"每忙碌秒产出多少 token", 与墙钟负载口径(分母含空闲)不是一回事。
+
+    ⛔ 窗口内分母没增长(没有解码/预填发生) → 返回 None, 调用方让字段缺席。
+       填 0 会被读成"引擎变慢了", 而事实是"没让它干活"。"""
+    if num is None or den is None:
+        return (None, None)
+    win = _GEN_WIN if win is None else win
+    min_age = _GEN_MIN if min_age is None else min_age
+    h = _GEN_HIST.setdefault(key, deque())
+    while h and now - h[0][0] > win:
+        h.popleft()
+    old = h[0] if h else None
+    h.append((now, float(num), float(den)))
+    while len(h) > _GEN_MAX_SNAPS:
+        h.popleft()
+    if old is None:
+        return (None, None)
+    if float(num) < old[1] or float(den) < old[2]:      # 引擎重启 → 丢历史
+        h.clear(); h.append((now, float(num), float(den)))
+        return (None, None)
+    age = now - old[0]
+    if age < min_age:
+        return (None, None)
+    d_n, d_d = float(num) - old[1], float(den) - old[2]
+    if d_d <= 0:                      # 窗口内引擎没在干活
+        return (None, round(age, 1))
+    return (d_n / d_d, round(age, 1))
+
+
 def _win_hit_rate(key: str, cache, compute, now: float):
     """(窗口命中率 %, 窗口秒)。前缀缓存命中率的【实时】口径。
 
@@ -3648,6 +3701,23 @@ async def models_list():
             # 引擎步频:n_decode_total 每次 llama_decode 调用都涨(实测生成中连抓三次
             # +1/+1),是这个后端唯一能在 1.2s 窗口上反映"此刻在不在动"的信号。
             live["stepsPerSec"] = round(_rate(a, b, "llamacpp:n_decode_total", dt), 2)
+            # ── 第二个口径: 引擎速度(每【解码秒】多少 token, 分母不含空闲)──────
+            # 面板原来只有墙钟负载口径(分母是墙钟秒, 含空闲), 回答的是"这台机器
+            # 现在忙不忙"; 机主要的是"引擎生成时有多快"。分子相同分母不同, 两个
+            # 都对, 但答的不是同一个问题 —— 所以并排两个字段, 各自带标签, 不合成一个数。
+            # llama.cpp 这对双计数器最干净: 分子分母同窗口, 分母就是真正解码的秒数。
+            _et, _ew = _win_ratio("eng:" + m["id"],
+                                  b.get("llamacpp:tokens_predicted_total"),
+                                  b.get("llamacpp:tokens_predicted_seconds_total"), _t_now)
+            if _et is not None:
+                live["engineTps"] = round(_et, 1)
+                live["engineTpsSource"] = "busy-counters"
+                live["engineTpsWindowSec"] = _ew
+            _ep, _epw = _win_ratio("engpf:" + m["id"],
+                                   b.get("llamacpp:prompt_tokens_total"),
+                                   b.get("llamacpp:prompt_seconds_total"), _t_now)
+            if _ep is not None:
+                live["enginePrefillTps"] = round(_ep, 0)
             # prefill 吞吐 / 提示词缓存命中:都是【生命周期】累计比值(口径同 oMLX 那条)。
             # prompt_tokens_total 是实算的(命中的另记在 prompt_tokens_cached_total),
             # 所以这个比值不会被缓存命中夸大 —— 与 vLLM 侧那条口径一致。
@@ -3712,6 +3782,12 @@ async def models_list():
             # (与 prefill 的 实时/累计平均 一致, 不共用一个名字)。
             # cacheHitSource 只要在场, 界面就渲染这一行: 窗口内没有 prefill 活动时
             # cacheHitRate 缺席 → 显示"—", 不填 0 也不 latch。
+            # 引擎速度: SGLang 自报的瞬时 gen_throughput(空闲自己归 0, 不 latch)。
+            # ⛔ 0 不当读数用 —— "没让它干活"不是"它慢", 字段缺席由界面显示 "—"。
+            _sg_gt = b.get("sglang:gen_throughput")
+            if _sg_gt and _sg_gt > 0:
+                live["engineTps"] = round(float(_sg_gt), 1)
+                live["engineTpsSource"] = "engine-gauge"
             _sg_ca = b.get("__sglang_prefill_cache_tokens_total")
             _sg_cp = b.get("__sglang_prefill_compute_tokens_total")
             if _sg_ca is not None and _sg_cp is not None:
@@ -3797,6 +3873,28 @@ async def models_list():
             # ⛔ cached 必须减, 不能假设它恒为 0 —— 当前构建是 0, 换构建就不是。
             # ⛔ 不用 avg_prefill_tps / avg_generation_tps / cache_efficiency 当实时值:
             #    那三个是生命周期平均, 正是"恒定的大数"形态。
+            # 引擎速度: 调度器自报的 solo_decode_tps_ema。
+            # ⛔ 它空闲时会 latch(实测 idle_confirmed=true 时仍报 99-111), 所以只在
+            #    【确有请求在跑且引擎没确认空闲】时才给, 否则字段缺席。
+            # ⚠️ 口径注: EMA 只算 decode, 不含 prefill 与调度开销, 因此比"整请求
+            #    completion/wall"略高(对照方实测 108.6-108.9 对真实 104.5)。
+            # 判据不能只看"采样瞬间 running>0": MBP 的真实请求 0.5-3 秒就结束, 采样
+            # 瞬间基本永远是 0(2026-09-19 22:07 实测: 一次 300 token / 2.74s 的生成
+            # 三次采样 running 全是 0, EMA 因此一直取不到)。改成【窗口内确实产出过
+            # token】——EMA 是在解码时更新的, 窗口里有产出就说明它描述的是近期的活,
+            # 不是 latch 住的陈值; 而引擎确认空闲且窗口内零产出时一律不给。
+            _om_ema = b.get("omlx:solo_decode_tps_ema")
+            _om_idle = b.get("omlx:idle_confirmed", 0.0) > 0
+            _om_recent = (tps or 0) > 0 or (running > 0 and not _om_idle)
+            if _om_ema and _om_ema > 0 and _om_recent:
+                live["engineTps"] = round(float(_om_ema), 1)
+                live["engineTpsSource"] = "engine-ema"
+            # 墙钟口径在 oMLX 上天生脉冲状: /api/status 的 token 计数器【按请求完成】
+            # 更新, 生成期间冻住(对照方实测整段冻在 241,123, 请求一结束才 +900)。
+            # 生成中窗口值可能是 0 —— 那不是"这台没在干活", 是"计数器还没更新"。
+            # 标记出来, 由界面显示"未知"而不是 0。
+            if running > 0 and not tps:
+                live["tpsInFlightUnknown"] = True
             _om_pt = b.get("omlx:total_prompt_tokens", 0.0)
             _om_ct = b.get("omlx:total_cached_tokens", 0.0)
             if _om_pt > 0:

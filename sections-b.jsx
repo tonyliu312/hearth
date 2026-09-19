@@ -234,9 +234,13 @@ function NodeCard({ node, onClick }) {
         return (
           <div style={{ margin: "14px 0 4px" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {/* ⛔ 有请求在飞但计数器还没更新时显示 "…" 而不是 0.0:
+                  oMLX 的 /api/status token 计数器【按请求完成】更新, 生成期间冻住,
+                  此刻的 0 不是"没在干活"而是"还不知道"。 */}
               <span className="num" style={{ fontSize: 30, lineHeight: "34px", fontWeight: 500,
-                                             letterSpacing: "-.02em", color: inkNum }}>
-                {(node.decodeTps ?? 0).toFixed(1)}
+                                             letterSpacing: "-.02em", color: inkNum }}
+                    title={node.tpsInFlightUnknown ? t("request in flight; counter updates on completion") : ""}>
+                {node.tpsInFlightUnknown ? "…" : (node.decodeTps ?? 0).toFixed(1)}
               </span>
               <span title={busy ? t("emitting tokens now") : ""}
                     style={{ width: 6, height: 6, borderRadius: "50%", flex: "0 0 auto",
@@ -245,13 +249,25 @@ function NodeCard({ node, onClick }) {
             </div>
             <div style={{ marginTop: 5, fontFamily: "var(--mono)", fontSize: 10,
                           letterSpacing: ".1em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-              {t("tok/s · decode")}
+              {t("tok/s · decode · load")}
             </div>
             <div className="num" style={{ marginTop: 6, fontSize: 11, color: inkSub }}
                  title={node.prefillTokPerS == null ? t("this backend exposes no realtime prefill counter") : ""}>
               <span style={{ letterSpacing: ".1em", textTransform: "uppercase" }}>{t("prefill")}</span>
               {"  "}
               {node.prefillTokPerS == null ? "—" : node.prefillTokPerS.toLocaleString("en-US")}
+            </div>
+            {/* 第二个口径: 引擎速度(每【忙碌秒】多少 token, 分母不含空闲)。
+                与上面的英雄数字(墙钟负载)并排但分别标签, ⛔ 不合成一个数:
+                分子相同分母不同, 回答的不是同一个问题。
+                窗口内引擎没干活 → 字段缺席, 显示 "—" 而不是 0 ——
+                0 会被读成"引擎变慢了", 而事实是"没让它干活"。 */}
+            <div className="num" style={{ marginTop: 3, fontSize: 11, color: inkSub }}
+                 title={node.engineTpsSource ? t("per busy second · source: ") + node.engineTpsSource
+                                             : t("no engine-speed source on this backend")}>
+              <span style={{ letterSpacing: ".1em", textTransform: "uppercase" }}>{t("engine")}</span>
+              {"  "}
+              {node.engineTps == null ? "—" : node.engineTps.toLocaleString("en-US")}
             </div>
           </div>
         );
@@ -1129,6 +1145,11 @@ function MetricBars({ model, ms }) {
         {model.stepsPerSec !== undefined ? (
           <DetailMetric label={t("Engine steps")} value={model.stepsPerSec.toFixed(1)} unit={` /s · ${t("instantaneous")}`} bar={Math.min(100, model.stepsPerSec * 10)} color="accent" />
         ) : null}
+        {model.engineTps !== undefined ? (
+          <DetailMetric label={t("Engine speed")} value={model.engineTps.toLocaleString("en-US")}
+                        unit=" tok/s" bar={Math.min(100, model.engineTps)} color="accent"
+                        note={t("per busy second") + (model.engineTpsSource ? " · " + model.engineTpsSource : "")} />
+        ) : null}
         {/* prefill 两行分开: 上面是【此刻】(空闲即 0), 下面是【引擎速度】(空闲不掉)。
             2026-09-19 前只有下面那行, 空闲时显示 1699 被当成实时值读。 */}
         {model.prefillTokPerS !== undefined ? (
@@ -1251,6 +1272,13 @@ function ModelDetail({ model }) {
                   {t("Prefill · lifetime avg")}{" "}
                   <b style={{ color: "var(--ink-2)" }}>{model.prefillTokPerSLifetime.toLocaleString("en-US")}</b>
                   {" "}tok/s
+                </div>
+              ) : null}
+              {model.engineTps !== undefined ? (
+                <div title={t("per busy second · source: ") + (model.engineTpsSource || "")}>
+                  {t("Engine speed")}{" "}
+                  <b style={{ color: "var(--ink-2)" }}>{model.engineTps.toLocaleString("en-US")}</b>
+                  {" "}tok/s · {t("per busy second")}
                 </div>
               ) : null}
               {/* 前缀缓存命中率。⛔ 分母是 命中+实算, 不是 prompt_tokens_total

@@ -439,6 +439,11 @@
         e.decodeTps = lv.decodeTps;                 // undefined = 该节点无归属
         e.prefillTokPerS = lv.prefillTokPerS;       // null = 该后端无实时 prefill 源
         e.prefillSource = lv.prefillSource || null;
+        // 第二个吞吐口径: 引擎速度(每忙碌秒), 与上面的墙钟负载并排显示, 不合成一个数。
+        // undefined = 窗口内引擎没干活 / 该后端无此源 → 界面显示 "—", 不填 0。
+        e.engineTps = lv.engineTps;
+        e.engineTpsSource = lv.engineTpsSource || null;
+        e.tpsInFlightUnknown = !!lv.tpsInFlightUnknown;
         if (e.os === undefined) { e.os = "—"; e.kernel = "—"; e.driver = "NVIDIA —"; e.cuda = "—"; }
         if (!live.nodes[n.id]) live.nodes[n.id] = makeNodeMetrics();
         if (!live.nodeMeta[n.id]) live.nodeMeta[n.id] = { temps: [], fans: [] };
@@ -521,6 +526,8 @@
           // cacheHitRateLifetime 是累计(空闲时依然成立, 不清)。
           // cacheHitSource 在场 = 该后端有实时源, 界面就渲染这一行(空窗显示 "—")。
           "cacheHitRate","cacheHitWindowSec","cacheHitSource","cacheHitRateLifetime",
+          "engineTps","engineTpsSource","engineTpsWindowSec","enginePrefillTps",
+          "tpsInFlightUnknown",
           // prefill 两个口径分开传: 实时(墙钟, 空闲=0) 与 累计平均(引擎速度)。
           // ⛔ 不要把 Lifetime 也放进下面的【清理】名单 —— 它是累计量, 空闲时依然成立;
           //    实时值才必须跟着窗口一起清掉。
@@ -556,6 +563,7 @@
          "queue","queueP50","queueP90","queueP99",
          "prefill","prefillP50","prefillP90","prefillP99",
          "prefillTokPerS","prefillWindowSec","cacheHitRate","cacheHitWindowSec",
+         "engineTps","engineTpsWindowSec","enginePrefillTps","tpsInFlightUnknown",
          "decode","decodeP50","decodeP90","decodeP99",
          "itl","itlP50","itlP90","itlP99",
          "sloTtftMs","sloTpotMs","sloTtftRate","sloTpotRate",
