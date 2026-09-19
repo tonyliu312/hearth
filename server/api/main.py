@@ -471,10 +471,118 @@ async def _obs_node_live() -> dict[str, dict]:
     return out
 
 
+# ── 慢变事实：逐挂载点存储 / 逐网卡链路 / 开机时长 / GPU 健康计数 ──────────
+# 这些量分钟级才变，跟着 2.5s 的快照循环查纯属浪费 —— 单独 30s 缓存。
+# ⛔ 全部来自【已有】的 node_exporter 与 DCGM 序列，不在被监控机上新增任何命令。
+#    这是 2026-09-19 对照 sparkDash 时的判定: 它用 SSH 跑 lsblk/df/ip/journalctl 拿
+#    同样的东西, 而本地 Prometheus 里现成就有(实测 node_filesystem_* 18 条、
+#    node_network_speed_bytes 54 条、node_network_info 64 条含 MAC、XID/ECC 五台全有)。
+_FACTS: dict = {"ts": 0.0, "data": {}}
+_FACTS_TTL = 30.0
+# 虚拟网卡/伪文件系统不显示: 它们既不是物理链路也不是节点自己的盘。
+_NIC_SKIP = r"lo|br-.*|docker.*|veth.*|virbr.*|tun[0-9].*|tailscale.*|oray.*|wg[0-9].*"
+_FS_SKIP = r"tmpfs|devtmpfs|overlay|squashfs|ramfs|efivarfs|nfs4|nfs|cifs|fuse.*"
+
+
+async def _node_facts() -> dict[str, dict]:
+    """obs 里各节点的慢变事实, 按 obs node label 归并。失败则返回上一份缓存。"""
+    now = time.time()
+    if _FACTS["data"] and now - _FACTS["ts"] < _FACTS_TTL:
+        return _FACTS["data"]
+    fs_sel = f'{{fstype!~"{_FS_SKIP}",mountpoint!~"/boot.*|/snap.*"}}'
+    nic_sel = f'{{device!~"{_NIC_SKIP}"}}'
+    (fs_sz, fs_av, d_rd, d_wr, nic_sp, nic_info, up, xid, sbe, dbe) = await asyncio.gather(
+        promql(f"node_filesystem_size_bytes{fs_sel}"),
+        promql(f"node_filesystem_avail_bytes{fs_sel}"),
+        promql("rate(node_disk_read_bytes_total[2m])"),
+        promql("rate(node_disk_written_bytes_total[2m])"),
+        promql(f"node_network_speed_bytes{nic_sel}"),
+        promql(f"node_network_info{nic_sel}"),
+        promql("time() - node_boot_time_seconds"),
+        # XID: Atlas 经 job=dcgm, 四台 Spark 经 job=node(2026-08-02 起 GB10 改用
+        # node_exporter textfile collector 导出同名指标) —— 不要按 job 过滤。
+        promql("DCGM_FI_DEV_XID_ERRORS"),
+        promql("DCGM_FI_DEV_ECC_SBE_VOL_TOTAL"),
+        promql("DCGM_FI_DEV_ECC_DBE_VOL_TOTAL"),
+    )
+    if not (fs_sz or up):                       # Prometheus 整体不可达 → 保留旧值
+        return _FACTS["data"]
+
+    def by_node_key(rows, key):
+        out: dict[str, dict[str, float]] = {}
+        for r in rows:
+            nd, k = r["metric"].get("node"), r["metric"].get(key)
+            if nd and k:
+                out.setdefault(nd, {})[k] = r["value"]
+        return out
+
+    sz, av = by_node_key(fs_sz, "mountpoint"), by_node_key(fs_av, "mountpoint")
+    rd, wr = by_node_key(d_rd, "device"), by_node_key(d_wr, "device")
+    sp = by_node_key(nic_sp, "device")
+    dev_of: dict[str, dict[str, str]] = {}      # node -> mountpoint -> 设备名
+    for r in fs_sz:
+        m = r["metric"]
+        if m.get("node") and m.get("mountpoint"):
+            dev_of.setdefault(m["node"], {})[m["mountpoint"]] = m.get("device", "—")
+    mac: dict[str, dict[str, dict]] = {}
+    for r in nic_info:
+        m = r["metric"]
+        if m.get("node") and m.get("device"):
+            mac.setdefault(m["node"], {})[m["device"]] = {
+                "mac": m.get("address", ""), "operstate": m.get("operstate", "")}
+    upt = {r["metric"].get("node"): r["value"] for r in up if r["metric"].get("node")}
+
+    def gpu_counter(rows):
+        out: dict[str, float] = {}
+        for r in rows:
+            nd = r["metric"].get("node")
+            if nd:                               # 多卡则取和
+                out[nd] = out.get(nd, 0.0) + r["value"]
+        return out
+
+    xids, sbes, dbes = gpu_counter(xid), gpu_counter(sbe), gpu_counter(dbe)
+    # XID 的 err_msg label 带人话描述, 非零时一并带出来供排障
+    xid_msg = {r["metric"].get("node"): r["metric"].get("err_msg", "")
+               for r in xid if r["value"] > 0 and r["metric"].get("node")}
+
+    data: dict[str, dict] = {}
+    for nd in set(sz) | set(sp) | set(upt) | set(xids):
+        mounts = []
+        for mp, total in sorted((sz.get(nd) or {}).items()):
+            avail = (av.get(nd) or {}).get(mp, 0.0)
+            mounts.append({"mount": mp, "device": (dev_of.get(nd) or {}).get(mp, "—"),
+                           "totalGb": round(total / 2 ** 30, 1),
+                           "availGb": round(avail / 2 ** 30, 1),
+                           "usedPct": round((1 - avail / total) * 100, 1) if total else 0.0})
+        nics = []
+        for dv, speed in sorted((sp.get(nd) or {}).items()):
+            info = (mac.get(nd) or {}).get(dv, {})
+            nics.append({"name": dv,
+                         # node_exporter 报的是 bytes/s, 链路速率习惯用 Mbps
+                         "speedMbps": int(speed * 8 / 1e6) if speed > 0 else 0,
+                         "mac": info.get("mac", ""), "state": info.get("operstate", "")})
+        disks = []
+        for dv in sorted(set(rd.get(nd) or {}) | set(wr.get(nd) or {})):
+            disks.append({"device": dv,
+                          "readMBs": round((rd.get(nd) or {}).get(dv, 0.0) / 2 ** 20, 2),
+                          "writeMBs": round((wr.get(nd) or {}).get(dv, 0.0) / 2 ** 20, 2)})
+        d: dict = {"mounts": mounts, "nics": nics, "disks": disks}
+        if nd in upt:
+            d["uptimeSec"] = int(upt[nd])
+        if nd in xids:                           # 有 DCGM 源才给, 否则整块缺席
+            d["gpuHealth"] = {"xid": int(xids[nd]), "eccSbe": int(sbes.get(nd, 0)),
+                              "eccDbe": int(dbes.get(nd, 0))}
+            if xid_msg.get(nd):
+                d["gpuHealth"]["xidMsg"] = xid_msg[nd]
+        data[nd] = d
+    _FACTS["data"], _FACTS["ts"] = data, now
+    return data
+
+
 async def _node_payload() -> list[dict]:
     exp_nodes = [n for n in NODES if n.get("node_source") == "exporter"]
-    obs_live, direct, *exp_lives = await asyncio.gather(
-        _obs_node_live(), _atlas_node_live(),
+    obs_live, direct, facts, *exp_lives = await asyncio.gather(
+        _obs_node_live(), _atlas_node_live(), _node_facts(),
         *[_atlas_node_live(n["exporter_url"], NODEEXP_NODE_TIMEOUT) for n in exp_nodes])
     exp_live = {n["id"]: lv for n, lv in zip(exp_nodes, exp_lives)}
     # `direct` is the host that runs the Hearth api itself (scraped via the
@@ -515,8 +623,12 @@ async def _node_payload() -> list[dict]:
             up = True
         else:
             up = False   # node not in obs Prometheus job → honestly mark no-data
+        # 慢变事实(30s 缓存)。按 obs label 取 —— 没有 obs 覆盖的节点(如经隧道直采的
+        # MBP)这里就是空 dict, 前端相应整块不渲染, 不造假。
+        f = facts.get(n["obs_node"] or "") or {}
         out.append({**{k: v for k, v in n.items() if k not in ("node_source", "exporter_url")},
                     "gpuTelemetry": n.get("node_source") != "exporter",
+                    "facts": f,
                     "live": live, "up": up})
     return out
 
@@ -2975,6 +3087,23 @@ async def _alerts(nodes=None, log=None):
             out.append({"key": f"{nid}:disk", "sev": "warn",
                         "msg": f"{nm} disk {L['disk']:.0f}%",
                         "sub": "root filesystem filling up", "when": "live"})
+        # GPU 硬件健康。XID 是 NVIDIA 驱动报的致命/非致命错误码, 非零一律当事故看;
+        # ECC 双比特(DBE)不可纠, 单比特(SBE)可纠但持续增长说明显存在退化。
+        # 这三个计数器现有 DCGM 采集里就有(五台全覆盖), 不额外增加被监控机负担。
+        gh = (n.get("facts") or {}).get("gpuHealth") or {}
+        if gh.get("xid"):
+            sub = gh.get("xidMsg") or "check dmesg / nvidia-bug-report"
+            out.append({"key": f"{nid}:xid", "sev": "bad",
+                        "msg": f"{nm} GPU XID error {gh['xid']}",
+                        "sub": sub, "when": "live"})
+        if gh.get("eccDbe"):
+            out.append({"key": f"{nid}:ecc_dbe", "sev": "bad",
+                        "msg": f"{nm} GPU ECC double-bit {gh['eccDbe']}",
+                        "sub": "uncorrectable — retire page / RMA check", "when": "live"})
+        elif gh.get("eccSbe"):
+            out.append({"key": f"{nid}:ecc_sbe", "sev": "warn",
+                        "msg": f"{nm} GPU ECC single-bit {gh['eccSbe']}",
+                        "sub": "correctable, but a rising count means degradation", "when": "live"})
     err = sum(1 for e in log[:40] if e.get("status") != "200")
     if err >= 5:
         out.append({"key": "gateway:errors", "sev": "warn",
@@ -3155,6 +3284,23 @@ async def _snapshot() -> dict:
             return {"ts": time.time(), "cluster": {}, "nodes": [],
                     "models": [], "alerts": [], "log": []}
     return _SNAP["data"]
+
+
+@app.on_event("startup")
+async def _start_background_sampling() -> None:
+    """进程起来就开始采样，不等第一个浏览器。
+
+    ⛔ 这不是优化, 是正确性问题: tps / 延迟分位数全是【滑动窗口】量, 窗口靠
+    _snap_loop 每 2.5s 调一次 _build_snapshot 来推进。而 _snapshot() 是惰性启动的,
+    只有 /api/stream 被访问时才创建这个 task —— 重启后没人开页面, 窗口就一直是空的,
+    第一个访问者看到的是"warming up"而不是真实基线(2026-09-19 核查发现)。
+    启动即拉起后, 页面一打开就是攒好的窗口。
+
+    on_event 在 FastAPI 0.115 上已标记 deprecated 但仍生效; 换 lifespan 需要在
+    app 创建处就持有函数对象, 而 _snap_loop 定义在其后, 故沿用 on_event。"""
+    global _SNAP_TASK
+    if _SNAP_TASK is None or _SNAP_TASK.done():
+        _SNAP_TASK = asyncio.create_task(_snap_loop())
 
 
 # ── LiteLLM 请求日志/累计：直读 OSS 自带 Postgres LiteLLM_SpendLogs ──

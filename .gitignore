@@ -53,3 +53,6 @@ BASELINES.md
 config/hearth.yaml
 _local/
 .claude/
+
+# 过程证据(无头浏览器截图), 不是交付件
+.screenshots/

@@ -421,6 +421,9 @@
         e.ram = n.ram || 0; e.disk = n.disk || 0; e.net = n.net || "";
         e.services = n.services || [];
         e.gpuPending = !!n.gpuPending;
+        // 慢变事实(后端 30s 缓存): 逐挂载点存储/逐网卡/磁盘 IO/开机时长/GPU 健康。
+        // 缺席就是空对象 —— 前端据此整块不渲染，不填 0。
+        e.facts = n.facts || {};
         // 后端显式给 false = 该节点没有任何 GPU 遥测源(按节点直采 node_exporter 的机器,
         // 如 MBP)。缺省按有处理,老后端不带这个字段时行为不变。
         e.gpuTelemetry = n.gpuTelemetry !== false;

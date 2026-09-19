@@ -106,9 +106,20 @@ function NodeCard({ node, onClick }) {
   );
 }
 
+// 秒 → 人话时长。开机时长以天/小时为主，分钟只在不足一小时时才有意义。
+function fmtUptime(sec) {
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600),
+        m = Math.floor((sec % 3600) / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+
 function NodeDetail({ node, onClose }) {
   const { t } = useLang();
   const ns = _live.nodes[node.id];
+  // 后端 facts: 逐挂载点存储 / 逐网卡 / 磁盘 IO / 开机时长 / GPU 健康计数。
+  // 全部来自已有的 node_exporter 与 DCGM 序列；节点没有 obs 覆盖时为空。
+  const facts = node.facts || {};
+  const gh = facts.gpuHealth || {};
   const nicTemp = (_live.nodeMeta?.[node.id]?.temps || []).find((x) => x.module === "网卡" || x.module === "NIC")?.celsius || 0;
   const hostedModels = _MODELS.filter((m) => m.nodes.includes(node.id));
   return (
@@ -203,6 +214,20 @@ function NodeDetail({ node, onClose }) {
               <span style={{ color: "var(--ink-3)" }}>CUDA</span><span>{node.cuda}</span>
             </>}
             <span style={{ color: "var(--ink-3)" }}>{t("Net")}</span><span>{node.net}</span>
+            {/* 以下三项来自后端 facts(现有 Prometheus 序列, 被监控机零新增命令)。
+                没有 obs 覆盖的节点(如经隧道直采的 MBP)整块缺席, 不显示占位 0。 */}
+            {facts.uptimeSec !== undefined ? <>
+              <span style={{ color: "var(--ink-3)" }}>{t("Uptime")}</span>
+              <span>{fmtUptime(facts.uptimeSec)}</span>
+            </> : null}
+            {gh.xid !== undefined ? <>
+              <span style={{ color: "var(--ink-3)" }}>XID</span>
+              <span style={{ color: gh.xid ? "var(--bad)" : "var(--ink)" }}>
+                {gh.xid}{gh.xid && gh.xidMsg ? ` · ${gh.xidMsg}` : ""}</span>
+              <span style={{ color: "var(--ink-3)" }}>ECC</span>
+              <span style={{ color: gh.eccDbe ? "var(--bad)" : gh.eccSbe ? "var(--hot)" : "var(--ink)" }}>
+                {gh.eccSbe} {t("correctable")} / {gh.eccDbe} {t("uncorrectable")}</span>
+            </> : null}
           </div>
         </div>
 
@@ -224,6 +249,67 @@ function NodeDetail({ node, onClose }) {
           </div>
         </div>
       </div>
+
+      {/* 逐挂载点存储 / 逐网卡链路 / 磁盘 IO。数据来自已有的 node_exporter 序列
+          (node_filesystem_* / node_network_* / node_disk_*)，被监控机上零新增命令。
+          节点没有这些序列(如经隧道直采的 MBP)时整块不渲染。 */}
+      {(facts.mounts || []).length || (facts.nics || []).length ? (
+        <div style={{ borderTop: "0.5px solid var(--line)", padding: 22 }}>
+          <div className="metric-l" style={{ marginBottom: 12 }}>{t("Storage & network")}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                        gap: 22, fontFamily: "var(--mono)", fontSize: 11 }}>
+            {(facts.mounts || []).length ? (
+              <div>
+                <div style={{ color: "var(--ink-3)", fontSize: 10, marginBottom: 6 }}>{t("Filesystems")}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "4px 10px", maxWidth: 340 }}>
+                  {facts.mounts.map((m) => (
+                    <div key={m.mount} style={{ display: "contents" }}>
+                      <span style={{ color: "var(--ink-2)", overflow: "hidden", textOverflow: "ellipsis" }}
+                            title={m.device}>{m.mount}</span>
+                      <span style={{ color: "var(--ink-3)", textAlign: "right" }}>
+                        {m.availGb >= 1024 ? `${(m.availGb / 1024).toFixed(1)}T` : `${m.availGb.toFixed(0)}G`} {t("free")}</span>
+                      {/* 85% 起标热色:与后端 disk 告警同一阈值 */}
+                      <span style={{ textAlign: "right",
+                                     color: m.usedPct >= 85 ? "var(--hot)" : "var(--ink)" }}>{m.usedPct}%</span>
+                    </div>
+                  ))}
+                </div>
+                {(facts.disks || []).length ? (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ color: "var(--ink-3)", fontSize: 10, marginBottom: 6 }}>{t("Disk I/O")}</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "4px 10px", maxWidth: 340 }}>
+                      {facts.disks.map((d) => (
+                        <div key={d.device} style={{ display: "contents" }}>
+                          <span style={{ color: "var(--ink-2)" }}>{d.device}</span>
+                          <span style={{ color: "var(--ink-3)", textAlign: "right" }}>R {d.readMBs}</span>
+                          <span style={{ color: "var(--ink-3)", textAlign: "right" }}>W {d.writeMBs} MB/s</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {(facts.nics || []).length ? (
+              <div>
+                <div style={{ color: "var(--ink-3)", fontSize: 10, marginBottom: 6 }}>{t("Interfaces")}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: "4px 10px", maxWidth: 340 }}>
+                  {facts.nics.map((c) => (
+                    <div key={c.name} style={{ display: "contents" }}>
+                      <span style={{ color: c.state === "up" ? "var(--ink-2)" : "var(--ink-3)" }}>{c.name}</span>
+                      <span style={{ color: "var(--ink-3)" }}>{c.mac}</span>
+                      {/* 链路速率 0 = 网卡 down 或驱动不报, 显示「—」不显示 0 Mbps */}
+                      <span style={{ textAlign: "right", color: c.state === "up" ? "var(--ink)" : "var(--ink-3)" }}>
+                        {c.speedMbps >= 1000 ? `${c.speedMbps / 1000}G` : c.speedMbps > 0 ? `${c.speedMbps}M` : "—"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       <div style={{ borderTop: "0.5px solid var(--line)", padding: 22 }}>
         <div className="metric-l" style={{ marginBottom: 12 }}>{t("Hardware sensors")}</div>
