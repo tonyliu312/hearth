@@ -1188,6 +1188,21 @@ MODEL_META = {
         "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "think"]},
     "deepseek-v4-flash-think-max": {"display": "DeepSeek-V4-Flash \u00b7 Think 极限档(同一实例)",
         "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "think"]},
+    # GLM: high/low/max 三个网关路由指向【同一个 vLLM 实例】
+    # (2026-09-08 实测 10.0.0.23:8000, 网关 alias 串同时挂
+    # agent/code/default/long), 差别只在 hook 注入的 think 档位。
+    # ⛔ 主名恒为 -think-high 是 _primary() "取最长路由" 的副产物, 不是"当前
+    # 部署了 High 档": 后端 served-name 是不带档位的 glm-5.3-flash, 精确匹配落
+    # 空后走前缀容错, 而 -high(24 字符) 比 -low/-max(23) 长一位。所以主名这条
+    # display 【不许写档位】, 否则就是 2026-08-04 DeepSeek 那次误判的复刻。
+    "glm-5.3-flash-think-high": {"display": "GLM-5.3-Flash",
+        "vendor": "Zhipu", "kind": "chat", "tags": ["reasoning", "think"]},
+    # 下面两条正常只作为 alias 出现; 一旦哪天被选成主名, 也不会被 .title()
+    # 推导成看起来像独立部署的 "Glm 5.3 Flash Think Low"。
+    "glm-5.3-flash-think-low": {"display": "GLM-5.3-Flash · Think 低档",
+        "vendor": "Zhipu", "kind": "chat", "tags": ["reasoning", "think"]},
+    "glm-5.3-flash-think-max": {"display": "GLM-5.3-Flash · Think 极限档",
+        "vendor": "Zhipu", "kind": "chat", "tags": ["reasoning", "think"]},
     "minimax-m2.7": {"display": "MiniMax-M2.7", "vendor": "MiniMax",
         "kind": "chat", "tags": ["reasoning"]},
     "gemma-4-31b-abliterated": {"display": "Gemma-4-31B-abliterated",
@@ -1208,6 +1223,7 @@ def _meta_for(route: str) -> dict:
     low = route.lower()
     vendor = ("Alibaba" if "qwen" in low else "DeepSeek" if "deepseek" in low
               else "MiniMax" if "minimax" in low else "Google" if "gemma" in low
+              else "Zhipu" if "glm" in low
               else "Meta" if "llama" in low else "—")
     return {"display": route.replace("_", " ").replace("-", " ").title(),
             "vendor": vendor,
