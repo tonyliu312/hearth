@@ -157,8 +157,12 @@ function NodeDetail({ node, onClose }) {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-          <DetailMetric label={t("GPU")}            value={ns.gpu.now.toFixed(0)} unit="%" bar={ns.gpu.now} />
-          <DetailMetric label={t("VRAM")}           value={(node.gpu.mem * ns.vram.now / 100).toFixed(1)} unit={` / ${node.gpu.mem} GB`} bar={ns.vram.now} color="violet" />
+          {/* ioreg 口径量的是整个 GPU 设备(桌面合成也算), 不是推理独占 —— 必须标注,
+              否则 idle 时的 50% 底噪会被读成「模型在忙」。实测见 i18n 注释。 */}
+          <DetailMetric label={t("GPU")}            value={ns.gpu.now.toFixed(0)} unit="%" bar={ns.gpu.now}
+                        note={node.gpuUtilSource === "ioreg" ? t("whole device · incl. display") : null} />
+          <DetailMetric label={t("VRAM")}           value={(node.gpu.mem * ns.vram.now / 100).toFixed(1)} unit={` / ${node.gpu.mem} GB`} bar={ns.vram.now} color="violet"
+                        note={node.vramKind === "unified" ? t("GPU-allocated · unified") : null} />
           {node.gpuTelemetry !== false && (
             <DetailMetric label={t("GPU temp")}     value={ns.tempGpu.now.toFixed(0)} unit=" °C" bar={ns.tempGpu.now} color={ns.tempGpu.now > 80 ? "hot" : "ok"} />
           )}
@@ -386,11 +390,11 @@ function SensorGroup({ title, rep, repColor, rows, expandable, expanded, onToggl
   );
 }
 
-function DetailMetric({ label, value, unit, bar, color = "accent" }) {
+function DetailMetric({ label, value, unit, bar, color = "accent", note }) {
   return (
     <div className="metric">
       <div className="metric-h">
-        <div className="metric-l">{label}</div>
+        <div className="metric-l">{label}{note ? <span style={{ color: "var(--ink-3)", fontWeight: 400, marginLeft: 6, textTransform: "none", letterSpacing: 0 }}>{note}</span> : null}</div>
         <div className="metric-v num">{value}<small>{unit}</small></div>
       </div>
       <div className={"bar " + color}><i style={{ width: `${Math.max(0, Math.min(100, bar))}%` }} /></div>
@@ -1069,6 +1073,30 @@ function ModelDetail({ model }) {
 }
 
 // ── TELEMETRY ──────────────────────────────────────────────────────────
+// 某个口径的数据源整体不可用时,不要让它退化成一排「—」——「—」读起来像
+// 「这个窗口没数据」,而真相是「这个数据源现在根本不可信」。整行写清楚原因。
+function _srcOk(tr, k) {
+  return (tr?.sources?.[k]?.available) !== false;
+}
+
+function _unavailRows(tr, t) {
+  const src = tr?.sources || {};
+  const rows = [];
+  [["wall", t("Wall avg")], ["ac", t("AC")], ["cabinet", t("Cabinet mean")]].forEach(([k, label]) => {
+    const s = src[k];
+    if (!s || s.available !== false) return;
+    rows.push(
+      <tr key={"unavail-" + k}>
+        <td><b style={{ color: "var(--ink-3)" }}>{label}</b></td>
+        <td colSpan={3} style={{ textAlign: "right", color: "var(--ink-4)", fontFamily: "var(--mono)", fontSize: 10.5 }}>
+          {t("data source unavailable")}{s.reason ? " · " + s.reason : ""}
+        </td>
+      </tr>
+    );
+  });
+  return rows;
+}
+
 function _trendCell(v, suffix = "", digits = 1) {
   if (v == null) return "—";
   return (typeof v === "number" ? v.toFixed(digits) : String(v)) + suffix;
@@ -1084,6 +1112,10 @@ function TelemetrySection() {
   const en = _live.env   || null;
   const haAny = (pw && (pw.wallW != null || pw.tokensPerW != null))
              || (en && (en.rackTempC != null || en.acOn != null));
+  // 整机口径(智能插座)与 GPU 口径(DCGM)是两回事:前者挂了不等于没有能耗数据。
+  // ⛔ 但也【不能】拿 GPU 数字顶替整机数字 —— 卡片标题与副标必须写清是哪个口径。
+  const gpuAny = pw && (pw.gpuW != null || pw.gpuKwh24h != null);
+  const wallOk = pw?.wallAvailable !== false && pw?.wallW != null;
   const fmt = (v, unit, digits = 1) =>
     v == null ? "—" : (typeof v === "number" ? v.toFixed(digits) : String(v)) + (v == null ? "" : unit);
   return (
@@ -1094,19 +1126,32 @@ function TelemetrySection() {
         {t("Every request that lands at the gateway, every anomaly the rules engine catches — surfaced as a quiet, structured stream. No paging unless something actually needs you.")}
       </p>
 
-      {haAny && (
+      {(haAny || gpuAny) && (
         <div className="grid" style={{ gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
           <div className="tm-card" data-metric="wall-power">
-            <div className="tm-card-l">{t("Wall power")}</div>
-            <div className="tm-card-v num">{fmt(pw?.wallW, " W")}</div>
-            <div className="tm-card-s">{t("Σ smart-plug · DCGM GPU ")}{fmt(pw?.gpuW, " W")}</div>
+            <div className="tm-card-l">{wallOk ? t("Wall power") : t("GPU power")}</div>
+            <div className="tm-card-v num">{fmt(wallOk ? pw?.wallW : pw?.gpuW, " W")}</div>
+            <div className="tm-card-s">
+              {wallOk
+                ? <>{t("Σ smart-plug · DCGM GPU ")}{fmt(pw?.gpuW, " W")}</>
+                : <>{t("DCGM · GPU only, not whole-machine")}
+                    {pw?.gpuKwh24h != null && <> · {t("24h ")}<span className="num">{pw.gpuKwh24h.toFixed(2)}</span> kWh</>}</>}
+            </div>
+            {!wallOk && pw?.wallUnavailableReason && (
+              <div className="tm-card-s" style={{ color: "var(--ink-4)" }}>
+                {t("smart-plug")} · {pw.wallUnavailableReason}
+              </div>
+            )}
           </div>
           <div className="tm-card" data-metric="efficiency">
             <div className="tm-card-l">{t("Efficiency")}</div>
             <div className="tm-card-v num">{fmt(pw?.tokensPerW, "", 2)}
               {pw?.tokensPerW != null && <small> tok·W⁻¹·s⁻¹</small>}
             </div>
-            <div className="tm-card-s">{t("LiteLLM tokens / wall power")}</div>
+            <div className="tm-card-s">
+              {pw?.tokensPerW != null ? t("LiteLLM tokens / wall power")
+                                      : t("Whole-machine source unavailable")}
+            </div>
           </div>
           <div className="tm-card" data-metric="rack-env">
             <div className="tm-card-l">{t("Rack")}</div>
@@ -1245,7 +1290,28 @@ function TelemetrySection() {
                 </tr>
               </thead>
               <tbody>
-                {/* AC */}
+                {/* GPU —— 唯一还活着的能耗口径(DCGM)。⛔ 只含 GPU, 不是整机功耗。 */}
+                <tr><td><b style={{ color: "var(--ink)" }}>{t("GPU avg")}</b>
+                  <span style={{ color: "var(--ink-4)", marginLeft: 6 }}>{t("(GPU only)")}</span></td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.gpu?.last24h?.avgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.gpu?.last7d?.avgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.gpu?.last30d?.avgW, " W", 0)}</td></tr>
+                <tr><td style={{ paddingLeft: 22, color: "var(--ink-3)" }}>{t("GPU energy")}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>{_trendCell(_live.energyTrends.gpu?.last24h?.kwh, " kWh", 2)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>{_trendCell(_live.energyTrends.gpu?.last7d?.kwh, " kWh", 2)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-2)" }}>{_trendCell(_live.energyTrends.gpu?.last30d?.kwh, " kWh", 2)}</td></tr>
+                <tr><td style={{ paddingLeft: 22, color: "var(--ink-3)" }}>↳ {t("day")} (06-18)</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.gpu?.last24h?.dayAvgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.gpu?.last7d?.dayAvgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.gpu?.last30d?.dayAvgW, " W", 0)}</td></tr>
+                <tr><td style={{ paddingLeft: 22, color: "var(--ink-3)" }}>↳ {t("night")}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.gpu?.last24h?.nightAvgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.gpu?.last7d?.nightAvgW, " W", 0)}</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.gpu?.last30d?.nightAvgW, " W", 0)}</td></tr>
+                {/* 不可用的口径:整行写明"数据源不可用 + 原因", 不留一排 0 或一排空 */}
+                {_unavailRows(_live.energyTrends, t)}
+                {/* AC —— 数据源不可用时整组隐藏, 由上面的 _unavailRows 用一行说明取代 */}
+                {_srcOk(_live.energyTrends, "ac") && (<>
                 <tr><td><b style={{ color: "var(--ink)" }}>{t("AC energy")}</b></td>
                   <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.ac?.last24h?.kwh, " kWh", 2)}</td>
                   <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.ac?.last7d?.kwh, " kWh", 2)}</td>
@@ -1262,12 +1328,16 @@ function TelemetrySection() {
                   <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last24h?.nightAvgW, " W", 0)}</td>
                   <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last7d?.nightAvgW, " W", 0)}</td>
                   <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.ac?.last30d?.nightAvgW, " W", 0)}</td></tr>
+                </>)}
                 {/* Wall */}
+                {_srcOk(_live.energyTrends, "wall") && (
                 <tr><td><b style={{ color: "var(--ink)" }}>{t("Wall avg")}</b></td>
                   <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.wall?.last24h?.avgW, " W", 0)}</td>
                   <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.wall?.last7d?.avgW, " W", 0)}</td>
                   <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.wall?.last30d?.avgW, " W", 0)}</td></tr>
+                )}
                 {/* Cabinet */}
+                {_srcOk(_live.energyTrends, "cabinet") && (<>
                 <tr><td><b style={{ color: "var(--ink)" }}>{t("Cabinet mean")}</b></td>
                   <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.cabinet?.last24h?.meanC, " °C", 1)}</td>
                   <td className="num" style={{ textAlign: "right" }}>{_trendCell(_live.energyTrends.cabinet?.last7d?.meanC, " °C", 1)}</td>
@@ -1276,15 +1346,77 @@ function TelemetrySection() {
                   <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.cabinet?.last24h?.minC, "", 1)} / {_trendCell(_live.energyTrends.cabinet?.last24h?.maxC, " °C", 1)}</td>
                   <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.cabinet?.last7d?.minC, "", 1)} / {_trendCell(_live.energyTrends.cabinet?.last7d?.maxC, " °C", 1)}</td>
                   <td className="num" style={{ textAlign: "right", color: "var(--ink-3)" }}>{_trendCell(_live.energyTrends.cabinet?.last30d?.minC, "", 1)} / {_trendCell(_live.energyTrends.cabinet?.last30d?.maxC, " °C", 1)}</td></tr>
+                </>)}
+                {/* samples 用 GPU 口径 —— 它是当前唯一有数据的源; 原先读 ac 的
+                    samples, HA 挂掉后整行恒 0/96, 又是一处"0 冒充无数据" */}
                 <tr><td style={{ paddingLeft: 22, color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{t("samples")}</td>
-                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.ac?.last24h?.samples || 0} / 96</td>
-                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.ac?.last7d?.samples || 0} / 672</td>
-                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.ac?.last30d?.samples || 0} / 2880</td></tr>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.gpu?.last24h?.samples || 0} / 97</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.gpu?.last7d?.samples || 0} / 673</td>
+                  <td className="num" style={{ textAlign: "right", color: "var(--ink-4)", fontSize: 10.5, fontFamily: "var(--mono)" }}>{_live.energyTrends.gpu?.last30d?.samples || 0} / 2881</td></tr>
               </tbody>
             </table>
             <div style={{ fontSize: 10, color: "var(--ink-4)", marginTop: 8, fontFamily: "var(--mono)", letterSpacing: ".06em" }}>
               {t("samples = real data points actually in the window (full = window fully filled). Same value across windows means the series is younger than 24h.")}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 逐单元连通性自检。⛔ 只列【非 pass】的项:全绿时一行带过, 不做成一屏
+          绿勾 —— 面板的用处是让异常跳出来, 不是让人逐行确认正常。
+          skipped 与 pass 分色:"这台机器本来就没有这个源"不等于"这个源是好的"。 */}
+      {_live.selfTest && (
+        <div className="card" style={{ marginBottom: 18 }} data-metric="selftest">
+          <div className="card-head">
+            <div>
+              <div className="card-title">{t("Connectivity self-test · per unit")}</div>
+              <div className="card-sub">
+                {t("Each capability is pass / fail / skipped. skipped = no such source on this unit — not the same as healthy.")}
+              </div>
+            </div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>
+              <b className="num" style={{ color: "var(--ok)" }}>{_live.selfTest.summary?.pass ?? 0}</b> {t("pass")}
+              {" · "}
+              <b className="num" style={{ color: (_live.selfTest.summary?.fail ?? 0) > 0 ? "var(--hot)" : "var(--ink-3)" }}>
+                {_live.selfTest.summary?.fail ?? 0}</b> {t("fail")}
+              {" · "}
+              <b className="num">{_live.selfTest.summary?.skipped ?? 0}</b> {t("skipped")}
+            </div>
+          </div>
+          <div className="card-body" style={{ padding: "8px 22px 16px" }}>
+            {(() => {
+              const rows = (_live.selfTest.checks || []).filter((c) => c.status !== "pass");
+              if (!rows.length) {
+                return <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)" }}>
+                  {t("all capabilities pass")}</div>;
+              }
+              return (
+                <table className="tm-devices">
+                  <thead>
+                    <tr>
+                      <th style={{ width: "22%" }}>{t("Unit")}</th>
+                      <th style={{ width: "16%" }}>{t("Capability")}</th>
+                      <th style={{ width: "10%" }}>{t("Status")}</th>
+                      <th style={{ width: "52%" }}>{t("Detail · next step")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((c, i) => (
+                      <tr key={i}>
+                        <td style={{ fontFamily: "var(--mono)", fontSize: 10.5 }}>{c.unit}</td>
+                        <td style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--ink-2)" }}>{c.capability}</td>
+                        <td style={{ fontFamily: "var(--mono)", fontSize: 10.5,
+                                     color: c.status === "fail" ? "var(--hot)" : "var(--ink-3)" }}>{c.status}</td>
+                        <td style={{ fontSize: 11, color: "var(--ink-2)" }}>
+                          {c.detail}
+                          {c.hint ? <div style={{ color: "var(--ink-4)", fontSize: 10.5, marginTop: 2 }}>↳ {c.hint}</div> : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              );
+            })()}
           </div>
         </div>
       )}

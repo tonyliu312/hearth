@@ -339,21 +339,45 @@ function Cluster() {
       </div>
 
       <div className="grid g-3" style={{ marginTop: 16 }}>
-        <SmallStat label="Peak GPU temp"     value={cluster_peak()} unit="°C" sub="hot node under load" color="var(--hot)" />
-        <SmallStat label="Avg power / token" value={(live.cluster.powNow / Math.max(1, live.cluster.tpsNow)).toFixed(2)} unit=" J/tok" sub="lower is better · target ≤ 1.4" color="var(--accent)" />
-        <SmallStat label="P95 latency (chat)" value={Math.round(weightedP95())} unit=" ms" sub="weighted across serving models" color="var(--violet)" />
+        {/* ⛔ 三个格子都必须能显示「—」:
+            - Max(...) 对空数组是 -Infinity, 对全无遥测的节点是 0 —— 都不是"峰值 0°C"
+            - J/tok 原先写的是 pow / max(1, tps): tps=0 时分母被换成 1, 于是把
+              「瓦」直接当成「焦/token」显示出去(2026-09-19 实测 tps=0 时显示 2.82)
+            - p95 在窗口内没有完成请求时后端不返回 → 这里会得到 0 ms
+            口径注:功耗来自 DCGM,是【GPU 侧】,不含整机。 */}
+        <SmallStat label="Peak GPU temp"     value={cluster_peak() ?? "—"} unit={cluster_peak() == null ? "" : "°C"} sub="hot node under load" color="var(--hot)" />
+        <SmallStat label="Avg power / token"
+                   value={live.cluster.tpsNow > 0 ? (live.cluster.powNow / live.cluster.tpsNow).toFixed(2) : "—"}
+                   unit={live.cluster.tpsNow > 0 ? " J/tok" : ""}
+                   sub={live.cluster.tpsNow > 0 ? "GPU-side power ÷ gateway tok/s · lower is better"
+                                                : "no tokens in flight · nothing to divide by"}
+                   color="var(--accent)" />
+        <SmallStat label="P95 latency (chat)"
+                   value={weightedP95() == null ? "—" : Math.round(weightedP95())}
+                   unit={weightedP95() == null ? "" : " ms"}
+                   sub={weightedP95() == null ? "no completed requests in window" : "weighted across serving models"}
+                   color="var(--violet)" />
       </div>
     </section>
   );
 }
 
-function cluster_peak() { return Math.round(Math.max(...NODES.map((n) => live.nodes[n.id].tempGpu.now))); }
+// 只统计【真有 GPU 温度遥测】的节点。没有遥测源的节点(如 MBP)其 tempGpu.now
+// 停在初始值 0, 把它算进 Max 不影响结果, 但一个节点都没有时必须返回 null 而不是
+// -Infinity / 0 —— 那会显示成"峰值 0°C", 又是拿 0 冒充无数据。
+function cluster_peak() {
+  const v = NODES.filter((n) => n.gpuTelemetry !== false && live.nodes[n.id])
+                 .map((n) => live.nodes[n.id].tempGpu.now)
+                 .filter((x) => typeof x === "number" && x > 0);
+  return v.length ? Math.round(Math.max(...v)) : null;
+}
 function weightedP95() {
   // p95 现在是【滑动窗口】值，窗口内没有完成的请求时后端整组不返回 →
   // 这里必须先过滤掉没有 p95 的模型并按其 rps 重新归一，否则 undefined 会把
   // 整个集群加权值污染成 NaN。
   const serving = MODELS.filter((m) => m.state === "serving" && m.kind === "chat"
                                     && typeof m.p95 === "number");
+  if (!serving.length) return null;      // 窗口内没有任何完成的请求 → 无数据, 不是 0 ms
   const totalRps = serving.reduce((a, m) => a + live.models[m.id].rps.now, 0) || 1;
   return serving.reduce((a, m) => a + m.p95 * live.models[m.id].rps.now / totalRps, 0);
 }

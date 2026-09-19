@@ -44,6 +44,23 @@
       "Quick actions": "快捷操作", "LiteLLM Gateway": "LiteLLM 网关",
       "Model": "模型", "Throughput": "吞吐", "State": "状态",
       "Accelerator activity": "加速器活跃度", "VRAM": "显存",
+      // 能耗口径(2026-09-19): DCGM 只量 GPU, 整机功耗要靠智能插座, 后者现在挂着。
+      "GPU power": "GPU 功耗", "smart-plug": "智能插座",
+      "Connectivity self-test · per unit": "逐单元连通性自检",
+      "Each capability is pass / fail / skipped. skipped = no such source on this unit — not the same as healthy.":
+        "每项能力分 通过 / 失败 / 跳过 三态。跳过 = 这台单元本来就没有这个数据源, 不等于健康。",
+      "pass": "通过", "fail": "失败", "skipped": "跳过",
+      "all capabilities pass": "全部能力通过",
+      "Unit": "单元", "Capability": "能力", "Status": "状态", "Detail · next step": "详情 · 下一步查什么",
+      "DCGM · GPU only, not whole-machine": "DCGM · 仅 GPU, 不含整机",
+      "Whole-machine source unavailable": "整机口径数据源不可用",
+      "GPU avg": "GPU 平均功耗", "GPU energy": "GPU 电量", "(GPU only)": "(仅 GPU)",
+      "night": "夜间", "data source unavailable": "数据源不可用",
+      "AC": "空调", "Wall avg": "整机平均功耗", "Cabinet mean": "机柜平均温度",
+      // ioreg 口径: 整机 GPU 占用(含桌面合成/其他 App), 不只是推理。
+      // 实测 2026-09-19: 模型 idle 时底噪 43-60%, 生成中 93-100%。
+      "whole device · incl. display": "整机口径 · 含桌面合成",
+      "GPU-allocated · unified": "GPU 已分配 · 统一内存",
       // footer
       "Prometheus 2.55 · DCGM 3.3 · LiteLLM 1.52 · scrape 15 s · retention 7 d":
         "Prometheus 2.55 · DCGM 3.3 · LiteLLM 1.83 · 抓取 15 秒 · 留存 7 天",
@@ -240,6 +257,20 @@
       "Quick actions": "快捷操作", "LiteLLM Gateway": "LiteLLM 閘道",
       "Model": "模型", "Throughput": "吞吐", "State": "狀態",
       "Accelerator activity": "加速器活躍度", "VRAM": "顯存",
+      "GPU power": "GPU 功耗", "smart-plug": "智慧插座",
+      "Connectivity self-test · per unit": "逐單元連通性自檢",
+      "Each capability is pass / fail / skipped. skipped = no such source on this unit — not the same as healthy.":
+        "每項能力分 通過 / 失敗 / 跳過 三態。跳過 = 這台單元本來就沒有這個資料源, 不等於健康。",
+      "pass": "通過", "fail": "失敗", "skipped": "跳過",
+      "all capabilities pass": "全部能力通過",
+      "Unit": "單元", "Capability": "能力", "Status": "狀態", "Detail · next step": "詳情 · 下一步查什麼",
+      "DCGM · GPU only, not whole-machine": "DCGM · 僅 GPU, 不含整機",
+      "Whole-machine source unavailable": "整機口徑資料源不可用",
+      "GPU avg": "GPU 平均功耗", "GPU energy": "GPU 用電量", "(GPU only)": "(僅 GPU)",
+      "night": "夜間", "data source unavailable": "資料源不可用",
+      "AC": "空調", "Wall avg": "整機平均功耗", "Cabinet mean": "機櫃平均溫度",
+      "whole device · incl. display": "整機口徑 · 含桌面合成",
+      "GPU-allocated · unified": "GPU 已分配 · 統一記憶體",
       "Prometheus 2.55 · DCGM 3.3 · LiteLLM 1.52 · scrape 15 s · retention 7 d":
         "Prometheus 2.55 · DCGM 3.3 · LiteLLM 1.83 · 擷取 15 秒 · 留存 7 天",
       "All inference is routed through LiteLLM on ": "全部推理統一經 LiteLLM 路由 · ",

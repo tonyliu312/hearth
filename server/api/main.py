@@ -127,6 +127,9 @@ def _node_from_yaml(y: dict) -> dict:
         "node_source": ("exporter" if src.get("node_exporter_url")
                         else src.get("node_metrics") or ("obs" if obs_label else "direct")),
         "exporter_url": (src.get("node_exporter_url") or "").rstrip("/") or None,
+        # gpu_probe_ssh: Apple Silicon 的 GPU 利用率/显存 node_exporter 不导出,
+        # 只能问 ioreg。配成 user@host 后走【免密只读 SSH】, 30s 一次(见 _darwin_gpu)。
+        "gpu_probe_ssh": (src.get("gpu_probe_ssh") or "").strip() or None,
         # 笔记本会合盖/离家,离线是常态:alert_offline: false → 卡片照常显示 OFFLINE,
         # 但不发 offline 告警(否则每轮一条 bad,还会推送)。
         "alertOffline": y.get("alert_offline", True) is not False,
@@ -370,7 +373,9 @@ async def _atlas_node_live(url: str | None = None, timeout: float | None = None)
 
     temps = _atlas_temps(s2)
     fans = _atlas_fans(s2)
-    cpu_t = next((t["celsius"] for t in temps if t["module"] == "CPU"), 0)
+    # ⛔ 没有 CPU 温度传感器时是 None, 不是 0 —— macOS 上 node_exporter 免 sudo
+    # 拿不到温度(要 powermetrics), 给 0 就成了"实测 0 度"。(2026-09-19 w1W:p1 指出)
+    cpu_t = next((t["celsius"] for t in temps if t["module"] == "CPU"), None)
     boot = _sum(s2.get("node_boot_time_seconds", []))
     return {"cpu": round(cpu, 1), "mem": round(mem, 1), "disk": round(disk, 1),
             "netIn": round(max(0, rx), 2), "netOut": round(max(0, tx), 2),
@@ -443,7 +448,7 @@ async def _obs_node_live() -> dict[str, dict]:
     for obs_node in universe:
         vt = (fu.get(obs_node, 0) + ff.get(obs_node, 0)) or 1
         temps = sorted(per_node_temps.get(obs_node, []), key=lambda t: -t["celsius"])
-        cpu_t = next((t["celsius"] for t in temps if t["module"] == "CPU"), 0)
+        cpu_t = next((t["celsius"] for t in temps if t["module"] == "CPU"), None)
         # Node kind drives VRAM% interpretation:
         #   discrete       → DCGM FB_USED/FB_TOTAL (dedicated VRAM)
         #   unified-arm-soc / apple-silicon → node_exporter MemAvailable (shared)
@@ -451,21 +456,36 @@ async def _obs_node_live() -> dict[str, dict]:
         # any hard-coded host name.
         is_unified = KIND_BY_OBS.get(obs_node, "discrete") != "discrete"
         vram_pct = me.get(obs_node, 0) if is_unified else (fu.get(obs_node, 0) / vt * 100)
+        # ⛔ 序列缺席 → None, 不是 0。原先一律 .get(node, 0):某个 exporter 掉了、
+        # 某块卡没有该指标, 面板上都会变成"实测 0 W / 0 °C / 0% 利用率", 而不是
+        # "没有数据"。(2026-09-19 与 mbp 的 tempCpu=0 同源, w1W:p1 指出)
+        # ⚠️ 已知例外: 四台 Spark 的 DCGM_FI_DEV_MEMORY_TEMP 与 ECC SBE/DBE 是
+        #    gb10-gpu-textfile.sh 为兼容 dcgm-exporter 而【写死的 0】(GB10 无显存
+        #    温度传感器、LPDDR5X 无 ECC)。那是采集端的假 0, 这一层看不出来,
+        #    要治得改那个脚本 —— 已列入待裁定。
+        def _v(d, digits=1):
+            x = d.get(obs_node)
+            return None if x is None else round(x, digits)
+
         out[obs_node] = {
-            "gpu": round(g.get(obs_node, 0), 1),
-            "vram": round(vram_pct, 1),
+            "gpu": _v(g),
+            "vram": round(vram_pct, 1) if (me.get(obs_node) is not None
+                                           or fu.get(obs_node) is not None) else None,
             "vramKind": "unified" if is_unified else "discrete",
-            "tempGpu": round(gt.get(obs_node, 0), 1),
-            "tempMem": round(mt.get(obs_node, 0), 1),
+            "tempGpu": _v(gt),
+            # 显存温度: 五张卡全是 0(2026-09-19 实测 DCGM_FI_DEV_MEMORY_TEMP)。
+            # 4090 的 DCGM 对该字段不支持、GB10 那条是 textfile 脚本写死的兼容占位。
+            # GPU 本体 29-60°C 时显存 0°C 物理上不可能 → 一律当"无该传感器"处理。
+            "tempMem": (lambda x: None if x is None or x <= 0 else x)(_v(mt)),
             "tempCpu": cpu_t,
-            "power": round(pw.get(obs_node, 0), 1),
-            "cpu": round(cp.get(obs_node, 0), 1),
-            "mem": round(me.get(obs_node, 0), 1),
-            "disk": round(dk.get(obs_node, 0), 1),
-            "netIn": round(ni.get(obs_node, 0), 2),
-            "netOut": round(no.get(obs_node, 0), 2),
-            "rdmaIn": round(ir.get(obs_node, 0), 2),
-            "rdmaOut": round(it.get(obs_node, 0), 2),
+            "power": _v(pw),
+            "cpu": _v(cp),
+            "mem": _v(me),
+            "disk": _v(dk),
+            "netIn": _v(ni, 2),
+            "netOut": _v(no, 2),
+            "rdmaIn": _v(ir, 2),
+            "rdmaOut": _v(it, 2),
             "temps": temps,
         }
     return out
@@ -579,10 +599,78 @@ async def _node_facts() -> dict[str, dict]:
     return data
 
 
+# Apple Silicon 的 GPU 遥测:node_exporter 不导出, DCGM 更没有。唯一免 sudo 的来源是
+# ioreg 的 PerformanceStatistics。温度与封装功耗仍拿不到(要 root 的 powermetrics),
+# 保持缺席不伪造。
+# 成本实测(2026-09-19 10:10, 被测机 MBP 侧 node_cpu_seconds_total 差分 A/B, 各 2 臂):
+#   对照 291.7% / 探针 343.8% 单核当量, 60 次探针耗时 19.05s
+#   → 0.165 CPU 秒/次(含 sshd 建会话, 大头在这里; ioreg 命令本身只有 0.01-0.02s)
+#   → 30s 一次 = 单核 0.55%、10 核机 0.055%。
+# ⚠️ macOS 没有 cgroup, 这里用 node_exporter 的全核忙碌计数器代替 cgroup A/B;
+#    背景噪声约 ±8 个百分点(两个对照臂之差), 远小于 52 个百分点的探针增量。
+_GPU_PROBE: dict = {"ts": 0.0, "data": {}}
+_GPU_PROBE_TTL = 30.0
+_DARWIN_GPU_CMD = (
+    "ioreg -r -d 1 -c IOAccelerator 2>/dev/null | "
+    "grep -Eo '\"(Device Utilization %|In use system memory|Alloc system memory)\"=[0-9]+' | head -6; "
+    "echo ---; sysctl -n hw.memsize")
+
+
+async def _darwin_gpu(host: str) -> dict:
+    """ssh <host> ioreg → {gpu%, vramUsedGb, vramTotalGb, vramPct}。失败返回 {}。"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+            "-o", "IdentitiesOnly=yes", "-i", os.path.expanduser("~/.ssh/id_ed25519"),
+            host, _DARWIN_GPU_CMD,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+    except Exception:
+        return {}
+    txt = out.decode(errors="replace")
+    stats, _, memtxt = txt.partition("---")
+
+    def field(label: str):
+        m = re.search(rf'"{re.escape(label)}"=(\d+)', stats)
+        return float(m.group(1)) if m else None
+
+    util, alloc, inuse = (field("Device Utilization %"), field("Alloc system memory"),
+                          field("In use system memory"))
+    try:
+        total = float(memtxt.strip().split()[0])
+    except (ValueError, IndexError):
+        total = 0.0
+    # Apple 没有独立显存:显存总量就是系统内存; 已用取 Alloc(含已提交未驻留), 回落 In use
+    used = alloc if (alloc or 0) > 0 else (inuse or 0.0)
+    d: dict = {}
+    if util is not None:
+        d["gpu"] = round(util, 1)
+    if total > 0:
+        d["vramUsedGb"] = round(used / 2 ** 30, 2)
+        d["vramTotalGb"] = round(total / 2 ** 30, 1)
+        d["vram"] = round(used / total * 100, 1)
+    return d
+
+
+async def _gpu_probes() -> dict[str, dict]:
+    """按节点跑 GPU 探针(目前只有 Apple Silicon 这一种)。30s 缓存, 不进 2.5s 快照循环。"""
+    now = time.time()
+    if _GPU_PROBE["data"] and now - _GPU_PROBE["ts"] < _GPU_PROBE_TTL:
+        return _GPU_PROBE["data"]
+    targets = [(n["id"], n["gpu_probe_ssh"]) for n in NODES if n.get("gpu_probe_ssh")]
+    if not targets:
+        return {}
+    res = await asyncio.gather(*[_darwin_gpu(h) for _, h in targets])
+    data = {nid: r for (nid, _), r in zip(targets, res) if r}
+    if data:                                  # 全失败时保留上一份, 不闪回 0
+        _GPU_PROBE["data"], _GPU_PROBE["ts"] = data, now
+    return _GPU_PROBE["data"]
+
+
 async def _node_payload() -> list[dict]:
     exp_nodes = [n for n in NODES if n.get("node_source") == "exporter"]
-    obs_live, direct, facts, *exp_lives = await asyncio.gather(
-        _obs_node_live(), _atlas_node_live(), _node_facts(),
+    obs_live, direct, facts, gpu_probe, *exp_lives = await asyncio.gather(
+        _obs_node_live(), _atlas_node_live(), _node_facts(), _gpu_probes(),
         *[_atlas_node_live(n["exporter_url"], NODEEXP_NODE_TIMEOUT) for n in exp_nodes])
     exp_live = {n["id"]: lv for n, lv in zip(exp_nodes, exp_lives)}
     # `direct` is the host that runs the Hearth api itself (scraped via the
@@ -608,6 +696,30 @@ async def _node_payload() -> list[dict]:
                 # 统一内存:显存占用就是内存占用(与 GB10 的 unified 同口径)
                 live["vramKind"] = "unified"
                 live["vram"] = d.get("mem", 0)
+            # Apple Silicon 的 GPU 利用率与显存:来自 ioreg 探针(30s)。拿到后显存改用
+            # 【GPU 实际分配量】而不是整机内存占用 —— 两者在统一内存上不是一回事。
+            # ⛔ 仍然只有利用率与显存:温度/功耗要 root 才拿得到, 继续缺席(gpuTelemetry
+            #    保持 false, 面板上功耗与 GPU 温度仍显示「—」)。
+            gp = gpu_probe.get(n["id"]) or {}
+            if gp:
+                live.update({k: gp[k] for k in ("gpu", "vram") if k in gp})
+                live["vramKind"] = "unified"
+                live["gpuUtilSource"] = "ioreg"
+                if "vramUsedGb" in gp:
+                    live["vramUsedGb"], live["vramTotalGb"] = gp["vramUsedGb"], gp["vramTotalGb"]
+            # ⛔ 没有来源的遥测字段一律 null, 不留默认 0。
+            # 界面靠 gpuTelemetry=false 显示「—」只遮住了 UI 这一层:载荷里的 0
+            # 会被告警规则 / 导出 / 第三方脚本读成「实测 0 瓦 / 0 度」。
+            # (2026-09-19 w1W:p1 提醒, 与 tpsNow 恒 0 是同一类坑)
+            for k in ("tempGpu", "tempMem", "power", "rdmaIn", "rdmaOut"):
+                live[k] = None
+            for k in ("cpu", "mem", "disk", "netIn", "netOut", "tempCpu"):
+                if k not in d:
+                    live[k] = None
+            if "gpu" not in gp:
+                live["gpu"] = None
+            if "vram" not in gp and not (n.get("kind") != "discrete" and d):
+                live["vram"] = None
             up = bool(d)
         elif n.get("node_source") == "direct":
             live.update({k: discrete_gpu.get(k, 0)
@@ -1250,6 +1362,16 @@ async def infra():
 
 
 # ── HA-derived cluster fields (gracefully null when HA exporter absent) ─
+# ⛔ HA 导出器在 HA 不可达时【仍然导出 0】而不是把 series 撤掉 ——
+#    实测 2026-09-19 10:19: ha_up=0, 但 ha_rack_ac_power_watts=0 每 15s 照常写入,
+#    30d 内 max 也是 0。这等于"拿 0 冒充没数据", 跟机主 09-19 点名的那类坑同源。
+#    HA 侧不归我们动(机主 09-19: "暂不管, 不要动 HA"), 所以在 Hearth 这一层挡:
+#    ha_up != 1 时, 一切 HA 派生字段一律按【无数据】处理, 置 null / available=false。
+async def _ha_ok() -> bool:
+    r = await promql("ha_up")
+    return bool(r) and float(r[0]["value"]) > 0
+
+
 async def _ha_power() -> dict:
     # Direct aggregation in PromQL — works without recording rules so the
     # obs Prometheus needs no extra config beyond the scrape job.
@@ -1263,7 +1385,19 @@ async def _ha_power() -> dict:
     # 24h history), so we ignore it. avg_over_time(W) × hours / 1000 = kWh.
     # 24h window = "last day"; 30d window = "last 30 days" — sliding, not
     # calendar-aligned, but immune to HA-side counter resets / TZ confusion.
-    gpu, eff, per_node_w, per_node_24h, per_node_30d = await asyncio.gather(
+    # ── GPU 侧能耗(2026-09-19 加)────────────────────────────────────
+    # ⛔ 口径: 只有 GPU, 不含 CPU/内存/风扇/电源损耗 —— 不是整机功耗, 更不是电表读数。
+    #    机主 09-19 裁定: HA 智能插座(整机口径)全部 unavailable 期间, 能耗一律走
+    #    DCGM 的 GPU 侧, 并在界面上明标不含整机。
+    # 两个口径都算, 由覆盖率决定用哪个, 结果里带 source 字段说明用的是哪一个:
+    #   1) 计数器 increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION) —— 精确, 但
+    #      这条 series 2026-09-19 才铺开(Atlas 09:47 / 四台 Spark 10:14), 窗口没填满前
+    #      只代表"开始计数以来", 会系统性偏小。
+    #   2) 功率积分 sum_over_time(POWER_USAGE)*15s —— 有 30d 历史, 但受 15s 采样
+    #      粒度限制, 漏掉采样间隔内的尖峰。
+    # 覆盖率 >= 98% 用 1), 否则用 2) —— 计数器攒满 24h/30d 后自动切换, 无需改代码。
+    gpu, eff, per_node_w, per_node_24h, per_node_30d, \
+        g_ctr_d, g_ctr_m, g_int_d, g_int_m, g_cov_d, g_cov_m, g_node_d = await asyncio.gather(
         promql("sum(DCGM_FI_DEV_POWER_USAGE)"),
         promql("sum(rate(litellm_total_tokens_metric_total[1m])) "
                "/ clamp_min(sum(ha_node_wall_power_watts), 1)"),
@@ -1276,7 +1410,21 @@ async def _ha_power() -> dict:
         # time. step = 15s (the obs scrape interval).
         promql("sum_over_time(ha_node_wall_power_watts[24h]) * 15 / 3600 / 1000"),
         promql("sum_over_time(ha_node_wall_power_watts[30d]) * 15 / 3600 / 1000"),
+        promql("sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[24h])) / 3.6e9"),
+        promql("sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[30d])) / 3.6e9"),
+        promql("sum(sum_over_time(DCGM_FI_DEV_POWER_USAGE[24h])) * 15 / 3600 / 1000"),
+        promql("sum(sum_over_time(DCGM_FI_DEV_POWER_USAGE[30d])) * 15 / 3600 / 1000"),
+        # 覆盖率 = 窗口内真实有数据的采样点 / 窗口应有的点数。子查询步长取
+        # 1m/5m 只是为了便宜, 不影响判定(判的是"这条 series 存在多久", 不是精度)。
+        promql("count_over_time(sum(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION)[24h:1m]) / 1440"),
+        promql("count_over_time(sum(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION)[30d:5m]) / 8640"),
+        promql("sum_over_time(DCGM_FI_DEV_POWER_USAGE[24h]) * 15 / 3600 / 1000"),
     )
+    ha_ok = await _ha_ok()
+    # HA 挂着的时候这三条全是导出器写的假 0 —— 直接当空处理, 下面的 sum() 就会给 None。
+    if not ha_ok:
+        per_node_w = per_node_24h = per_node_30d = []
+        eff = []
     by_node    = {k: round(float(v), 1) for k, v in _by(per_node_w,   "node").items()}
     by_node_d  = {k: round(float(v), 2) for k, v in _by(per_node_24h, "node").items()}
     by_node_m  = {k: round(float(v), 2) for k, v in _by(per_node_30d, "node").items()}
@@ -1288,9 +1436,31 @@ async def _ha_power() -> dict:
     # so guard explicitly and emit null.
     def _f(r, digits=1):
         return None if not r else round(r[0]["value"], digits)
+
+    def _gpu_kwh(ctr, integral, cover):
+        """→ (kWh, 口径, 覆盖率)。两个都取不到就是 (None, None, None) —— 不填 0。"""
+        c, i, cv = _f(ctr, 3), _f(integral, 3), _f(cover, 3)
+        if c is not None and cv is not None and cv >= 0.98:
+            return c, "dcgm-counter", cv
+        if i is not None:
+            return i, "dcgm-power-integral", cv
+        return (c, "dcgm-counter", cv) if c is not None else (None, None, cv)
+
+    g_kwh_d, g_src_d, g_cv_d = _gpu_kwh(g_ctr_d, g_int_d, g_cov_d)
+    g_kwh_m, g_src_m, g_cv_m = _gpu_kwh(g_ctr_m, g_int_m, g_cov_m)
+    by_node_gpu_d = {k: round(float(v), 3) for k, v in _by(g_node_d, "node").items()}
     return {"wallW": wall_total, "gpuW": _f(gpu), "tokensPerW": _f(eff, 2),
             "kwh24h": kwh_d_tot, "kwh30d": kwh_m_tot,
-            "byNode": by_node, "byNode24h": by_node_d, "byNode30d": by_node_m}
+            "byNode": by_node, "byNode24h": by_node_d, "byNode30d": by_node_m,
+            # GPU 侧能耗。scope 字段是给界面用的:必须标"不含整机"。
+            "gpuKwh24h": g_kwh_d, "gpuKwh30d": g_kwh_m,
+            "gpuKwhSource24h": g_src_d, "gpuKwhSource30d": g_src_m,
+            "gpuKwhCoverage24h": g_cv_d, "gpuKwhCoverage30d": g_cv_m,
+            "byNodeGpuKwh24h": by_node_gpu_d,
+            "gpuEnergyScope": "gpu-only",
+            # 整机口径当前是否可信。false 时上面 wallW/kwh24h/kwh30d/byNode* 全是 null。
+            "wallAvailable": ha_ok,
+            "wallUnavailableReason": None if ha_ok else "HA exporter down (ha_up=0)"}
 
 
 async def _ha_env() -> dict:
@@ -1310,6 +1480,8 @@ async def _ha_env() -> dict:
         promql("ha_rack_ac_state"),
         promql("ha_node_plug_temp_celsius"),
     )
+    if not await _ha_ok():
+        t = h = ac_w = ac_24h = ac_30d = ac_s = plug_temps = []
     by_node_plug = {k: round(float(v), 1)
                     for k, v in _by(plug_temps, "node").items()}
     proxy = round(sum(by_node_plug.values()) / len(by_node_plug), 1) \
@@ -1322,7 +1494,8 @@ async def _ha_env() -> dict:
     return {"rackTempC": _f(t), "rackRH": _f(h, 0),
             "acW": _f(ac_w), "acKwh24h": _f(ac_24h, 2), "acKwh30d": _f(ac_30d, 2),
             "acOn": None if not ac_s else bool(ac_s[0]["value"]),
-            "byNodePlugTempC": by_node_plug, "cabinetHeatProxyC": proxy}
+            "byNodePlugTempC": by_node_plug, "cabinetHeatProxyC": proxy,
+            "haAvailable": bool(by_node_plug) or _f(t) is not None}
 
 
 # ── Models (真实：直采 vLLM 原生 /metrics；LiteLLM prometheus 企业版门控不可用) ──
@@ -1442,6 +1615,36 @@ _DISCO_TTL = 25.0          # 部署拓扑变化慢；富指标(tps/kv)仍每 sna
 _DISCO_TASK = None
 
 
+# 直探声明里被跳过的地址 → 原因。给 /api/selftest 用: "声明了却没出现在面板上"
+# 必须能查到为什么, 否则运维会以为 Hearth 漏了。
+_DIRECT_SKIPPED: dict[str, str] = {}
+
+
+async def _classify_base(b: str) -> str:
+    """探一个 base 是哪种引擎 → vllm/llamacpp/sglang/omlx/ds4/q27/exl3/none。
+
+    顺序即优先级: 前四种是本集群在跑的, 放前面; 后三种(ds4/q27/exl3)本集群
+    当前没有实例, 放链尾, 不给生产路径增加无谓请求。
+    none = 这个地址不响应任何已知引擎的指标口径(可能是没起来, 也可能是别的服务)。"""
+    sc = await _scrape_vllm(b)
+    if any(str(k).startswith("vllm:") for k in sc) or sc.get("__e2e_buckets"):
+        return "vllm"
+    if await _scrape_llamacpp(b):
+        return "llamacpp"
+    sc3 = await _scrape_sglang(b)
+    if any(str(k).startswith("sglang:") for k in sc3) or sc3.get("__e2e_buckets"):
+        return "sglang"
+    if await _scrape_omlx(b):
+        return "omlx"
+    if await _scrape_ds4(b):
+        return "ds4"
+    if await _scrape_q27(b):
+        return "q27"
+    if await _scrape_exl3(b):
+        return "exl3"
+    return "none"
+
+
 async def _discover() -> list[dict]:
     """网关 /model/info + /health → 逻辑模型列表（按主 route 折叠别名/副本）。
     每条: id/route/display/vendor/kind/tags/nodes/up/vllm_bases/ctx/framework。"""
@@ -1499,18 +1702,26 @@ async def _discover() -> list[dict]:
         return fallback, len(non_alias) <= 1, (non_alias if len(non_alias) > 1 else [])
 
     models: dict[str, dict] = {}
+    known_bases: set = set()        # 已被网关条目占用的 base, 给下面的直探去重用
     for b, routes in base_routes.items():
         prt, verified, cands = _primary(routes, served.get(b, ""))
         meta = _meta_for(prt)
         mm = models.setdefault(prt, {
-            "id": prt, "route": f"litellm/{prt}", "display": meta["display"],
+            "id": prt, "route": f"litellm/{prt}", "source": "gateway",
+            "display": meta["display"],
             "vendor": meta["vendor"], "kind": meta["kind"],
             "tags": list(meta["tags"]), "params": "—", "quant": "—",
             "framework": "—", "vram": 0, "ctx": 0,
             "identityUnverified": False, "identityCandidates": [],
+            "servedName": "",
             "_nodes": set(), "_aliases": set(), "_bases": [],
             "up": False, "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": [],
-            "omlx_bases": []})
+            "omlx_bases": [], "ds4_bases": [], "q27_bases": [], "exl3_bases": []})
+        # 后端自报的 served-model-name。网关路由可能是"档位别名"(DGX-Spark-auto),
+        # 而后端实际加载的是 deepseek-v41-flash —— 两者都要留着, 面板上才说得清
+        # "你调的是哪条路由 / 它背后是什么模型"。
+        if served.get(b) and not mm.get("servedName"):
+            mm["servedName"] = served[b]
         if not verified:
             mm["identityUnverified"] = True
             mm["identityCandidates"] = sorted(set(mm["identityCandidates"]) | set(cands))
@@ -1547,22 +1758,14 @@ async def _discover() -> list[dict]:
     # up 判定:直接探后端为主(/metrics 或 /v1/models 可达即活),/health 仅做
     # 辅助 / 兜底——避免单点故障(网关 /health 偶发超时 22s)把所有模型误标
     # stopped。直接探测自给自足,网关挂了监控仍如实反映后端真相。
+    _KIND_BASES = {"vllm": "vllm_bases", "llamacpp": "llamacpp_bases",
+                   "sglang": "sglang_bases", "omlx": "omlx_bases",
+                   "ds4": "ds4_bases", "q27": "q27_bases", "exl3": "exl3_bases"}
     for mm in models.values():
         for b in mm["_bases"]:
-            sc = await _scrape_vllm(b)
-            if any(str(k).startswith("vllm:") for k in sc) or sc.get("__e2e_buckets"):
-                mm["vllm_bases"].append(b); mm["up"] = True
-                continue
-            sc2 = await _scrape_llamacpp(b)
-            if sc2:                              # 有 llamacpp:* 行
-                mm["llamacpp_bases"].append(b); mm["up"] = True
-                continue
-            sc3 = await _scrape_sglang(b)
-            if any(str(k).startswith("sglang:") for k in sc3) or sc3.get("__e2e_buckets"):
-                mm["sglang_bases"].append(b); mm["up"] = True
-                continue
-            if await _scrape_omlx(b):            # oMLX 没有 /metrics,认 /api/status
-                mm["omlx_bases"].append(b); mm["up"] = True
+            kind = await _classify_base(b)
+            if kind != "none":
+                mm[_KIND_BASES[kind]].append(b); mm["up"] = True
                 continue
             try:                                 # 无指标但 /v1/models 通 → 在线
                 r = await client.get(f"{b}/v1/models", timeout=3.0)
@@ -1584,6 +1787,15 @@ async def _discover() -> list[dict]:
         elif mm["omlx_bases"]:
             mm["framework"] = "oMLX"
             mm["ctx"] = await _ctx_of(mm["omlx_bases"][0])
+        elif mm["ds4_bases"]:
+            mm["framework"] = "ds4-server"
+            mm["ctx"] = await _ctx_of(mm["ds4_bases"][0])
+        elif mm["q27_bases"]:
+            mm["framework"] = "q27"
+            mm["ctx"] = await _ctx_of(mm["q27_bases"][0])
+        elif mm["exl3_bases"]:
+            mm["framework"] = "EXL3"
+            mm["ctx"] = await _ctx_of(mm["exl3_bases"][0])
         if mm["_aliases"]:
             mm["tags"] = mm["tags"] + ["alias:" + ",".join(sorted(mm["_aliases"]))]
         mm["nodes"] = sorted(mm.pop("_nodes"))
@@ -1601,7 +1813,74 @@ async def _discover() -> list[dict]:
             if topo.get("parallelism") and topo["parallelism"] not in mm["tags"]:
                 mm["tags"] = mm["tags"] + [topo["parallelism"]]
         mm.pop("_aliases", None)
-        mm.pop("_bases", None)
+        known_bases.update(mm.pop("_bases", []))
+
+    # ── 未挂网关的引擎(配置里声明要直探的地址)────────────────────────
+    # 冲突 3 的解法: 【以 base URL 为主键去重】。网关已经覆盖的地址在这里跳过,
+    # 否则同一个引擎会在面板上出现两次(一条带 route, 一条不带)。
+    # 这些条目 source=direct、route=None —— 没挂网关就是没挂, 不编一个路由出来。
+    # 声明的地址探不通【也要显示】(up=false): 运维声明了却没起来, 正是要看见的事。
+    for raw in (HEARTH_CFG.get("direct_engines") or []):
+        if isinstance(raw, dict):
+            b = str(raw.get("base") or "").rstrip("/")
+            want_id, want_node = raw.get("id"), raw.get("node")
+        else:
+            b, want_id, want_node = str(raw).rstrip("/"), None, None
+        if not b:
+            continue
+        if b.endswith("/v1"):
+            b = b[:-3]
+        if b in known_bases:
+            continue
+        kind = await _classify_base(b)
+        # ⛔ 有 /metrics ≠ 是一个可服务的端点。2026-09-19 实测: 四台 Spark 的
+        #    TP worker(.189:8004 等)也导出 183 行 sglang:* (每阶段延迟/排队/KV),
+        #    但没有 generation_tokens_total、/v1/models 返回 404 —— 它们是同一个
+        #    部署的分片, 不是独立模型。按 /v1/models 是否 200 来分辨:
+        #      200        → 独立服务端点, 建卡
+        #      404/其它   → 分片或别的服务, 【不建卡】, 只记进自检结果说明原因
+        #      连不上     → 声明了却没起来, 建卡并如实标 offline
+        status, reachable = None, False
+        try:
+            rr = await client.get(f"{b}/v1/models", timeout=3.0)
+            status, reachable = rr.status_code, True
+        except Exception:
+            pass
+        if reachable and status != 200:
+            _DIRECT_SKIPPED[b] = (f"/v1/models HTTP {status} —— 有 {kind} 指标但不是"
+                                  f"独立服务端点(多半是 TP/PP 分片), 不建模型卡")
+            known_bases.add(b)
+            continue
+        _DIRECT_SKIPPED.pop(b, None)
+        sv = await _served_name(b)
+        mid = str(want_id or sv or f"direct:{_host_of(b)}")
+        if mid in models:                       # 主名撞车: 退回地址做 id, 不覆盖网关条目
+            mid = f"direct:{_host_of(b)}"
+        meta = _meta_for(mid)
+        nodes = set()
+        host = _host_of(b)
+        if want_node:
+            nodes.add(str(want_node))
+        elif host in IP_TO_ID:
+            nodes.add(IP_TO_ID[host])
+        entry = {"id": mid, "route": None, "source": "direct",
+                 "display": meta["display"], "vendor": meta["vendor"],
+                 "kind": meta["kind"], "tags": list(meta["tags"]) + ["direct"],
+                 "params": "—", "quant": "—", "framework": "—", "vram": 0, "ctx": 0,
+                 "identityUnverified": not bool(sv), "identityCandidates": [],
+                 "servedName": sv or "",
+                 "nodes": sorted(nodes), "up": kind != "none" or status == 200,
+                 "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": [],
+                 "omlx_bases": [], "ds4_bases": [], "q27_bases": [], "exl3_bases": []}
+        if kind != "none":
+            entry[_KIND_BASES[kind]].append(b)
+            entry["framework"] = {"vllm": "vLLM", "llamacpp": "llama.cpp",
+                                  "sglang": "SGLang", "omlx": "oMLX",
+                                  "ds4": "ds4-server", "q27": "q27",
+                                  "exl3": "EXL3"}[kind]
+            entry["ctx"] = await _ctx_of(b)
+        models[mid] = entry
+        known_bases.add(b)
     return sorted(models.values(),
                   key=lambda x: (not x["up"],
                                  not (x["vllm_bases"] or x["llamacpp_bases"]),
@@ -1894,6 +2173,33 @@ _OMLX_MIN = 8.0         # 窗口短于此不出数(一次完成事件就能把�
 _OMLX_MAX_SNAPS = 200   # 防止高频调用把 deque 撑大
 
 
+_OMLX_STEP: dict[str, tuple] = {}     # base -> (step, observed_monotonic)
+
+
+def _omlx_step_rate(base: str, snap: dict) -> float | None:
+    """解码步频(步/秒)。没有该端点 / 基线未建 / 快照冻结 → None(调用方保持上次)。
+
+    ⛔ 空闲必须【显式置 0 并重置基线】: 引擎空闲时调度器快照本身冻结, Δstep 与 Δt
+       同时为 0, 走"保持上次"会让读数永远卡在最后一次的速率上 —— 请求早结束了面板
+       还在报 111 tok/s。这是 2026-09-19 实测踩过的坑。
+    ⛔ 分母用快照自带的 observed_monotonic, 不是我们的轮询间隔(见 _scrape_omlx 注释)。"""
+    step, mono = snap.get("__omlx_step"), snap.get("__omlx_step_mono")
+    if step is None or mono is None:
+        return None
+    prev = _OMLX_STEP.get(base)
+    _OMLX_STEP[base] = (step, mono)
+    active = (snap.get("omlx:sched_running", 0.0)
+              + snap.get("omlx:sched_prefilling", 0.0))
+    if active <= 0:
+        return 0.0
+    if prev is None:
+        return None
+    d_step, d_t = step - prev[0], mono - prev[1]
+    if d_t <= 0 or d_t > 60 or d_step < 0:      # 冻结 / 基线过旧 / 引擎重启
+        return None
+    return max(0.0, d_step / d_t)
+
+
 def _omlx_rates(base: str, snap: dict, now: float) -> tuple:
     """(tok/s, req/s, 窗口秒)。窗口不够长 / 抓取失败 / 计数器回退 → (None, None, None)。"""
     cur_t = snap.get("omlx:total_completion_tokens")
@@ -1980,6 +2286,35 @@ async def _scrape_omlx(base: str) -> dict:
     _lm = d.get("default_model") or ((d.get("loaded_models") or [None])[0])
     if _lm:
         out["__omlx_model"] = str(_lm)
+    # ── 调度器实时状态(/v1/router/state) ────────────────────────────────
+    # /api/status 的 token 计数器只在请求完成时跳, 生成途中吞吐恒 0。调度器快照里的
+    # step 是【解码步计数器】, 生成中持续增长, 是这个后端唯一的实时信号。
+    # ⛔ 分母必须用快照自带的 observed_monotonic, 不能用我们自己的轮询间隔:
+    #    该快照有 TTL, 空闲时会冻结(实测 scheduler_snapshot_age_s 涨到 97s),
+    #    拿墙钟去除冻结的计数器会算出假速率。
+    # ⛔ fairness 里的 *_ema 与 best_prefill_tps 是引擎的【历史测量】不是当前速率, 不映射。
+    # ⛔ oMLX 没有 prefill token 计数器 —— prefill 一律留空, 不借 best_prefill_tps 冒充。
+    try:
+        r2 = await client.get(f"{base}/v1/router/state", timeout=3.0)
+        r2.raise_for_status()
+        st = r2.json()
+        mdl = next(iter((st.get("models") or {}).values()), None) or {}
+        sch = mdl.get("scheduler") or {}
+        cnt = sch.get("counts") or {}
+        if sch.get("step") is not None and sch.get("observed_monotonic") is not None:
+            out["__omlx_step"] = float(sch["step"])
+            out["__omlx_step_mono"] = float(sch["observed_monotonic"])
+        for src, key in (("running", "omlx:sched_running"),
+                         ("prefilling", "omlx:sched_prefilling"),
+                         ("waiting", "omlx:sched_waiting")):
+            if cnt.get(src) is not None:
+                out[key] = float(cnt[src])
+        if sch.get("configured_max_concurrency"):
+            out["omlx:sched_slots_total"] = float(sch["configured_max_concurrency"])
+        if mdl.get("scheduler_snapshot_age_s") is not None:
+            out["omlx:snapshot_age_s"] = float(mdl["scheduler_snapshot_age_s"])
+    except Exception:
+        pass            # 老版本 oMLX 无该端点 → 相关字段缺席, 回落完成计数器窗口
     return out
 
 
@@ -2007,6 +2342,147 @@ _VLLM_HISTS = {
     # 产生一批接近 0 的间隔加少量长间隔, 均值看不出来, 分位数能。
     "vllm:inter_token_latency_seconds_bucket": "__itl_buckets",
 }
+
+
+# ── ds4 / EXL3 / q27 三种后端的识别与采集 ───────────────────────────
+# 口径抄自 sparkDash 已验证的实现(/home/user/dev/sparkDash/server/collectors/
+# LlmProbe.js:355-445, 那边有单元测试固定了样本):
+#   ds4  : /metrics 里有 ds4_tokens_decoded_total
+#   q27  : /metrics 里有 q27_decode_tokens_total(signalnine/q27)
+#   exl3 : /health 返回 {backend:"exl3"} 或 {ok:true, busy:<bool>}
+#          —— vLLM 的 /health 是空体 200, 不会误判。
+# ⚠️ 未经真实实例验证: 本集群 2026-09-19 只跑 SGLang 与 oMLX, 这三种一个都没有。
+#    下面的解析只用 sparkDash 的样本做过离线自测(/home/user/dev/hearth/server/api/tests/test_engine_probes.py),
+#    真接上实例时必须重新核对字段名, 不要把"能跑通"当成"口径正确"。
+_DS4_SCALARS = {
+    "ds4_tokens_decoded_total", "ds4_tokens_prefilled_total",
+    "ds4_tokens_prefill_computed_total", "ds4_requests_inflight",
+    "ds4_decode_tok_s", "ds4_prefill_tok_s",
+}
+_Q27_SCALARS = {
+    "q27_decode_tokens_total", "q27_prompt_tokens_total",
+    "q27_prefill_computed_tokens_total", "q27_prefill_cached_tokens_total",
+    "q27_requests_total", "q27_requests_errors_total", "q27_requests_inflight",
+    "q27_slots_total", "q27_kv_usage_perc", "q27_spec_accept_ratio",
+    "q27_preemptions_total",
+}
+
+
+def _prom_parse(text: str, scalars: set, hists: dict) -> dict:
+    """Prometheus 文本 → {标量名: 求和值} (+ 直方图桶存进 hists 指定的键)。
+
+    同名多 label 的行【求和】(q27 按 api="chat"/"messages" 分组), 与 Hearth
+    其它采集器一致。直方图只收 _bucket/_sum/_count 三件套, 留给 _lat_window 差分。"""
+    out: dict = {}
+    buckets: dict = {}
+    for line in text.splitlines():
+        if not line or line[0] == "#":
+            continue
+        sp = line.rsplit(" ", 1)
+        if len(sp) != 2:
+            continue
+        head = sp[0]
+        name = head.split("{")[0]
+        try:
+            v = float(sp[1])
+        except ValueError:
+            continue
+        if name in scalars:
+            out[name] = out.get(name, 0.0) + v
+            continue
+        for hname, key in hists.items():
+            if name == hname + "_bucket":
+                m = re.search(r'le="([^"]+)"', head)
+                if m:
+                    d = buckets.setdefault(key, {})
+                    d[m.group(1)] = d.get(m.group(1), 0.0) + v
+            elif name in (hname + "_sum", hname + "_count"):
+                out[name] = out.get(name, 0.0) + v
+    out.update(buckets)
+    return out
+
+
+_GEN_HIST: dict[str, deque] = {}
+_GEN_WIN = 45.0            # 与 _LC_WIN/_OMLX_WIN 同理:跳变计数器要够长才稳
+_GEN_MIN = 8.0
+_GEN_MAX_SNAPS = 200
+
+
+def _gen_rate(key: str, value, now: float):
+    """(速率/秒, 窗口秒)。窗口不够 / 抓取失败 / 计数器回退 → (None, None)。
+
+    给"只在请求完成时跳"的计数器用(exl3 的 completion_tokens_total 就是)。
+    1.2s 双采样在这种计数器上不是 0 就是尖峰, 见 _lc_rates 上方那段实测。"""
+    if value is None:
+        return (None, None)
+    h = _GEN_HIST.setdefault(key, deque())
+    while h and now - h[0][0] > _GEN_WIN:
+        h.popleft()
+    old = h[0] if h else None
+    h.append((now, float(value)))
+    while len(h) > _GEN_MAX_SNAPS:
+        h.popleft()
+    if old is None:
+        return (None, None)
+    if float(value) < old[1]:              # 引擎重启 → 丢历史重来
+        h.clear(); h.append((now, float(value)))
+        return (None, None)
+    age = now - old[0]
+    if age < _GEN_MIN:
+        return (None, None)
+    return ((float(value) - old[1]) / age, round(age, 1))
+
+
+async def _scrape_ds4(base: str) -> dict:
+    """直采 ds4-server 的 /metrics。不是 ds4 就返回 {}。"""
+    try:
+        r = await client.get(f"{base}/metrics", timeout=4.0)
+        r.raise_for_status()
+        txt = r.text
+    except Exception:
+        return {}
+    if not re.search(r"(?m)^ds4_tokens_decoded_total[{\s]", txt):
+        return {}
+    return _prom_parse(txt, _DS4_SCALARS, {})
+
+
+async def _scrape_q27(base: str) -> dict:
+    """直采 q27 的 /metrics。不是 q27 就返回 {}。TTFT 直方图一并带回。"""
+    try:
+        r = await client.get(f"{base}/metrics", timeout=4.0)
+        r.raise_for_status()
+        txt = r.text
+    except Exception:
+        return {}
+    if not re.search(r"(?m)^q27_decode_tokens_total[{\s]", txt):
+        return {}
+    return _prom_parse(txt, _Q27_SCALARS, {"q27_ttft_seconds": "__ttft_buckets"})
+
+
+async def _scrape_exl3(base: str) -> dict:
+    """探 EXL3(tools/serve_openai.py) 的 /health。不是 exl3 就返回 {}。
+
+    ⛔ EXL3 只给 busy 与两个累计 token 数, 没有直方图也没有队列深度 ——
+       延迟分位数/排队一律缺席, 不用 tps 反推(同 llama.cpp/oMLX 的降级口径)。"""
+    try:
+        r = await client.get(f"{base}/health", timeout=3.0)
+        if r.status_code != 200:
+            return {}
+        d = r.json()
+    except Exception:
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    busy = d.get("busy")
+    if d.get("backend") != "exl3" and not (d.get("ok") is True and isinstance(busy, bool)):
+        return {}
+    out: dict = {"exl3:busy": 1.0 if busy else 0.0}
+    for src, dst in (("completion_tokens_total", "exl3:completion_tokens_total"),
+                     ("prompt_tokens_total", "exl3:prompt_tokens_total")):
+        v = d.get(src)
+        if isinstance(v, (int, float)):
+            out[dst] = float(v)
+    return out
 
 
 async def _scrape_vllm(base: str) -> dict:
@@ -2567,12 +3043,18 @@ _LAT_MEANS_SGLANG = {
 }
 
 
+# q27 只导出 TTFT 一个直方图(2026-09-19 按 sparkDash 的样本, 未经真实实例验证)。
+# decode/ITL/排队一律缺席 —— 不拿 tps 反推。
+_LAT_MEANS_Q27 = {"ttft": "q27_ttft_seconds"}
+
+
 # (短名, 差分桶键, 小数位)。按引擎只列【实际导出】的族，不在表里的族字段整个缺席。
 _LAT_FAMILIES_VLLM = (("ttft", "__ttft_buckets", 0), ("tpot", "__tpot_buckets", 1),
                       ("queue", "__queue_buckets", 1), ("prefill", "__prefill_buckets", 1),
                       ("decode", "__decode_buckets", 1), ("itl", "__itl_buckets", 1))
 _LAT_FAMILIES_SGLANG = (("ttft", "__ttft_buckets", 0), ("tpot", "__tpot_buckets", 1),
                         ("queue", "__queue_buckets", 1), ("prefill", "__prefill_buckets", 1))
+_LAT_FAMILIES_Q27 = (("ttft", "__ttft_buckets", 0),)
 
 
 def _lat_snapshot(merged: dict, means: dict) -> dict:
@@ -2796,6 +3278,9 @@ async def models_list():
     lbases = sorted({b for m in disco for b in m.get("llamacpp_bases", [])})
     gbases = sorted({b for m in disco for b in m.get("sglang_bases", [])})
     obases = sorted({b for m in disco for b in m.get("omlx_bases", [])})
+    dbases = sorted({b for m in disco for b in m.get("ds4_bases", [])})
+    qbases = sorted({b for m in disco for b in m.get("q27_bases", [])})
+    xbases = sorted({b for m in disco for b in m.get("exl3_bases", [])})
     # 2026-08-29: dt 原为硬编码 0.5, 但真实间隔 = sleep + 两轮【串行】抓取耗时。
     # 抓取耗时被漏算 -> dt 偏小 -> 速率系统性偏高(实测虚高约 2 倍:
     # 持续 61 tok/s 显示成 129)。改为用 monotonic 实测间隔。
@@ -2806,17 +3291,25 @@ async def models_list():
     l1 = {b: await _scrape_llamacpp(b) for b in lbases}
     g1 = {b: await _scrape_sglang(b) for b in gbases}
     o1 = {b: await _scrape_omlx(b) for b in obases}
+    d1 = {b: await _scrape_ds4(b) for b in dbases}
+    q1 = {b: await _scrape_q27(b) for b in qbases}
+    x1 = {b: await _scrape_exl3(b) for b in xbases}
     await asyncio.sleep(1.2)
     s2 = {b: await _scrape_vllm(b) for b in vbases}
     l2 = {b: await _scrape_llamacpp(b) for b in lbases}
     g2 = {b: await _scrape_sglang(b) for b in gbases}
     o2 = {b: await _scrape_omlx(b) for b in obases}
+    d2 = {b: await _scrape_ds4(b) for b in dbases}
+    q2 = {b: await _scrape_q27(b) for b in qbases}
+    x2 = {b: await _scrape_exl3(b) for b in xbases}
     _dt_real = max(1e-3, time.monotonic() - _t0)
     _t_now = time.monotonic()           # 持续吞吐锚点时刻,整轮统一
     _tps_roll = _tps_rollup(s2, _t_now)  # 整轮一次性推进锚点(不可下放进循环)
     # oMLX 的计数器【只在请求完成时跳一次】(实测 active=2 时连续几秒 Δ=0,完成瞬间
     # 一次 +47/+168) → 走滑动窗口,整轮一次性推进(同 _tps_rollup 的理由)。
     _omlx_rate = {b: _omlx_rates(b, o2.get(b) or {}, _t_now) for b in obases}
+    # 调度器步频: 生成中唯一的实时信号(完成计数器要等请求结束才跳)
+    _omlx_srate = {b: _omlx_step_rate(b, o2.get(b) or {}) for b in obases}
     # llama.cpp 同理(生成 token 计数器只在请求完成时跳),整轮一次性推进
     _lc_rate = {b: _lc_rates(b, l2.get(b) or {}, _t_now) for b in lbases}
     out = []
@@ -2825,9 +3318,13 @@ async def models_list():
         lb = m.get("llamacpp_bases") or []
         gb = m.get("sglang_bases") or []
         ob = m.get("omlx_bases") or []
+        db = m.get("ds4_bases") or []
+        qb = m.get("q27_bases") or []
+        xb = m.get("exl3_bases") or []
         base_keys = ("id", "display", "vendor", "kind", "params", "quant",
                      "ctx", "framework", "nodes", "vram", "route", "tags",
-                     "identityUnverified", "identityCandidates")
+                     "identityUnverified", "identityCandidates", "source",
+                     "servedName")
         card = {k: m.get(k) for k in base_keys}
         if vb:                                  # 真实 vLLM 指标（可能多副本汇总）
             a = _merge_scrape([s1.get(b) or {} for b in vb])
@@ -3003,8 +3500,29 @@ async def models_list():
             tps = sum(r[0] for r in _ok) if len(_ok) == len(ob) and ob else 0.0
             rps = sum(r[1] for r in _ok) if len(_ok) == len(ob) and ob else 0.0
             _tps_win = max((r[2] for r in _ok), default=None)
-            running = _gauge(a, b, "omlx:active_requests")
-            waiting = _gauge(a, b, "omlx:waiting_requests")
+            # 调度器计数优先于 /api/status 的 active_requests: 前者是调度器自己的
+            # 实时账本, 还区分 running / prefilling / waiting。
+            _sched_run = _gauge(a, b, "omlx:sched_running")
+            _sched_pre = _gauge(a, b, "omlx:sched_prefilling")
+            _has_sched = ("omlx:sched_running" in b) or ("omlx:sched_running" in a)
+            running = (_sched_run + _sched_pre) if _has_sched else _gauge(a, b, "omlx:active_requests")
+            waiting = (_gauge(a, b, "omlx:sched_waiting") if _has_sched
+                       else _gauge(a, b, "omlx:waiting_requests"))
+            # 步频 → 实时吞吐。单流下一步即一 token(2026-09-19 实测: 步频 116-126/s,
+            # 同期引擎自报 solo_decode_tps_ema 112-118, 吻合)。
+            # ⛔ 并发 >1 时一步产出多个 token, step 不再等于 token 数 —— 这时【不】拿它
+            #    当 tok/s, 回落到完成计数器的 45s 窗口值, 并用 tpsSource 标明来源。
+            _sr = [_omlx_srate.get(x) for x in ob]
+            _steps = (sum(x for x in _sr if x is not None)
+                      if any(x is not None for x in _sr) else None)
+            if _steps is not None:
+                live_steps = round(_steps, 2)
+            else:
+                live_steps = None
+            if _steps is not None and running <= 1:
+                tps, _tps_src = _steps, "steps"
+            else:
+                _tps_src = "window"
             state = "serving" if running > 0 or tps > 0 else "idle"
             # ⛔ kv 留 0:oMLX 只给 model_memory_used/max(权重+KV 对内存上限),那不是
             #    KV 池占用率,填进 kv 会被读成"KV 用了 75%"。
@@ -3015,7 +3533,13 @@ async def models_list():
                     "metrics": "omlx",
                     # 真实驻留探针:引擎自报已加载模型数 > 0
                     "resident": b.get("omlx:models_loaded", 0) > 0,
-                    "tpsWindowSec": _tps_win}
+                    "tpsWindowSec": _tps_win,
+                    # steps = 调度器步频实时值; window = 完成计数器的 45s 滑动窗口
+                    "tpsSource": _tps_src}
+            if live_steps is not None:
+                live["stepsPerSec"] = live_steps
+            if b.get("omlx:sched_slots_total"):
+                live["slotsTotal"] = int(b["omlx:sched_slots_total"])
             # prefill 吞吐与缓存命中率只有 oMLX 自报的【生命周期】均值 —— 不做窗口差分:
             # Δ(prompt-cached)/Δt 是墙钟吞吐,与面板上"每请求归一化"的 prefill 口径
             # 不是一回事,同名不同义比缺失更糟。
@@ -3032,12 +3556,73 @@ async def models_list():
             _mw = b.get("omlx:model_memory_used", 0.0)
             if _mw > 0:
                 live["weightsGb"] = round(_mw / 2 ** 30, 2)
+        elif db:                                # ds4-server(未经真实实例验证)
+            a = _merge_scrape([d1.get(b) or {} for b in db])
+            b = _merge_scrape([d2.get(b) or {} for b in db])
+            # 引擎自报的 ~60s 窗口 gauge 优先: 它比我们 1.2s 双采样稳。
+            # 没有 gauge(旧版本) 才退回双采样, 并用 tpsSource 标明来源。
+            g_tps = b.get("ds4_decode_tok_s")
+            if g_tps and g_tps > 0:
+                tps, tps_src = float(g_tps), "engine-gauge"
+            else:
+                tps, tps_src = _rate(a, b, "ds4_tokens_decoded_total", _dt_real), "window1.2s"
+            running = _gauge(a, b, "ds4_requests_inflight")
+            state = "serving" if running > 0 or tps > 0 else "idle"
+            live = {"tps": round(tps, 1), "rps": 0.0, "kv": 0,
+                    "running": int(running), "waiting": 0,
+                    "metrics": "ds4", "resident": True, "tpsSource": tps_src}
+            g_pf = b.get("ds4_prefill_tok_s")
+            if g_pf and g_pf > 0:
+                live["prefillTokPerS"] = round(float(g_pf), 0)
+        elif qb:                                # q27(未经真实实例验证)
+            a = _merge_scrape([q1.get(x) or {} for x in qb])
+            b = _merge_scrape([q2.get(x) or {} for x in qb])
+            tps = _rate(a, b, "q27_decode_tokens_total", _dt_real)
+            rps = _rate(a, b, "q27_requests_total", _dt_real)
+            running = _gauge(a, b, "q27_requests_inflight")
+            kv = b.get("q27_kv_usage_perc", 0.0) * 100 / max(1, len(qb))
+            lat = _lat_window(m["id"], b, _t_now, _LAT_MEANS_Q27, e2e_prefix="q27")
+            state = "serving" if running > 0 or tps > 0 else "idle"
+            live = {"tps": round(tps, 1), "rps": round(rps, 3), "kv": round(kv, 1),
+                    "running": int(running), "waiting": 0,
+                    "metrics": "q27", "resident": True, "tpsSource": "window1.2s"}
+            if b.get("q27_slots_total"):
+                live["slotsTotal"] = int(b["q27_slots_total"])
+            # 前缀缓存命中 = 命中 token / (命中 + 实算) —— 两个都是累计量, 给的是
+            # 生命周期口径(与 llama.cpp/oMLX 同), 不做窗口差分。
+            _cc = b.get("q27_prefill_cached_tokens_total", 0.0)
+            _cp = b.get("q27_prefill_computed_tokens_total", 0.0)
+            if _cc + _cp > 0:
+                live["cacheHitRate"] = round(_cc / (_cc + _cp) * 100, 1)
+            _sa = b.get("q27_spec_accept_ratio")
+            if _sa is not None:
+                live["specAcceptRate"] = round(float(_sa) * 100, 1)
+            if lat:
+                _put_latency(live, lat, _LAT_FAMILIES_Q27)
+        elif xb:                                # EXL3(未经真实实例验证)
+            a = _merge_scrape([x1.get(x) or {} for x in xb])
+            b = _merge_scrape([x2.get(x) or {} for x in xb])
+            # ⛔ EXL3 的 completion_tokens_total 只在请求完成时跳 → 走 45s 滑动窗口,
+            #    1.2s 双采样在这种计数器上不是 0 就是尖峰。
+            _r, _w = _gen_rate("exl3:" + m["id"], b.get("exl3:completion_tokens_total"), _t_now)
+            tps = _r if _r is not None else 0.0
+            busy = b.get("exl3:busy", 0.0) > 0
+            state = "serving" if busy or tps > 0 else "idle"
+            live = {"tps": round(tps, 1), "rps": 0.0, "kv": 0,
+                    "running": 1 if busy else 0, "waiting": 0,
+                    "metrics": "exl3", "resident": True,
+                    "tpsSource": "window", "tpsWindowSec": _w}
         elif m.get("up"):                       # 网关健康但无可识别 /metrics
             state = "online"                    # 在线·服务中，无详细指标（不伪造）
             live = {"metrics": "none", "resident": True}
         else:                                   # 网关判定后端 down → 已停
             state = "stopped"
             live = {"metrics": "none", "resident": False}
+        # 后端自报名 → 卡片副标题。路由名可能只是档位别名(DGX-Spark-auto),
+        # 面板上必须能看出它背后到底载着什么模型。oMLX 分支已自己填过就不覆盖。
+        _sv = m.get("servedName")
+        if _sv and not live.get("loadedModel") and _sv != m.get("id"):
+            live["loadedModel"] = _sv
         out.append({**card, "state": state, "live": live})
     return out
 
@@ -3070,22 +3655,24 @@ async def _alerts(nodes=None, log=None):
             out.append({"key": f"{nid}:offline", "sev": "bad",
                         "msg": f"{nm} offline", "sub": f"{n['ip']} · no metrics", "when": "live"})
             continue
-        gt = L.get("tempGpu", 0)
-        if gt >= 90:
+        # ⛔ 这些字段可能是 None(该节点没有对应遥测源)。None 一律【跳过判定】——
+        #    把「没数据」当成 0 会得出「GPU 0°C 很安全」这种假结论。
+        gt, mem, dsk = L.get("tempGpu"), L.get("mem"), L.get("disk")
+        if gt is not None and gt >= 90:
             out.append({"key": f"{nid}:gpu_temp", "sev": "bad",
                         "msg": f"{nm} GPU overheating {gt:.0f}°C",
                         "sub": "past critical — shed load", "when": "live"})
-        elif gt >= 85:
+        elif gt is not None and gt >= 85:
             out.append({"key": f"{nid}:gpu_temp", "sev": "hot",
                         "msg": f"{nm} GPU hot {gt:.0f}°C",
                         "sub": "near thermal throttle", "when": "live"})
-        if L.get("mem", 0) >= 95:
+        if mem is not None and mem >= 95:
             out.append({"key": f"{nid}:mem", "sev": "warn",
-                        "msg": f"{nm} memory pressure {L['mem']:.0f}%",
+                        "msg": f"{nm} memory pressure {mem:.0f}%",
                         "sub": "system/unified memory near limit", "when": "live"})
-        if L.get("disk", 0) >= 85:
+        if dsk is not None and dsk >= 85:
             out.append({"key": f"{nid}:disk", "sev": "warn",
-                        "msg": f"{nm} disk {L['disk']:.0f}%",
+                        "msg": f"{nm} disk {dsk:.0f}%",
                         "sub": "root filesystem filling up", "when": "live"})
         # GPU 硬件健康。XID 是 NVIDIA 驱动报的致命/非致命错误码, 非零一律当事故看;
         # ECC 双比特(DBE)不可纠, 单比特(SBE)可纠但持续增长说明显存在退化。
@@ -3488,14 +4075,18 @@ async def energy_trends():
 
     out = {"timezone": tz or "UTC",
            "dayDef": "06:00–18:00 local",
-           "ac": {}, "wall": {}, "cabinet": {}}
+           "ac": {}, "wall": {}, "cabinet": {}, "gpu": {}}
 
     for name, mins in windows:
         ac_series   = await _window_series("ha_rack_ac_power_watts", mins, STEP)
         wall_series = await _window_series("sum(ha_node_wall_power_watts)", mins, STEP)
         cab_series  = await _window_series("avg(ha_node_plug_temp_celsius)", mins, STEP)
+        # GPU 侧口径: 五张卡的 DCGM 功率之和。⛔ 不含 CPU/内存/风扇/电源损耗,
+        # 与上面 wall(智能插座整机口径)不可互换, 界面上必须分开标。
+        gpu_series  = await _window_series("sum(DCGM_FI_DEV_POWER_USAGE)", mins, STEP)
         out["ac"][name]   = _agg(ac_series, tz, STEP)
         out["wall"][name] = _agg(wall_series, tz, STEP)
+        out["gpu"][name]  = _agg(gpu_series, tz, STEP)
         # Cabinet temp is a °C measurement, not power — only mean/day/night
         # are meaningful (no "kWh of temperature").
         if cab_series:
@@ -3512,7 +4103,176 @@ async def energy_trends():
         else:
             out["cabinet"][name] = {"meanC": None, "minC": None, "maxC": None,
                                     "dayMeanC": None, "nightMeanC": None, "samples": 0}
+
+    # ⛔ 数据源自述。界面据此在【某个口径完全没数据】时明写"数据源不可用",
+    #    而不是留一排 0 或一排空格让人以为"这段时间没耗电"。
+    #    HA 五个插座实体自 2026-08-08/09 起全部 unavailable → wall/ac/cabinet
+    #    现在就是 available=false, 这不是故障, 是如实反映。
+    ha_ok = await _ha_ok()
+
+    def _avail(block):
+        return any((block.get(w) or {}).get("samples", 0) > 0 for w, _ in windows)
+    out["sources"] = {
+        "gpu":     {"metric": "DCGM_FI_DEV_POWER_USAGE", "scope": "gpu-only",
+                    "note": "GPU 功耗, 不含整机", "available": _avail(out["gpu"])},
+        "wall":    {"metric": "ha_node_wall_power_watts", "scope": "whole-machine",
+                    "note": "智能插座整机功耗",
+                    "available": ha_ok and _avail(out["wall"]),
+                    "reason": None if ha_ok else "HA exporter down (ha_up=0)"},
+        "ac":      {"metric": "ha_rack_ac_power_watts", "scope": "rack-ac",
+                    "note": "机架空调",
+                    "available": ha_ok and _avail(out["ac"]),
+                    "reason": None if ha_ok else "HA exporter down (ha_up=0)"},
+        "cabinet": {"metric": "ha_node_plug_temp_celsius", "scope": "cabinet-proxy",
+                    "note": "插座内部温度, 机柜环境温度的代理量",
+                    "available": ha_ok and any((out["cabinet"].get(w) or {}).get("samples", 0) > 0
+                                               for w, _ in windows),
+                    "reason": None if ha_ok else "HA exporter down (ha_up=0)"},
+    }
+    # HA 挂着时把 ac/wall/cabinet 的数字整块清成 null —— 留着 0.0 W / 0.00 kWh
+    # 就是拿 0 冒充无数据(机主 09-19 明令禁止)。
+    if not ha_ok:
+        for blk in ("ac", "wall"):
+            for w, _ in windows:
+                out[blk][w] = {"avgW": None, "kwh": None, "dayAvgW": None,
+                               "nightAvgW": None, "samples": 0}
+        for w, _ in windows:
+            out["cabinet"][w] = {"meanC": None, "minC": None, "maxC": None,
+                                 "dayMeanC": None, "nightMeanC": None, "samples": 0}
     return out
+
+
+# ── 逐单元连通性自检 ────────────────────────────────────────────────
+# 面板上「没数据」有十几种原因:exporter 挂了、标签配错、隧道断了、网关 401、
+# 声明的地址是 TP 分片……现在只能看到空白。这个接口把每个单元的每项能力拆成
+# pass / fail / skipped 三态,并给出【下一步查什么】。
+#
+# ⛔ 只复用已有的探测路径(已经在跑的 Prometheus 查询、已发现的模型、已缓存的
+#    探针结果),不新增任何对被监控机的命令或请求 —— 自检本身不能变成负载。
+# ⛔ skipped ≠ pass。"这台机器本来就没有 GPU 遥测源"是 skipped,要和"有源但探
+#    不到"分开,否则自检会把缺能力伪装成健康。
+def _chk(unit: str, cap: str, status: str, detail: str, hint: str = "") -> dict:
+    return {"unit": unit, "capability": cap, "status": status,
+            "detail": detail, "hint": hint}
+
+
+@app.get("/api/selftest")
+async def selftest():
+    nodes = await _node_payload()
+    disco = await _disco_cached()
+    out: list[dict] = []
+
+    # ── 基础设施 ────────────────────────────────────────────────
+    try:
+        r = await client.get(f"{PROM_URL}/-/healthy", timeout=4.0)
+        ok = r.status_code == 200
+    except Exception as e:
+        ok, r = False, None
+        out.append(_chk("obs", "prometheus", "fail", f"{PROM_URL} 不可达: {e}",
+                        "确认 obs 栈在跑: docker ps | grep prometheus"))
+    if ok:
+        out.append(_chk("obs", "prometheus", "pass", f"{PROM_URL} healthy"))
+    elif r is not None:
+        out.append(_chk("obs", "prometheus", "fail", f"{PROM_URL} HTTP {r.status_code}", ""))
+
+    gw = await _gw_get("/health", 6.0)
+    out.append(_chk("gateway", "litellm", "pass" if gw is not None else "fail",
+                    "LiteLLM /health 可达" if gw is not None else f"{LITELLM_URL}/health 无响应或鉴权失败",
+                    "" if gw is not None else "查 LITELLM_MASTER_KEY 与容器状态"))
+
+    # 网关指标是 tpsNow/rpsNow 的唯一来源。2026-09-19 就因为抓取任务 401 + 指标名
+    # 少了 _total 后缀, 这两个值恒 0 而界面看不出来 —— 自检必须能抓到这种"静默 0"。
+    lt = await promql("sum(litellm_total_tokens_metric_total)")
+    out.append(_chk("gateway", "litellm_metrics", "pass" if lt else "fail",
+                    "litellm_total_tokens_metric_total 有序列" if lt
+                    else "Prometheus 里没有 litellm_total_tokens_metric_total",
+                    "" if lt else "查 obs 的 litellm 抓取任务(常见: 401 缺 Bearer、指标名少 _total)"))
+
+    # ── 逐节点 ─────────────────────────────────────────────────
+    probe_cfg = {n["id"]: n.get("gpu_probe_ssh") for n in NODES}
+    for n in nodes:
+        u, lv = f"node:{n['id']}", n.get("live") or {}
+        src = next((x.get("node_source") for x in NODES if x["id"] == n["id"]), None)
+        out.append(_chk(u, "reachable", "pass" if n.get("up") else "fail",
+                        f"来源={src or 'obs'} · up={n.get('up')}",
+                        "" if n.get("up") else
+                        ("直采节点: 查 exporter 与隧道(hearth.yaml 的 sources.node_exporter_url)"
+                         if src == "exporter" else
+                         "obs 节点: 查 node_exporter 与 file_sd 里的 node= 标签是否与 obs_node_label 一致")))
+        # GPU 遥测: 三态分明
+        if n.get("gpuTelemetry") is False and not lv.get("gpuUtilSource"):
+            out.append(_chk(u, "gpu_telemetry", "skipped", "该节点没有 GPU 遥测源(无 DCGM)",
+                            "Apple Silicon 可配 sources.gpu_probe_ssh 走 ioreg"))
+        elif lv.get("gpu") is None:
+            out.append(_chk(u, "gpu_telemetry", "fail", "有遥测源但取不到 GPU 利用率",
+                            "查 DCGM_FI_DEV_GPU_UTIL 是否还有该 node= 的序列"))
+        else:
+            out.append(_chk(u, "gpu_telemetry", "pass",
+                            f"gpu={lv['gpu']}% 来源={lv.get('gpuUtilSource') or 'dcgm'}"))
+        # 功耗(能耗口径的输入)
+        if lv.get("power") is None:
+            out.append(_chk(u, "power", "skipped" if n.get("gpuTelemetry") is False
+                            else "fail", "没有功耗读数",
+                            "macOS 需 root 才能读 GPU 功耗, 属已知限制"
+                            if n.get("gpuTelemetry") is False else
+                            "查 DCGM_FI_DEV_POWER_USAGE 该节点序列"))
+        else:
+            out.append(_chk(u, "power", "pass", f"{lv['power']} W"))
+        # 慢变事实(存储/网卡/开机时长/GPU 健康)
+        f = n.get("facts") or {}
+        if f:
+            out.append(_chk(u, "node_facts", "pass",
+                            f"挂载点 {len(f.get('mounts') or [])} · 网卡 {len(f.get('nics') or [])}"))
+        else:
+            out.append(_chk(u, "node_facts", "skipped" if src == "exporter" else "fail",
+                            "无节点事实数据",
+                            "直采节点不在 obs 里, 这些事实查不到, 属预期"
+                            if src == "exporter" else "查 node_filesystem_* / node_network_info 序列"))
+        # SSH GPU 探针(只有配了的节点才判)
+        if probe_cfg.get(n["id"]):
+            got = (_GPU_PROBE.get("data") or {}).get(n["id"])
+            out.append(_chk(u, "gpu_probe_ssh", "pass" if got else "fail",
+                            f"ioreg 探针 {'有' if got else '无'}数据 · 目标 {probe_cfg[n['id']]}",
+                            "" if got else "查免密 SSH(BatchMode)与主机是否休眠; 笔记本合盖会失败"))
+
+    # ── 逐模型 ─────────────────────────────────────────────────
+    for m in disco:
+        u = f"model:{m['id']}"
+        kinds = [k for k in ("vllm_bases", "llamacpp_bases", "sglang_bases", "omlx_bases",
+                             "ds4_bases", "q27_bases", "exl3_bases") if m.get(k)]
+        out.append(_chk(u, "engine_metrics", "pass" if kinds else ("fail" if m.get("up") else "skipped"),
+                        f"framework={m.get('framework')} · 识别到的端点组={kinds or '无'}",
+                        "" if kinds else ("在线但没有任何已知引擎指标口径: 确认引擎类型与 /metrics 路径"
+                                          if m.get("up") else "模型未拉起 → 指标缺席属预期")))
+        if m.get("source") == "direct":
+            out.append(_chk(u, "gateway_route", "skipped", "直探条目, 没挂网关 → 无路由",
+                            "要走网关就在 LiteLLM 里加一条 model 配置"))
+        else:
+            out.append(_chk(u, "gateway_route", "pass" if m.get("route") else "fail",
+                            f"route={m.get('route')}"))
+        if m.get("identityUnverified"):
+            sv = m.get("servedName")
+            if sv:
+                # 后端报了名字, 只是与网关路由对不上 —— 常见于"档位别名"型路由
+                # (DGX-Spark-auto/high/low...), 主名只能按字母序猜。不是故障。
+                out.append(_chk(u, "identity", "skipped",
+                                f"后端自报 '{sv}', 与网关路由对不上 → 主名按字母序取自 "
+                                f"{m.get('identityCandidates') or '—'}",
+                                "想让面板显示真名: 在网关加一条与 served-model-name 同名的路由, "
+                                "或在 hearth.yaml 的 model_meta 里给该主名配 display"))
+            else:
+                out.append(_chk(u, "identity", "fail",
+                                "身份未核实: 后端没报 served-model-name(多半没拉起)",
+                                f"候选: {m.get('identityCandidates') or '—'} · 后端起来后会自动核实"))
+
+    # ── 直探声明里被跳过的地址 ──────────────────────────────────
+    for b, why in _DIRECT_SKIPPED.items():
+        out.append(_chk(f"direct:{b}", "serving_endpoint", "skipped", why,
+                        "这是预期行为: TP/PP 分片不该当成独立模型; 若想看分片指标请用节点视图"))
+
+    summary = {k: sum(1 for c in out if c["status"] == k) for k in ("pass", "fail", "skipped")}
+    return {"generatedAt": datetime.now(timezone.utc).isoformat(),
+            "summary": summary, "checks": out}
 
 
 # ── Topology ───────────────────────────────────────────────────────

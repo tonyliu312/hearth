@@ -48,6 +48,10 @@
   ];
 
   // 真实模型（镜像后端 MODEL_CATALOG / litellm /v1/models · comfyui mode）。
+  // 有真实引擎指标的后端。新增后端时只改这一处 —— 以前这串 or 抄在两个地方,
+  // 加一种后端就会漏掉一处(节点活跃度或集群吞吐其中之一)。
+  const LIVE_METRIC_SOURCES = new Set(["vllm", "llamacpp", "sglang", "omlx",
+                                       "ds4", "q27", "exl3"]);
   // metricsSource: "vllm" 有真实 vLLM 指标；"none" = llama.cpp/停用，诚实无实时指标。
   const MODELS_CATALOG = [
     { id: "qwen3-coder", display: "Qwen3-Coder-Next", vendor: "Alibaba", kind: "chat",
@@ -434,7 +438,11 @@
         ns.up = n.up !== false;          // 后端权威 up → 诚实显示在线/离线
         const upd = (k, v) => { if (v === undefined || v === null) return;
           ns[k].now = v; ns[k].hist.shift(); ns[k].hist.push(v); };
-        if (/gateway/i.test(e.role)) upd("gpu", lv.gpu);  // 网关(discrete)用真实 DCGM
+        // 有真实 GPU 利用率来源时直接用后端值:网关走 DCGM,Apple Silicon 走 ioreg 探针。
+        // 其余节点没有可靠的利用率计数器,由下方按模型活跃度推导(见 GB10 那段注释)。
+        e.gpuUtilSource = lv.gpuUtilSource || null;
+        e.vramKind = lv.vramKind || null;      // "unified" = Apple 统一内存, 显存即系统内存
+        if (/gateway/i.test(e.role) || e.gpuUtilSource) upd("gpu", lv.gpu);
         upd("vram", lv.vram);
         upd("tempGpu", lv.tempGpu); upd("tempCpu", lv.tempCpu); upd("power", lv.power);
         upd("cpu", lv.cpu); upd("mem", lv.mem); upd("disk", lv.disk);
@@ -561,11 +569,12 @@
     //    有真实推理 → 按真实 tps 升至 18~100%。discrete dGPU 节点保留真实 DCGM。
     NODES.forEach((n) => {
       if (/gateway/i.test(n.role)) return;             // 网关(discrete)节点 DCGM util 可靠, 不走推导
+      if (n.gpuUtilSource) return;                     // 有真实利用率探针(如 Apple ioreg) → 用实测值, 不推导
       const ns = live.nodes[n.id]; if (!ns) return;
       let act = 0;
       MODELS.forEach((m) => {
         // 任何有真实推理指标的后端(vLLM / llama.cpp) → 都参与节点活跃度推导
-        if (!(m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang" || m.metricsSource === "omlx")) return;
+        if (!LIVE_METRIC_SOURCES.has(m.metricsSource)) return;
         if (!(m.nodes || []).includes(n.id)) return;
         const mm = live.models[m.id];
         if (!mm) return;
@@ -579,7 +588,7 @@
     });
     // ── cluster tps/kv：从 vLLM 真实模型指标聚合滚动（无 Prometheus range 源）──
     if (p.models) {
-      const vm = MODELS.filter((m) => (m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang" || m.metricsSource === "omlx") && live.models[m.id]);
+      const vm = MODELS.filter((m) => LIVE_METRIC_SOURCES.has(m.metricsSource) && live.models[m.id]);
       const cTps = vm.reduce((a, m) => a + (live.models[m.id].tps.now || 0), 0);
       const cKv  = vm.length ? Math.max(...vm.map((m) => live.models[m.id].kv.now || 0)) : 0;
       live.cluster.tpsNow = cTps;
@@ -664,6 +673,16 @@
     } catch (e) { /* keep last successful snapshot */ }
   }
 
+  // ── 逐单元连通性自检 ─────────────────────────────────────────────
+  // 120s 一次:它只复用已有探测结果, 但会跑一遍节点/模型载荷, 没必要更频。
+  async function loadSelfTest() {
+    try {
+      const r = await fetch("/api/selftest", { cache: "no-store",
+        signal: AbortSignal.timeout(15000) });
+      if (r.ok) { live.selfTest = await r.json(); emit(); }
+    } catch (e) { /* keep last successful snapshot */ }
+  }
+
   // ── Public API ──────────────────────────────────────────────────────
   window.AIData = {
     NODES, MODELS, live, totals, subscribe,
@@ -686,6 +705,8 @@
   loadConfig();   // fire-and-forget; first render uses defaults, ~250ms later switches
   loadEnergyTrends();
   setInterval(loadEnergyTrends, 60_000);
+  loadSelfTest();
+  setInterval(loadSelfTest, 120_000);
   pickMode().then((m) => {
     if (m === "live") startLive(); else startMock();
   });
