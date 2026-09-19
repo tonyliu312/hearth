@@ -3720,14 +3720,20 @@ async def models_list():
             live = {"tps": round(tps, 1), "rps": 0.0, "kv": 0,
                     "running": int(running), "waiting": 0,
                     "metrics": "ds4", "resident": True, "tpsSource": "window1.2s"}
-            # 实算 prefill 只认 kind="computed" 那条。取不到就【整个不给】,
-            # 不退回不带 label 的总量 —— 那含缓存命中, 悄悄换口径比缺数据更糟。
+            # 实算 prefill 只认 kind="computed" 那条。取不到时:
+            #   有 kind="cached" → 用 总量 - 命中 推导(两个都是精确量, 相减仍精确,
+            #     不是"换成语义更宽的近似值"; 这条是 w1W:p1 2026-09-19 的改法, 采纳)
+            #   连 cached 也没有 → 字段【整个缺席】, 绝不退回含命中的总量
             _ds4_pf = b.get("__ds4_prefill_computed")
+            _ds4_ca = b.get("__ds4_prefill_cached")
+            if _ds4_pf is None and _ds4_ca is not None:
+                _tot = b.get("ds4_tokens_prefilled_total")
+                if _tot is not None and _tot >= _ds4_ca:
+                    _ds4_pf = _tot - _ds4_ca
             if _ds4_pf is None:
                 live["prefillSource"] = "none"
             else:
                 _put_prefill_rt(live, m["id"], _ds4_pf, _t_now)
-            _ds4_ca = b.get("__ds4_prefill_cached")
             if _ds4_pf is not None and _ds4_ca is not None and (_ds4_pf + _ds4_ca) > 0:
                 live["cacheHitRate"] = round(_ds4_ca / (_ds4_ca + _ds4_pf) * 100, 1)
         elif qb:                                # q27(未经真实实例验证)

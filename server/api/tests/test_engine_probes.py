@@ -70,6 +70,16 @@ ds4_tokens_decoded_total 12345
 ds4_tokens_prefilled_total 10000
 """
 
+# 只有 cached label 的构建: computed 要能由 总量 - cached 精确推导出来。
+# ⚠️ fixture 必须贴近真实 exporter: 真实 exporter 不会对同一指标名【同时】发
+#    labeled 与 unlabeled 两条序列(w1W:p1 2026-09-19 写测试时踩过, 记此备忘)。
+DS4_METRICS_CACHED_ONLY = """# TYPE ds4_tokens_decoded_total counter
+ds4_tokens_decoded_total 12345
+# TYPE ds4_tokens_prefilled_total counter
+ds4_tokens_prefilled_total{kind="cached"} 9000
+ds4_tokens_prefilled_total{kind="other"} 1000
+"""
+
 DS4_LABELED = {"ds4_tokens_prefilled_total":
                ("kind", {"computed": "__ds4_prefill_computed",
                          "cached": "__ds4_prefill_cached"})}
@@ -113,6 +123,12 @@ check("命中率 9000/(9000+1000)=90%",
 d2 = main._prom_parse(DS4_METRICS_NOLABEL, main._DS4_SCALARS, {}, DS4_LABELED)
 check("无 label 时实算量缺席(不退回总量)", d2.get("__ds4_prefill_computed") is None, d2.get("__ds4_prefill_computed"))
 check("无 label 时总量仍可读=10000", d2.get("ds4_tokens_prefilled_total") == 10000.0, d2.get("ds4_tokens_prefilled_total"))
+# 只有 cached label: computed = 总量 - cached, 精确推导(不是近似)
+d3 = main._prom_parse(DS4_METRICS_CACHED_ONLY, main._DS4_SCALARS, {}, DS4_LABELED)
+_tot, _ca = d3.get("ds4_tokens_prefilled_total"), d3.get("__ds4_prefill_cached")
+check("只有 cached label 时 computed 缺席", d3.get("__ds4_prefill_computed") is None)
+check("总量-cached 推出 computed=1000", _tot is not None and _ca is not None and _tot - _ca == 1000.0,
+      (_tot, _ca))
 
 print("识别标记(与 sparkDash 同一条判据)")
 check("ds4 标记命中", bool(re.search(r"(?m)^ds4_tokens_decoded_total[{\s]", DS4_METRICS)))
