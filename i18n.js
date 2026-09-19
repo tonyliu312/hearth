@@ -51,6 +51,9 @@
       "Per-unit live throughput": "逐单元实时吞吐",
       "Decode": "解码", "Prefill": "预填", "Throughput": "吞吐", "worker": "worker",
       "Serving": "服务中", "Cluster members": "集群成员",
+      "Belongs to": "归属", "GPU %": "GPU %", "Temp °C": "温度 °C",
+      "open the full forensic view": "点开看完整规格与详情",
+      "emitting tokens now": "此刻正在出 token",
       "tok/s · decode": "tok/s · 解码", "prefill": "预填",
       "this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API":
         "该节点是 TP/PP 成员, 整组只产出一份吞吐, 数字显示在对外提供 API 的那台上",
@@ -280,6 +283,9 @@
       "Per-unit live throughput": "逐單元即時吞吐",
       "Decode": "解碼", "Prefill": "預填", "Throughput": "吞吐", "worker": "worker",
       "Serving": "服務中", "Cluster members": "叢集成員",
+      "Belongs to": "歸屬", "GPU %": "GPU %", "Temp °C": "溫度 °C",
+      "open the full forensic view": "點開看完整規格與詳情",
+      "emitting tokens now": "此刻正在出 token",
       "tok/s · decode": "tok/s · 解碼", "prefill": "預填",
       "this node is a TP/PP member; the whole group produces one throughput figure, shown on the node that serves the API":
         "該節點是 TP/PP 成員, 整組只產出一份吞吐, 數字顯示在對外提供 API 的那台上",

@@ -53,7 +53,7 @@ function NodesSection() {
             </>}
             {members.length > 0 && <>
               <NodeGroupHead label={t("Cluster members")} count={members.length} />
-              <div className={grid(members)}>{members.map(card)}</div>
+              <NodeCompactList nodes={members} onPick={setActive} />
             </>}
           </>
         );
@@ -62,6 +62,15 @@ function NodesSection() {
       {active && <NodeDetail node={active} onClose={() => setActive(null)} />}
     </section>
   );
+}
+
+// 这台此刻在不在出 token。⛔ 只用已有数据在展示层推导, 不为此改 /api/nodes:
+//   实时解码/预填 > 0, 或归属到这台的模型有请求在跑(running > 0)。
+//   prefill > 0 也算活跃 —— 正在 prefill 但还没吐出第一个 token 的那几秒不能算空闲。
+function _nodeBusy(node) {
+  if ((node.decodeTps ?? 0) > 0 || (node.prefillTokPerS ?? 0) > 0) return true;
+  return _MODELS.some((m) => (m.nodes || []).includes(node.id)
+    && ((_live.models[m.id] && _live.models[m.id].running.now) || 0) > 0);
 }
 
 // 分组标题。克制: 只有一行小字 + 计数, 无底色无边框, 靠留白分段。
@@ -87,6 +96,60 @@ function _orderNodes(list) {
   const withNumbers = [], rest = [];
   list.forEach((n) => (n.throughputRole === "api" ? withNumbers : rest).push(n));
   return withNumbers.concat(rest);
+}
+
+// 次要内容退后, 不是把主要内容加徽章: TP 成员收成紧凑列表 —— 去环形图、去七行
+// 规格表、字号降一级、整体降不透明度。⛔ 但仍然【可点进详情】, 完整规格在详情里
+// 一行不少 —— 收起来不等于拿掉。
+// ⛔ 单位只在表头出现一次(GPU % / TEMP °C), 行内只放数字。
+// ⛔ 列宽写死不用 repeat(): styles.css:891 的窄屏规则会把含 repeat( 的内联 grid 压成单列。
+function NodeCompactList({ nodes, onPick }) {
+  const { t } = useLang();
+  const COLS = "minmax(0,1.1fr) minmax(0,1.5fr) 4.5em 4.5em";
+  const head = { fontFamily: "var(--mono)", fontSize: 9.5, letterSpacing: ".1em",
+                 textTransform: "uppercase", color: "var(--ink-4)" };
+  return (
+    <div style={{ border: "0.5px solid var(--line)", borderRadius: "var(--r-md)",
+                  background: "var(--bg-1)", overflow: "hidden", opacity: 0.78 }}>
+      <div style={{ display: "grid", gridTemplateColumns: COLS, gap: "0 14px",
+                    padding: "9px 16px", borderBottom: "0.5px solid var(--line)" }}>
+        <div style={head}>{t("Unit")}</div>
+        <div style={head}>{t("Belongs to")}</div>
+        <div style={{ ...head, textAlign: "right" }}>{t("GPU %")}</div>
+        <div style={{ ...head, textAlign: "right" }}>{t("Temp °C")}</div>
+      </div>
+      {nodes.map((n, i) => {
+        const ns = _live.nodes[n.id] || {};
+        const noTel = n.gpuTelemetry === false;
+        return (
+          <div key={n.id} onClick={() => onPick(n)}
+               title={t("open the full forensic view")}
+               style={{ display: "grid", gridTemplateColumns: COLS, gap: "0 14px",
+                        padding: "10px 16px", cursor: "pointer", alignItems: "baseline",
+                        borderTop: i ? "0.5px solid var(--line)" : "none" }}>
+            <div style={{ fontSize: 12, color: "var(--ink-2)", overflow: "hidden",
+                          textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {n.name}
+              <span style={{ marginLeft: 8, fontFamily: "var(--mono)", fontSize: 10,
+                             color: "var(--ink-4)" }}>{n.ip}</span>
+            </div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--ink-3)",
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {n.throughputRole === "worker"
+                ? <>{t("worker")} · {(n.throughputModels || []).join(", ")}</>
+                : "—"}
+            </div>
+            <div className="num" style={{ fontSize: 11.5, color: "var(--ink-2)", textAlign: "right" }}>
+              {ns.gpu ? ns.gpu.now.toFixed(0) : "—"}
+            </div>
+            <div className="num" style={{ fontSize: 11.5, color: "var(--ink-2)", textAlign: "right" }}>
+              {noTel || !ns.tempGpu ? "—" : ns.tempGpu.now.toFixed(0)}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function NodeCard({ node, onClick }) {
@@ -121,24 +184,40 @@ function NodeCard({ node, onClick }) {
           ⛔ 单位只在标签行出现一次(09-15 机主定的规矩), prefill 副行不再重复。
           ⛔ 等宽 tabular figures + 固定行高: 数值跳动时布局不抖。
           ⛔ 空闲显示 0.0 不隐藏: 判据是能力不是数值(与补丁 3 一致)。 */}
-      {node.throughputRole === "api" && (
-        <div style={{ margin: "14px 0 4px" }}>
-          <div className="num" style={{ fontSize: 30, lineHeight: "34px", fontWeight: 500,
-                                        letterSpacing: "-.02em", color: "var(--ink)" }}>
-            {(node.decodeTps ?? 0).toFixed(1)}
+      {node.throughputRole === "api" && (() => {
+        // 活跃/空闲两档。⛔ 这【不是】按数值给颜色(09-15 那条规矩禁的是按大小/阈值
+        //    上彩虹色), 而是一个状态轴上的两档: 在出 token vs 没在出。
+        //    所以只有两档、只有两种颜色、不随 tok/s 高低做任何渐变。
+        // ⛔ 脉冲点只在真的在动时出现, 但【占位始终保留】(visibility 而不是条件渲染),
+        //    否则状态切换时数字会横向跳。
+        const busy = _nodeBusy(node);
+        const inkNum = busy ? "var(--ink)" : "var(--ink-3)";
+        const inkSub = busy ? "var(--ink-2)" : "var(--ink-4)";
+        return (
+          <div style={{ margin: "14px 0 4px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className="num" style={{ fontSize: 30, lineHeight: "34px", fontWeight: 500,
+                                             letterSpacing: "-.02em", color: inkNum }}>
+                {(node.decodeTps ?? 0).toFixed(1)}
+              </span>
+              <span title={busy ? t("emitting tokens now") : ""}
+                    style={{ width: 6, height: 6, borderRadius: "50%", flex: "0 0 auto",
+                             background: "var(--ink)", visibility: busy ? "visible" : "hidden",
+                             animation: "pulse 1.6s ease-in-out infinite" }} />
+            </div>
+            <div style={{ marginTop: 5, fontFamily: "var(--mono)", fontSize: 10,
+                          letterSpacing: ".1em", textTransform: "uppercase", color: "var(--ink-3)" }}>
+              {t("tok/s · decode")}
+            </div>
+            <div className="num" style={{ marginTop: 6, fontSize: 11, color: inkSub }}
+                 title={node.prefillTokPerS == null ? t("this backend exposes no realtime prefill counter") : ""}>
+              <span style={{ letterSpacing: ".1em", textTransform: "uppercase" }}>{t("prefill")}</span>
+              {"  "}
+              {node.prefillTokPerS == null ? "—" : node.prefillTokPerS.toLocaleString("en-US")}
+            </div>
           </div>
-          <div style={{ marginTop: 5, fontFamily: "var(--mono)", fontSize: 10,
-                        letterSpacing: ".1em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-            {t("tok/s · decode")}
-          </div>
-          <div className="num" style={{ marginTop: 6, fontSize: 11, color: "var(--ink-3)" }}
-               title={node.prefillTokPerS == null ? t("this backend exposes no realtime prefill counter") : ""}>
-            <span style={{ letterSpacing: ".1em", textTransform: "uppercase" }}>{t("prefill")}</span>
-            {"  "}
-            {node.prefillTokPerS == null ? "—" : node.prefillTokPerS.toLocaleString("en-US")}
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       <div className="node-rings">
         <div>
