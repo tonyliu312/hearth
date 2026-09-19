@@ -3570,6 +3570,15 @@ async def models_list():
             # 实时: prompt_tokens_total 的墙钟差分。这个计数器与 tokens_predicted
             # 一样【只在请求完成时跳】, 所以必须走窗口, 不能用 1.2s 双采样。
             _put_prefill_rt(live, m["id"], b.get("llamacpp:prompt_tokens_total"), _t_now)
+            # 命中率的分母必须是【实算 + 命中】, 两者不可重叠。
+            # ✅ 2026-09-19 16:42 在 .20:8001 实测验证过 llama.cpp 的这两个计数器互斥:
+            #    同一个 prompt 连发两次 —— 冷跑 Δprompt_tokens_total=1500 / Δcached=0,
+            #    热跑 Δprompt_tokens_total=0 / Δcached=2000。即 prompt_tokens_total
+            #    【不含】命中, 所以 cached/(cached+prompt) 没有重复计数。
+            # ⛔ 别照抄到别的引擎: SGLang 的 sglang:prompt_tokens_total 【含】命中
+            #    (同日实测 20s 窗口 732 对实算 115), 那边要用
+            #    realtime_tokens_total{mode=prefill_compute} 当实算分子。
+            #    sparkDash 就是在这一步把命中率算成了 0.4895(真值 0.937)。
             _pc = b.get("llamacpp:prompt_tokens_cached_total", 0.0)
             _pp = b.get("llamacpp:prompt_tokens_total", 0.0)
             if _pc + _pp > 0:
