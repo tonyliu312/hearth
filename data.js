@@ -421,6 +421,9 @@
         e.ram = n.ram || 0; e.disk = n.disk || 0; e.net = n.net || "";
         e.services = n.services || [];
         e.gpuPending = !!n.gpuPending;
+        // 后端显式给 false = 该节点没有任何 GPU 遥测源(按节点直采 node_exporter 的机器,
+        // 如 MBP)。缺省按有处理,老后端不带这个字段时行为不变。
+        e.gpuTelemetry = n.gpuTelemetry !== false;
         if (e.os === undefined) { e.os = "—"; e.kernel = "—"; e.driver = "NVIDIA —"; e.cuda = "—"; }
         if (!live.nodes[n.id]) live.nodes[n.id] = makeNodeMetrics();
         if (!live.nodeMeta[n.id]) live.nodeMeta[n.id] = { temps: [], fans: [] };
@@ -494,7 +497,7 @@
           "latencyWindowSec","latencySampleN","latencyLowSample",
           "ttftP50","ttftP90","ttftP99", "tpotP50","tpotP90","tpotP99",
           "queue","queueP50","queueP90","queueP99",
-          "prefill","prefillP50","prefillP90","prefillP99","prefillTokPerS",
+          "prefill","prefillP50","prefillP90","prefillP99","prefillTokPerS","cacheHitRate",
           "decode","decodeP50","decodeP90","decodeP99",
           "itl","itlP50","itlP90","itlP99",
           "tpsWindowSec","tpsSustained","tpsSustainedWindowSec",
@@ -503,6 +506,7 @@
           "queueShareP90","waitingCapacity","saturated",
           "kvTokens","kvBytes","kvMaxConc",
           "stepsPerSec","mbu","mfu","mfuDelivered","mfuDrafterMissing",
+          "loadedModel","weightsGb",
           "emptyContentRate","emptyContentN","emptyContentTotal","toolCallN",
           "thinkingCharShare","thinkingSampleN","thinkingTruncatedN","spendWindowH",
           "ttfcP50","ttfcP90","ttfcP99","ttfcMean","ttfcSampleN",
@@ -558,7 +562,7 @@
       let act = 0;
       MODELS.forEach((m) => {
         // 任何有真实推理指标的后端(vLLM / llama.cpp) → 都参与节点活跃度推导
-        if (!(m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang")) return;
+        if (!(m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang" || m.metricsSource === "omlx")) return;
         if (!(m.nodes || []).includes(n.id)) return;
         const mm = live.models[m.id];
         if (!mm) return;
@@ -572,7 +576,7 @@
     });
     // ── cluster tps/kv：从 vLLM 真实模型指标聚合滚动（无 Prometheus range 源）──
     if (p.models) {
-      const vm = MODELS.filter((m) => (m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang") && live.models[m.id]);
+      const vm = MODELS.filter((m) => (m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang" || m.metricsSource === "omlx") && live.models[m.id]);
       const cTps = vm.reduce((a, m) => a + (live.models[m.id].tps.now || 0), 0);
       const cKv  = vm.length ? Math.max(...vm.map((m) => live.models[m.id].kv.now || 0)) : 0;
       live.cluster.tpsNow = cTps;

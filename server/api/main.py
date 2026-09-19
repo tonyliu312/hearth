@@ -37,6 +37,10 @@ NODEEXP_URL = os.environ.get("NODE_EXPORTER_URL", "http://host.docker.internal:9
 # 单次 scrape 稳定 3-5s,EC 偶发争用会更久。直采超时必须远高于此,否则后台
 # 双采(_atlas_node_live)任一次超时即把 Atlas 误判为 offline。
 NODEEXP_TIMEOUT = float(os.environ.get("NODE_EXPORTER_TIMEOUT", "12.0"))
+# 按节点直采(sources.node_exporter_url)的超时。这类节点多是经 SSH 反向隧道接入的
+# 笔记本:合盖时隧道可能半开,连接能建上但没有数据。超时必须短,否则每个 SSE tick
+# 都被拖住几秒。darwin 的 node_exporter 没有慢 hwmon,正常一次 scrape 远低于此值。
+NODEEXP_NODE_TIMEOUT = float(os.environ.get("NODE_EXPORTER_NODE_TIMEOUT", "2.5"))
 AM_URL      = os.environ.get("ALERTMANAGER_URL",  "http://host.docker.internal:9093")
 LITELLM_URL = os.environ.get("LITELLM_URL",       "http://host.docker.internal:4000")
 LITELLM_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
@@ -117,7 +121,15 @@ def _node_from_yaml(y: dict) -> dict:
         # the obs Prometheus can't reach (e.g. the obs host's own bridge-net
         # hairpin). Such a node keeps obs_node_label (GPU via obs DCGM) but
         # scrapes :9100 directly for CPU/mem/disk/net. Default: obs if labelled.
-        "node_source": src.get("node_metrics") or ("obs" if obs_label else "direct"),
+        # sources.node_exporter_url 优先:该节点自己的 node_exporter,按节点直采,既不经
+        # obs Prometheus、也不是 Hearth 宿主本机(例:MBP 的 :9100 经 SSH 反向隧道映射到
+        # 本机 127.0.0.1:19100)。这类节点没有任何 GPU 遥测源。
+        "node_source": ("exporter" if src.get("node_exporter_url")
+                        else src.get("node_metrics") or ("obs" if obs_label else "direct")),
+        "exporter_url": (src.get("node_exporter_url") or "").rstrip("/") or None,
+        # 笔记本会合盖/离家,离线是常态:alert_offline: false → 卡片照常显示 OFFLINE,
+        # 但不发 offline 告警(否则每轮一条 bad,还会推送)。
+        "alertOffline": y.get("alert_offline", True) is not False,
         "gpu": {"name": hw.get("gpu", "—"),
                 "mem":  hw.get("vram_gb", 0),
                 "fp16": hw.get("fp16_tflops", 0),
@@ -204,11 +216,13 @@ def _parse_labels(s: str) -> dict[str, str]:
     return out
 
 
-async def _scrape_node_exporter() -> dict[str, list[dict]]:
-    """抓一次宿主 node-exporter，按指标名归并 [{labels, value}]。"""
+async def _scrape_node_exporter(url: str | None = None,
+                                timeout: float | None = None) -> dict[str, list[dict]]:
+    """抓一次 node-exporter，按指标名归并 [{labels, value}]。默认是宿主本机。"""
     out: dict[str, list[dict]] = {}
     try:
-        r = await client.get(f"{NODEEXP_URL}/metrics", timeout=NODEEXP_TIMEOUT)
+        r = await client.get(f"{url or NODEEXP_URL}/metrics",
+                             timeout=timeout or NODEEXP_TIMEOUT)
         r.raise_for_status()
         for line in r.text.splitlines():
             if not line or line[0] == "#":
@@ -292,12 +306,22 @@ def _atlas_fans(scrape: dict) -> list[dict]:
 
 
 # CPU% / network rates need two-sample diff
-async def _atlas_node_live() -> dict:
-    s1 = await _scrape_node_exporter()
+async def _atlas_node_live(url: str | None = None, timeout: float | None = None) -> dict:
+    """两次采样算 CPU% / 网速。url 缺省 = Hearth 宿主本机(legacy 名 atlas);
+    给了 url 就是按节点直采(sources.node_exporter_url)。"""
+    ts1 = time.monotonic()
+    s1 = await _scrape_node_exporter(url, timeout)
     if not s1:
         return {}
     await asyncio.sleep(0.4)
-    s2 = await _scrape_node_exporter()
+    ts2 = time.monotonic()
+    s2 = await _scrape_node_exporter(url, timeout)
+    if not s2:
+        return {}
+    # 采样间隔取【两次请求发起】之差,不是写死 0.4:第一次 scrape 自身的耗时也在
+    # 间隔里。宿主的 hwmon collector 一次 3-5s(见 NODEEXP_TIMEOUT 注释),写死 0.4
+    # 会把网速放大约 10 倍;经隧道的节点也有几十毫秒往返。
+    span = max(0.05, ts2 - ts1)
 
     def cpu_total(s):
         idle = _sum(s.get("node_cpu_seconds_total", []), lambda l: l.get("mode") == "idle")
@@ -307,9 +331,24 @@ async def _atlas_node_live() -> dict:
     i2, t2 = cpu_total(s2)
     cpu = max(0.0, min(100.0, (1 - (i2 - i1) / (t2 - t1)) * 100)) if t2 > t1 else 0.0
 
+    darwin = any(x["labels"].get("sysname") == "Darwin" for x in s2.get("node_uname_info", []))
     memt = _sum(s2.get("node_memory_MemTotal_bytes", []))
     mema = _sum(s2.get("node_memory_MemAvailable_bytes", []))
-    mem = (1 - mema / memt) * 100 if memt else 0.0
+    if memt:
+        mem = (1 - mema / memt) * 100
+    elif darwin:
+        # macOS 的 node_exporter 没有 MemTotal/MemAvailable，只有 vm_stat 那套页面分类。
+        # 按「活动监视器 · 已用内存」口径：App 内存(internal - purgeable) + 联动 + 压缩。
+        # ⛔ 不能用 1 - free/total：macOS 把空闲内存拿去做文件缓存，free 常年只有几百 MB，
+        #    那样恒接近 100%。联动内存里包含 Metal 常驻的模型权重，正是要看的量。
+        mt_total = _sum(s2.get("node_memory_total_bytes", []))
+        used = (_sum(s2.get("node_memory_wired_bytes", []))
+                + _sum(s2.get("node_memory_compressed_bytes", []))
+                + max(0.0, _sum(s2.get("node_memory_internal_bytes", []))
+                      - _sum(s2.get("node_memory_purgeable_bytes", []))))
+        mem = min(100.0, used / mt_total * 100) if mt_total else 0.0
+    else:
+        mem = 0.0
 
     def fs(s, key):
         return _sum(s.get(key, []), lambda l: l.get("mountpoint") == "/")
@@ -317,13 +356,17 @@ async def _atlas_node_live() -> dict:
     dav = fs(s2, "node_filesystem_avail_bytes")
     disk = (1 - dav / dsz) * 100 if dsz else 0.0
 
+    # macOS 的 utun(VPN)/awdl/llw/anpi/bridge 等是虚拟口，流量与 en0 重复计数。只对
+    # darwin 追加，不改 Linux 节点的既有口径。
+    skip = r"lo|docker|veth|br-" + (r"|utun|awdl|llw|anpi|bridge|gif|stf|ap\d" if darwin else "")
+
     def net(s, key):
         return _sum(s.get(key, []),
-                    lambda l: not re.match(r"lo|docker|veth|br-", l.get("device", "")))
+                    lambda l: not re.match(skip, l.get("device", "")))
     rx = (net(s2, "node_network_receive_bytes_total") -
-          net(s1, "node_network_receive_bytes_total")) / 0.4 / 1024 / 1024
+          net(s1, "node_network_receive_bytes_total")) / span / 1024 / 1024
     tx = (net(s2, "node_network_transmit_bytes_total") -
-          net(s1, "node_network_transmit_bytes_total")) / 0.4 / 1024 / 1024
+          net(s1, "node_network_transmit_bytes_total")) / span / 1024 / 1024
 
     temps = _atlas_temps(s2)
     fans = _atlas_fans(s2)
@@ -429,7 +472,11 @@ async def _obs_node_live() -> dict[str, dict]:
 
 
 async def _node_payload() -> list[dict]:
-    obs_live, direct = await asyncio.gather(_obs_node_live(), _atlas_node_live())
+    exp_nodes = [n for n in NODES if n.get("node_source") == "exporter"]
+    obs_live, direct, *exp_lives = await asyncio.gather(
+        _obs_node_live(), _atlas_node_live(),
+        *[_atlas_node_live(n["exporter_url"], NODEEXP_NODE_TIMEOUT) for n in exp_nodes])
+    exp_live = {n["id"]: lv for n, lv in zip(exp_nodes, exp_lives)}
     # `direct` is the host that runs the Hearth api itself (scraped via the
     # api container's own /proc + /sys, not via obs Prometheus). The legacy
     # name "_atlas_node_live" is preserved for now to minimize diff.
@@ -442,7 +489,19 @@ async def _node_payload() -> list[dict]:
                 "tempMem": 0, "tempCpu": 0, "power": 0, "cpu": 0, "mem": 0,
                 "disk": 0, "netIn": 0, "netOut": 0, "rdmaIn": 0,
                 "rdmaOut": 0, "temps": [], "fans": []}
-        if n.get("node_source") == "direct":
+        if n.get("node_source") == "exporter":
+            # 按节点直采:只有 CPU/内存/磁盘/网络(+传感器,有才有)。没有任何 GPU 遥测源
+            # (无 DCGM;Apple GPU 利用率/功耗 node_exporter 不导出) → GPU 字段保持缺省,
+            # 由顶层 gpuTelemetry=False 让前端显示「—」,而不是「0 W / 0 °C」。
+            d = exp_live.get(n["id"]) or {}
+            live.update({k: d[k] for k in ("cpu", "mem", "disk", "netIn", "netOut",
+                                           "tempCpu", "temps", "fans") if k in d})
+            if n.get("kind") != "discrete" and d:
+                # 统一内存:显存占用就是内存占用(与 GB10 的 unified 同口径)
+                live["vramKind"] = "unified"
+                live["vram"] = d.get("mem", 0)
+            up = bool(d)
+        elif n.get("node_source") == "direct":
             live.update({k: discrete_gpu.get(k, 0)
                          for k in ("gpu", "vram", "tempGpu", "tempMem", "power")})
             live["vramKind"] = discrete_gpu.get("vramKind", "discrete")
@@ -456,7 +515,8 @@ async def _node_payload() -> list[dict]:
             up = True
         else:
             up = False   # node not in obs Prometheus job → honestly mark no-data
-        out.append({**{k: v for k, v in n.items() if k != "node_source"},
+        out.append({**{k: v for k, v in n.items() if k not in ("node_source", "exporter_url")},
+                    "gpuTelemetry": n.get("node_source") != "exporter",
                     "live": live, "up": up})
     return out
 
@@ -1337,7 +1397,8 @@ async def _discover() -> list[dict]:
             "framework": "—", "vram": 0, "ctx": 0,
             "identityUnverified": False, "identityCandidates": [],
             "_nodes": set(), "_aliases": set(), "_bases": [],
-            "up": False, "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": []})
+            "up": False, "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": [],
+            "omlx_bases": []})
         if not verified:
             mm["identityUnverified"] = True
             mm["identityCandidates"] = sorted(set(mm["identityCandidates"]) | set(cands))
@@ -1350,6 +1411,27 @@ async def _discover() -> list[dict]:
                 mm["_aliases"].add(r)
         if up_map.get(b):
             mm["up"] = True
+    # 运维声明的引擎端点(model_topology.<id>.metrics_bases)。网关下一跳不一定是引擎:
+    # 2026-09-17 起 DGX-Spark-* 走 LiteLLM → 本机 QoS 调度器(127.0.0.1:8018) → 两个
+    # vLLM 池，调度器的 /metrics 只有 qos_* 排队量，也不对外暴露池地址 —— 从网关
+    # api_base 自动发现永远摸不到引擎，只能在配置里声明。
+    # 只【追加】、不替换：声明的端点挂了(试验容器撤掉)只是分类不上，不会把模型判成
+    # down，也不会压掉网关那条 base。不参与上面的 _served_name/_primary —— 身份仍以
+    # 网关 base 为准(引擎自报名带 -exl3-trial 之类后缀，匹配不上任何路由)。
+    # 多个池走 _merge_scrape 按多副本求和：前提是【一条请求只落在一个池】(调度器
+    # elastic-isolated 模式即如此)。若调度器改成 prefill/decode 拆分(strict-pd/hybrid,
+    # 同一请求两个池都记一遍)，求和会重复计数，这里必须重新设计。
+    for mm in models.values():
+        topo = (HEARTH_CFG.get("model_topology") or {}).get(mm["id"]) or {}
+        for raw in topo.get("metrics_bases") or []:
+            b = str(raw).rstrip("/")
+            b = b[:-3] if b.endswith("/v1") else b
+            if b in mm["_bases"]:
+                continue
+            mm["_bases"].append(b)
+            host = _host_of(b)
+            if host in IP_TO_ID:
+                mm["_nodes"].add(IP_TO_ID[host])
     # up 判定:直接探后端为主(/metrics 或 /v1/models 可达即活),/health 仅做
     # 辅助 / 兜底——避免单点故障(网关 /health 偶发超时 22s)把所有模型误标
     # stopped。直接探测自给自足,网关挂了监控仍如实反映后端真相。
@@ -1366,6 +1448,9 @@ async def _discover() -> list[dict]:
             sc3 = await _scrape_sglang(b)
             if any(str(k).startswith("sglang:") for k in sc3) or sc3.get("__e2e_buckets"):
                 mm["sglang_bases"].append(b); mm["up"] = True
+                continue
+            if await _scrape_omlx(b):            # oMLX 没有 /metrics,认 /api/status
+                mm["omlx_bases"].append(b); mm["up"] = True
                 continue
             try:                                 # 无指标但 /v1/models 通 → 在线
                 r = await client.get(f"{b}/v1/models", timeout=3.0)
@@ -1384,6 +1469,9 @@ async def _discover() -> list[dict]:
         elif mm["sglang_bases"]:
             mm["framework"] = "SGLang"
             mm["ctx"] = await _ctx_of(mm["sglang_bases"][0])
+        elif mm["omlx_bases"]:
+            mm["framework"] = "oMLX"
+            mm["ctx"] = await _ctx_of(mm["omlx_bases"][0])
         if mm["_aliases"]:
             mm["tags"] = mm["tags"] + ["alias:" + ",".join(sorted(mm["_aliases"]))]
         mm["nodes"] = sorted(mm.pop("_nodes"))
@@ -1520,14 +1608,21 @@ _LLAMACPP_SCALARS = {
     "llamacpp:n_decode_total",
     "llamacpp:predicted_tokens_seconds",
     "llamacpp:prompt_tokens_seconds",
+    # 2026-09-18 补采:以下 llama.cpp 一直在导出,只是一直没接 —— 面板因此缺了
+    # prefill 吞吐 / 缓存命中 / 投机解码三块。
+    "llamacpp:prompt_tokens_cached_total",
+    "llamacpp:spec_decode_num_drafts_total",
+    "llamacpp:spec_decode_num_draft_tokens_total",
+    "llamacpp:spec_decode_num_accepted_tokens_total",
 }
 
 
 async def _scrape_llamacpp(base: str) -> dict:
     """直采 llama.cpp 原生 /metrics（与 vLLM 同 Prometheus 文本格式，前缀
-    llamacpp:）。返回所需标量。无 e2e/TTFT 直方图（llama.cpp 不暴露）→
-    p50/p95/p99/TTFT 留 0 诚实标"未测", 不伪造。"""
+    llamacpp:）。返回所需标量 + 投机解码每位置接受计数。无 e2e/TTFT 直方图
+    （llama.cpp 不暴露）→ 分位数/TTFT 一律【缺席】, 不伪造也不填 0。"""
     out: dict[str, float] = {}
+    spec_pos: dict[str, float] = {}
     try:
         r = await client.get(f"{base}/metrics", timeout=4.0)
         r.raise_for_status()
@@ -1537,16 +1632,24 @@ async def _scrape_llamacpp(base: str) -> dict:
             sp = line.rsplit(" ", 1)
             if len(sp) != 2:
                 continue
-            name = sp[0].split("{")[0]
-            if name not in _LLAMACPP_SCALARS:
-                continue
+            head = sp[0]
+            name = head.split("{")[0]
             try:
                 v = float(sp[1])
             except ValueError:
                 continue
-            out[name] = out.get(name, 0.0) + v
+            if name == "llamacpp:spec_decode_num_accepted_tokens_per_pos_total":
+                mp = re.search(r'position="([^"]+)"', head)
+                if mp:
+                    spec_pos[mp.group(1)] = spec_pos.get(mp.group(1), 0.0) + v
+            elif name in _LLAMACPP_SCALARS:
+                out[name] = out.get(name, 0.0) + v
     except Exception:
         return {}
+    # ⛔ 只在真有 llamacpp:* 标量时才附 __spec_pos:发现阶段用 `if sc2:` 判定这个
+    #    endpoint 是不是 llama.cpp,无条件塞一个键会把任何 endpoint 认成 llama.cpp。
+    if out and spec_pos:
+        out["__spec_pos"] = spec_pos
     return out
 
 
@@ -1558,18 +1661,54 @@ _SGLANG_SCALARS = {
     "sglang:inter_token_latency_seconds_sum", "sglang:inter_token_latency_seconds_count",
     "sglang:token_usage",
     "sglang:e2e_request_latency_seconds_sum", "sglang:e2e_request_latency_seconds_count",
+    "sglang:queue_time_seconds_sum", "sglang:queue_time_seconds_count",
 }
+
+
+# 口径已在 live SGLang（10.0.0.23:8004，DSPARK 投机解码）对照源码核过：
+#   queue   observe_queue_time(forward_entry - wait_queue_entry)，纯调度排队，
+#           与 vllm:request_queue_time_seconds 同义。
+#   tpot    ⚠️ 源头叫 inter_token_latency，但【不是】vLLM 那种原始到达间隔：
+#           metrics_collector.py observe_inter_token_latency 把一个输出块的间隔
+#           除以 num_new_tokens，再按 num_new_tokens 计入桶 —— 每个 token 记一次
+#           块内均摊耗时。所以 count ≈ decode token 数(实测 937431 vs 944469)，
+#           是【按 token 加权】的每 token 耗时分布，形状是 TPOT 不是 ITL。
+#           投机解码"一批近 0 间隔 + 少量长间隔"的特征被均摊抹掉了，拿它填 ITL
+#           行就是冒充。ITL 行对 SGLang 保持缺席。
+#   e2e / ttft 按 is_streaming 分两条序列，累积桶逐 le 相加仍是合法直方图。
+# per_stage_req_latency_seconds 另走下面的 stage 过滤，不在这张表里。
+_SGLANG_HISTS = {
+    "sglang:e2e_request_latency_seconds_bucket": "__e2e_buckets",
+    "sglang:time_to_first_token_seconds_bucket": "__ttft_buckets",
+    "sglang:inter_token_latency_seconds_bucket": "__tpot_buckets",
+    "sglang:queue_time_seconds_bucket": "__queue_buckets",
+}
+# prefill 耗时 = per_stage_req_latency_seconds{stage="prefill_forward"}：
+# req_time_stats.py set_prefill_finished_time 记的是 last_forward_entry_time →
+# prefill 完成，而 last_forward_entry_time 只在首次进 forward(或 retract 后)才写，
+# 所以【已覆盖全部 chunk】，与 vllm:request_prefill_time_seconds 同义。
+# ⛔ 同一族里还有两个 stage，都不能混进来：
+#   chunked_prefill  同一段时间按 chunk 切出来的子片(实测 count 532 < 请求数)，加上就重复计
+#   request_process  tokenizer→scheduler 入队那一跳(均值 1.6ms)，不是 prefill
+# ⛔ 所以 _sum/_count 也不能走 _SGLANG_SCALARS 按裸名累加 —— 那会把三个 stage 加在一起。
+# decode 没有对应量：DECODE_LOOP 未设 metrics_is_observed，/metrics 里根本没有。
+_SGLANG_PREFILL_STAGE = re.compile(r'(?:\{|,)stage="prefill_forward"(?:,|\})')
+_SGLANG_PREFILL = "__sglang_prefill_seconds"     # _lat_snapshot 会拼 _sum / _count
 
 
 async def _scrape_sglang(base: str) -> dict:
     """直采 SGLang 原生 /metrics（需启动加 --enable-metrics；前缀 sglang:）。
-    指标比 llama.cpp 丰富，含 TTFT / inter-token / e2e 直方图，接近 vLLM。
+    含 TTFT / 每 token 耗时 / e2e / 排队 / 分阶段直方图，接近 vLLM。
 
-    ⚠️ 注意：基于 SGLang 官方文档的指标名实现，**尚未对 live SGLang 实例
-    端到端验证**（开发集群无 SGLang 后端）。若你的 SGLang 版本指标名不同
-    导致显示异常，请开 issue 反馈实际 `sglang:*` 名称，我们快速适配。"""
+    优先用实时 decode counter 计算生成中的速度；旧版无该指标时回退到
+    generation_tokens_total。prefill_compute / prefill_cache 不计入生成速度。
+
+    queue / per_stage 带 tp_rank 标签。默认只有 tp_rank 0 上报
+    (enable_metrics_for_all_schedulers=False)，按标签相加正确；若开了该开关且是
+    纯 TP，各 rank 会重复记同一批请求 —— 均值与分位数不变，样本数会虚高 N 倍。"""
     out: dict[str, float] = {}
-    e2e_b: dict[str, float] = {}
+    hists: dict[str, dict[str, float]] = {k: {} for k in _SGLANG_HISTS.values()}
+    hists["__prefill_buckets"] = {}
     try:
         r = await client.get(f"{base}/metrics", timeout=4.0)
         r.raise_for_status()
@@ -1584,15 +1723,151 @@ async def _scrape_sglang(base: str) -> dict:
                 v = float(sp[1])
             except ValueError:
                 continue
-            if name == "sglang:e2e_request_latency_seconds_bucket":
+            hkey = _SGLANG_HISTS.get(name)
+            if name == "sglang:realtime_tokens_total":
+                mm = re.search(r'(?:\{|,)mode="([^"]+)"(?:,|})', head)
+                if mm and mm.group(1) == "decode":
+                    key = "__sglang_decode_tokens_total"
+                    out[key] = out.get(key, 0.0) + v
+                elif mm and mm.group(1) == "prefill_compute":
+                    # 实算 prefill token，已排除 prefix cache 命中(命中的记在
+                    # prefill_cache)，与 vLLM 那边 iteration_sum - generation 同口径
+                    key = "__sglang_prefill_compute_tokens_total"
+                    out[key] = out.get(key, 0.0) + v
+            elif hkey:
                 mle = re.search(r'le="([^"]+)"', head)
                 if mle:
-                    e2e_b[mle.group(1)] = e2e_b.get(mle.group(1), 0.0) + v
+                    hb = hists[hkey]
+                    hb[mle.group(1)] = hb.get(mle.group(1), 0.0) + v
+            elif name.startswith("sglang:per_stage_req_latency_seconds_"):
+                if not _SGLANG_PREFILL_STAGE.search(head):
+                    continue
+                suf = name[len("sglang:per_stage_req_latency_seconds"):]
+                if suf == "_bucket":
+                    mle = re.search(r'le="([^"]+)"', head)
+                    if mle:
+                        hb = hists["__prefill_buckets"]
+                        hb[mle.group(1)] = hb.get(mle.group(1), 0.0) + v
+                elif suf in ("_sum", "_count"):
+                    key = _SGLANG_PREFILL + suf
+                    out[key] = out.get(key, 0.0) + v
             elif name in _SGLANG_SCALARS:
                 out[name] = out.get(name, 0.0) + v
     except Exception:
         return {}
-    out["__e2e_buckets"] = e2e_b
+    if "__sglang_decode_tokens_total" not in out and "sglang:generation_tokens_total" in out:
+        out["__sglang_decode_tokens_total"] = out["sglang:generation_tokens_total"]
+    out.update(hists)
+    return out
+
+
+# oMLX(Apple Silicon 上的 MLX 推理服务, MBP 2026-09-17 起用它替掉 llama-server)。
+# ⛔ 它【没有】Prometheus 端点:/metrics 返回 404、/admin/api/stats 要登录(401)。
+# 免鉴权的 /api/status 是唯一能拿到运行数据的地方,给的是累计计数器 + 自报均值。
+# 因此这个后端只能出吞吐/请求率/并发,没有 TTFT/TPOT/延迟分位数/KV 池用量。
+_OMLX_KEYS = ("total_requests", "active_requests", "waiting_requests",
+              "total_prompt_tokens", "total_completion_tokens", "total_cached_tokens",
+              "cache_efficiency", "avg_prefill_tps", "avg_generation_tps",
+              "models_loaded", "uptime_seconds",
+              "model_memory_used")        # 权重常驻字节数(oMLX 自报)
+
+
+# oMLX 速率用【滑动窗口】而不是 _tps_rollup 那种重置式锚点:重置式每出一次数就把
+# 锚点归零,接下来十几秒没有长窗口值可用,读数会在真值和 0/尖峰之间来回跳
+# (2026-09-18 实测:14.4 → 0 → 13.3 → 119.2 → 16.6)。滑动窗口始终以窗口内最早的
+# 一份样本为基准,读数连续。
+_OMLX_HIST: dict[str, deque] = {}
+_OMLX_WIN = 45.0        # 滑动窗口上限(秒):跳变计数器要够长才稳,又不能太旧
+_OMLX_MIN = 8.0         # 窗口短于此不出数(一次完成事件就能把短窗口拉成尖峰)
+_OMLX_MAX_SNAPS = 200   # 防止高频调用把 deque 撑大
+
+
+def _omlx_rates(base: str, snap: dict, now: float) -> tuple:
+    """(tok/s, req/s, 窗口秒)。窗口不够长 / 抓取失败 / 计数器回退 → (None, None, None)。"""
+    cur_t = snap.get("omlx:total_completion_tokens")
+    cur_r = snap.get("omlx:total_requests")
+    if cur_t is None or cur_r is None:          # 抓取失败 → 不动历史
+        return (None, None, None)
+    h = _OMLX_HIST.setdefault(base, deque())
+    while h and now - h[0][0] > _OMLX_WIN:
+        h.popleft()
+    old = h[0] if h else None
+    h.append((now, cur_t, cur_r))
+    while len(h) > _OMLX_MAX_SNAPS:
+        h.popleft()
+    if old is None:
+        return (None, None, None)
+    if cur_t < old[1] or cur_r < old[2]:        # 引擎重启 → 丢历史重来
+        h.clear(); h.append((now, cur_t, cur_r))
+        return (None, None, None)
+    age = now - old[0]
+    if age < _OMLX_MIN:
+        return (None, None, None)
+    return ((cur_t - old[1]) / age, (cur_r - old[2]) / age, round(age, 1))
+
+
+# llama.cpp 的 tokens_predicted_* 与 oMLX 同病:【只在请求完成时跳】。2026-09-18 实测
+# 生成中连抓三次 tokens_predicted_total 纹丝不动(而 n_decode_total 每次 +1),所以
+# 1.2s 窗口算出来恒是 0 —— 面板上 tps/TPOT 长期显示 0 就是这么来的。改走滑动窗口。
+_LC_HIST: dict[str, deque] = {}
+_LC_WIN = 45.0          # 同 _OMLX_WIN:跳变计数器要够长才稳,又不能太旧
+_LC_MIN = 8.0
+_LC_MAX_SNAPS = 200
+
+
+def _lc_rates(base: str, snap: dict, now: float) -> tuple:
+    """(Δ生成 token, Δ生成耗时秒, 窗口秒)。窗口不够 / 抓取失败 / 计数器回退 → 全 None。
+
+    返回【原始增量】而不是算好的速率:多副本要按 token 数加权合并 TPOT,
+    各自算完再平均是错的(短请求多的那台会被算重)。"""
+    cur_t = snap.get("llamacpp:tokens_predicted_total")
+    cur_s = snap.get("llamacpp:tokens_predicted_seconds_total")
+    if cur_t is None or cur_s is None:          # 抓取失败 → 不动历史
+        return (None, None, None)
+    h = _LC_HIST.setdefault(base, deque())
+    while h and now - h[0][0] > _LC_WIN:
+        h.popleft()
+    old = h[0] if h else None
+    h.append((now, cur_t, cur_s))
+    while len(h) > _LC_MAX_SNAPS:
+        h.popleft()
+    if old is None:
+        return (None, None, None)
+    if cur_t < old[1] or cur_s < old[2]:        # 引擎重启 → 丢历史重来
+        h.clear(); h.append((now, cur_t, cur_s))
+        return (None, None, None)
+    age = now - old[0]
+    if age < _LC_MIN:
+        return (None, None, None)
+    return (cur_t - old[1], cur_s - old[2], round(age, 1))
+
+
+async def _scrape_omlx(base: str) -> dict:
+    """直采 oMLX 的 /api/status。返回 omlx:* 标量;不是 oMLX 就返回 {}。
+
+    ⚠️ total_requests 在【准入】时自增,不是完成时(实测 active_requests=2 时它仍在涨),
+    所以它只能算请求率,不能拿来反推每请求的任何量。"""
+    try:
+        r = await client.get(f"{base}/api/status", timeout=3.0)
+        r.raise_for_status()
+        d = r.json()
+    except Exception:
+        return {}
+    # 认指标键而不是认 version/owned_by 字段:别的服务也可能有 /api/status
+    if not isinstance(d, dict) or "total_completion_tokens" not in d or "loaded_models" not in d:
+        return {}
+    out: dict = {}
+    for k in _OMLX_KEYS:
+        try:
+            out[f"omlx:{k}"] = float(d.get(k) or 0)
+        except (TypeError, ValueError):
+            continue
+    # 实际加载的权重身份。⛔ 不能靠 /v1/models 的 id:这套部署把 served-name 直接
+    # 设成了路由名(实测 2026-09-18 返回 "mbp-none"),按它看永远不知道载的是哪个模型
+    # —— 而 MBP 上的模型一天换了三次(Qwen3.6-35B → Qwen3.5-2B → LFM2.5-1.2B)。
+    _lm = d.get("default_model") or ((d.get("loaded_models") or [None])[0])
+    if _lm:
+        out["__omlx_model"] = str(_lm)
     return out
 
 
@@ -1707,6 +1982,11 @@ def _merge_scrape(dicts: list[dict]) -> dict:
                 sub = acc.setdefault(k, {})
                 for sk, c in (v or {}).items():
                     sub[sk] = sub.get(sk, 0.0) + c
+            elif isinstance(v, str):
+                # 字符串(oMLX 自报的已加载模型名)不能相加:保留第一个非空的。
+                # 多副本理论上载的是同一个权重,不一致时以先抓到的为准,不拼接。
+                if not acc.get(k):
+                    acc[k] = v
             else:
                 acc[k] = acc.get(k, 0.0) + v
     return acc
@@ -2131,6 +2411,21 @@ def _tps_sustained(bases: list[str], roll: dict) -> tuple:
 _LAT_HIST: dict[str, deque] = {}
 _LAT_MAX_WIN = 300.0        # 窗口上限(秒)。取窗口内【最老】的一份做基准，
                             # 所以稳态下窗口自然趋近这个值，样本量最大。
+                            #
+                            # 2026-09-04 曾改 900 想让 p99 凑够 100 样本，当天回退。
+                            # 拉长窗口【不产生信息】，只是把不同负载状态的样本混成
+                            # 一个总体，还把十分钟前的结果当"当前"报出去。
+                            #
+                            # ⚠️ 理由要写对：第一版注释写的是"突发期有排队、空闲期
+                            # 无排队，混算会串味"，那是【错的】—— 实测本机几乎不排队
+                            # (vllm:request_queue_time_seconds le=0.3 占 99.91%,
+                            # 平均排队 20.2ms)。真实机制是 e2e 由【输出 token 数】
+                            # 主导，空闲期问的往往是长问题、反而更慢，混算会让结论反号。
+                            # 结论不变，但别照着错理由去改代码。
+                            #
+                            # 更根本的:实测 24h 内 287 个 300 秒窗口, n>=100 的只有
+                            # 9 个(3.1%), n=1 的占 69% —— 这个流量下 p99 在数学上
+                            # 就不可算, 缺席是正确终态, 不需要任何改动让它出现。
 _LAT_MAX_SNAPS = 400        # 防止高频调用把 deque 撑大(按时间 trim 之外的兜底)
 _LAT_BUCKETS = ("__e2e_buckets", "__ttft_buckets", "__tpot_buckets",
                 "__queue_buckets", "__prefill_buckets", "__decode_buckets",
@@ -2147,21 +2442,28 @@ _LAT_MEANS = {
 }
 
 
-# SGLang 暴露的是同类指标、不同前缀。该分支【与 vLLM 有完全相同的缺陷】，
-# 一并按同一口径修。注意整个 SGLang 分支仍未在 live 实例上端到端验证过
-# (开发集群无 SGLang 后端)，本次修改沿用 vLLM 已验证的逻辑，未新增未验证的假设。
+# SGLang 暴露的是同类指标、不同前缀，走同一套窗口差分。
+# 2026-09-15 已在 live SGLang 上对照源码核过口径(见 _SGLANG_HISTS 上方注释)。
+# 此前这里只配了 ttft/tpot/e2e，分解表的 Queue/Prefill 与全部分位数因此恒为「—」——
+# 不是引擎不导出，是没接。decode / itl 才是引擎真的不导出，字段缺席。
 _LAT_MEANS_SGLANG = {
     "ttft": "sglang:time_to_first_token_seconds",
-    "tpot": "sglang:inter_token_latency_seconds",
+    "tpot": "sglang:inter_token_latency_seconds",   # 按 token 加权，见 _SGLANG_HISTS
+    "queue": "sglang:queue_time_seconds",
+    "prefill": _SGLANG_PREFILL,
     "e2e": "sglang:e2e_request_latency_seconds",
 }
 
 
-# 算 prefill 吞吐要用的原始计数器。放进同一份窗口快照，才能与延迟指标同源同窗。
-_LAT_EXTRA_VLLM = ("vllm:iteration_tokens_total_sum", "vllm:generation_tokens_total")
+# (短名, 差分桶键, 小数位)。按引擎只列【实际导出】的族，不在表里的族字段整个缺席。
+_LAT_FAMILIES_VLLM = (("ttft", "__ttft_buckets", 0), ("tpot", "__tpot_buckets", 1),
+                      ("queue", "__queue_buckets", 1), ("prefill", "__prefill_buckets", 1),
+                      ("decode", "__decode_buckets", 1), ("itl", "__itl_buckets", 1))
+_LAT_FAMILIES_SGLANG = (("ttft", "__ttft_buckets", 0), ("tpot", "__tpot_buckets", 1),
+                        ("queue", "__queue_buckets", 1), ("prefill", "__prefill_buckets", 1))
 
 
-def _lat_snapshot(merged: dict, means: dict, extra: tuple = ()) -> dict:
+def _lat_snapshot(merged: dict, means: dict) -> dict:
     """从一次(已跨副本合并的)抓取里抠出算延迟要用的全部累积量。"""
     snap: dict = {"b": {}, "s": {}}
     for k in _LAT_BUCKETS:
@@ -2169,13 +2471,11 @@ def _lat_snapshot(merged: dict, means: dict, extra: tuple = ()) -> dict:
     for base in means.values():
         for suf in ("_sum", "_count"):
             snap["s"][base + suf] = float(merged.get(base + suf, 0.0) or 0.0)
-    for name in extra:
-        snap["s"][name] = float(merged.get(name, 0.0) or 0.0)
     return snap
 
 
 def _lat_window(key: str, merged: dict, now: float, means: dict | None = None,
-                e2e_prefix: str = "vllm", extra: tuple = ()) -> dict | None:
+                e2e_prefix: str = "vllm") -> dict | None:
     """滑动窗口差分。返回 差分桶 + 窗口均值 + 窗口长度 + 样本数；不可用返回 None。
 
     ⛔ 锚点建在【_merge_scrape 之后】的口径上（跨副本已求和）。副作用：某个副本
@@ -2190,7 +2490,7 @@ def _lat_window(key: str, merged: dict, now: float, means: dict | None = None,
     """
     means = means or _LAT_MEANS
     hist = _LAT_HIST.setdefault(key, deque())
-    cur = _lat_snapshot(merged, means, extra)
+    cur = _lat_snapshot(merged, means)
     base = None
     # 取窗口内最老的一份做基准；顺手 trim 掉过期的
     while hist and now - hist[0][0] > _LAT_MAX_WIN:
@@ -2229,13 +2529,11 @@ def _lat_window(key: str, merged: dict, now: float, means: dict | None = None,
     # ⚠️ 累加器不能叫 means —— 那会遮蔽同名入参，循环立刻在空字典上迭代，
     # 所有窗口均值静默丢成 0（而 0 恰好会被读成「延迟 0 毫秒」）。
     out_means: dict = {}
-    out_sums: dict = {}          # 每族的 Δsum(秒)：prefill 吞吐要原始量，不是均值
     counts: dict = {}
     for short, base_name in means.items():
         dc = cur["s"][base_name + "_count"] - b_snap["s"][base_name + "_count"]
         ds = cur["s"][base_name + "_sum"] - b_snap["s"][base_name + "_sum"]
         counts[short] = int(dc)
-        out_sums[short] = ds
         if dc > 0:
             out_means[short] = ds / dc * 1000.0
     # 样本数用 e2e(按请求计)；ITL 是按 token 间隔计的，量级不同，不拿它当请求数
@@ -2243,8 +2541,7 @@ def _lat_window(key: str, merged: dict, now: float, means: dict | None = None,
     n = int(cur["s"].get(_e2e_cnt, 0.0) - b_snap["s"].get(_e2e_cnt, 0.0))
     if n <= 0 and not out_means:
         return None                     # 窗口内没有完成的请求 → 整组缺席
-    return {"b": diff_b, "mean": out_means, "n": counts, "sum": out_sums,
-            "d": {k: cur["s"].get(k, 0.0) - b_snap["s"].get(k, 0.0) for k in extra},
+    return {"b": diff_b, "mean": out_means, "n": counts,
             "windowSec": round(now - b_ts, 1), "sampleN": max(0, n)}
 
 
@@ -2274,7 +2571,72 @@ def _put_q(live: dict, name: str, buckets: dict, n: int, q: float, nd: int) -> N
         live[name] = round(_hquant(buckets, q) * 1000, nd)
 
 
-def _spec_stats(a: dict, b: dict) -> dict | None:
+def _put_latency(live: dict, lat: dict, families: tuple) -> None:
+    """窗口元信息 + e2e 分位数 + 各族 均值/p50/p90/p99。vLLM 与 SGLang 共用 ——
+    以前两个分支各写一份，SGLang 那份只抄了 ttft/tpot 均值，分解表因此整片空着。"""
+    _lb, _lm, _ln = lat["b"], lat["mean"], lat["n"]
+    # 窗口长度与样本数必须暴露:读数的人要能判断这个 p99 是几条样本
+    # 撑起来的。样本数按【请求】计(e2e),ITL 是按 token 间隔计的,
+    # 量级不同,不拿它冒充请求数。
+    live["latencyWindowSec"] = lat["windowSec"]
+    live["latencySampleN"] = lat["sampleN"]
+    # 样本偏少时仍给值,但标注可疑 —— 与 sloJointWide 同一套做法
+    # (给值+标注,而不是藏起来)。数学上无意义的那些分位数才真的缺席。
+    live["latencyLowSample"] = lat["sampleN"] < _LOW_SAMPLE_N
+    # e2e 这组历史字段沿用 p50/p95/p99 命名(不动),但语义已从
+    # 「开机以来」修正为「窗口内」。
+    for _q, _n in ((0.50, "p50"), (0.95, "p95"), (0.99, "p99")):
+        _put_q(live, _n, _lb["__e2e_buckets"], _ln.get("e2e", 0), _q, 0)
+    # 均值同样是窗口差分(Δsum/Δcount),与分位数同源同窗 —— 一半窗口
+    # 一半生命周期比全错更难查。⛔ 均值缺失时也不能填 0
+    # (同「延迟 0 毫秒」那类误读),没有就整个不给。
+    # 逐族取各自的样本数:ITL 是按 token 间隔计的,比请求数大两个数量级,
+    # 用请求数去判定它会把本来足够可信的 ITL 分位数误藏掉。
+    for _k, _bk, _nd in families:
+        if _k in _lm:
+            live[_k] = round(_lm[_k], 1)
+        for _q, _suf in ((0.50, "P50"), (0.90, "P90"), (0.99, "P99")):
+            _put_q(live, _k + _suf, _lb[_bk], _ln.get(_k, 0), _q, _nd)
+
+
+def _put_saturation(live: dict, waiting_min: float) -> None:
+    """饱和提示:排队时间占了 TTFT 的大头 + 两次采样都有请求在等 →
+    再加负载已经不划算(实测 QPS 1.0→2.0 吞吐只涨 25%,而 TTFT p90
+    涨了一个数量级,多出来的时间几乎全花在排队上)。
+    "持续"在单次调用内只能取两次采样都 > 0(调用方传两次采样的较小值) ——
+    这是本接口能拿到的最强证据,不做跨调用状态。
+
+    queueP90/ttftP90 可能因样本不足而缺席 → 派生量跟着缺席,
+    不用 0 顶替(那会让"排队占比 0%"看起来像系统很健康)。"""
+    if live.get("queueP90") is None or not live.get("ttftP90"):
+        return
+    _qr = live["queueP90"] / live["ttftP90"]
+    live["queueShareP90"] = round(_qr * 100, 1)
+    live["saturated"] = bool(waiting_min > 0
+                             and _qr > float(_SLO.get("queue_share_warn", 0.5)))
+
+
+def _put_prefill_tps(live: dict, tokens: float, seconds: float) -> None:
+    """prefill 吞吐(tok/s)，只给【生命周期】口径(与 _spec_stats 的 perPos 同理)。
+    入参是第二次抓取的累积值：实算 prefill token 总数、prefill 耗时总和(秒)。
+
+    ⛔ 不能做滑动窗口差分：分子【每个 chunk 算完就累加】，分母要等整个 prefill
+    【结束才落一次】。1M 上下文的一次 prefill 要 100-170s，与 300s 窗口同一量级 ——
+    窗口末尾若有一条还在 prefill，token 进来了、耗时没进来，读数就炸。
+    2026-09-15 实测 SGLang 窗口 n=5 时报 34,059 tok/s，同期 70 分钟长窗口 1177、
+    生命周期约 1300，虚高 25 倍以上；耗时落地的下一个窗口又会反向偏低。
+    vLLM 同病：iteration_tokens 每步累加，request_prefill_time 请求结束才记。
+    这两个计数器之间没有按请求对齐的办法，样本数门槛也挡不住(一条在途长 prefill
+    就够把几十条短请求的比值带偏)。
+    也不用 Δtoken / 窗口秒数：那个没有错位，但量的是负载(空闲时趋近 0)，不是引擎速度。
+
+    ⚠️ 分母是【跨请求求和】的：并发时各请求在墙钟上重叠，所以这是【每请求归一化】
+    的速率，不是墙钟吞吐。别拿它跟 tps 比 —— 界面上也标了这句。"""
+    if tokens > 0 and seconds > 0:
+        live["prefillTokPerS"] = round(tokens / seconds, 0)
+
+
+def _spec_stats(a: dict, b: dict, prefix: str = "vllm") -> dict | None:
     """投机解码(speculative decoding)派生指标。未开投机解码 → 引擎不暴露这批
     counter → 返回 None,前端据此整块不渲染(而不是显示 0% —— 那是伪造)。
 
@@ -2290,15 +2652,15 @@ def _spec_stats(a: dict, b: dict) -> dict | None:
       perPos        每位置接受率 = per_pos_total[i] / drafts_total
     perPos / tokensPerStep 只给生命周期口径:一个窗口约 16 步,窗口内的
     每位置接受率量化粒度是 1/16,噪声比信号大。"""
-    drafts = b.get("vllm:spec_decode_num_drafts_total", 0.0)
-    dtok = b.get("vllm:spec_decode_num_draft_tokens_total", 0.0)
-    acc = b.get("vllm:spec_decode_num_accepted_tokens_total", 0.0)
+    drafts = b.get(f"{prefix}:spec_decode_num_drafts_total", 0.0)
+    dtok = b.get(f"{prefix}:spec_decode_num_draft_tokens_total", 0.0)
+    acc = b.get(f"{prefix}:spec_decode_num_accepted_tokens_total", 0.0)
     pos = b.get("__spec_pos") or {}
     if drafts <= 0:
         return None                     # 未开投机解码 / 开了但零流量 → 不伪造
 
-    d_dtok = _rate(a, b, "vllm:spec_decode_num_draft_tokens_total", 1.0)
-    d_acc = _rate(a, b, "vllm:spec_decode_num_accepted_tokens_total", 1.0)
+    d_dtok = _rate(a, b, f"{prefix}:spec_decode_num_draft_tokens_total", 1.0)
+    d_acc = _rate(a, b, f"{prefix}:spec_decode_num_accepted_tokens_total", 1.0)
     now = round(d_acc / d_dtok * 100, 1) if d_dtok > 0 else None
 
     # position 是字符串标签,必须按整数排序 —— 字典序下 "10" < "2",
@@ -2321,6 +2683,7 @@ async def models_list():
     vbases = sorted({b for m in disco for b in m.get("vllm_bases", [])})
     lbases = sorted({b for m in disco for b in m.get("llamacpp_bases", [])})
     gbases = sorted({b for m in disco for b in m.get("sglang_bases", [])})
+    obases = sorted({b for m in disco for b in m.get("omlx_bases", [])})
     # 2026-08-29: dt 原为硬编码 0.5, 但真实间隔 = sleep + 两轮【串行】抓取耗时。
     # 抓取耗时被漏算 -> dt 偏小 -> 速率系统性偏高(实测虚高约 2 倍:
     # 持续 61 tok/s 显示成 129)。改为用 monotonic 实测间隔。
@@ -2330,18 +2693,26 @@ async def models_list():
     s1 = {b: await _scrape_vllm(b) for b in vbases}
     l1 = {b: await _scrape_llamacpp(b) for b in lbases}
     g1 = {b: await _scrape_sglang(b) for b in gbases}
+    o1 = {b: await _scrape_omlx(b) for b in obases}
     await asyncio.sleep(1.2)
     s2 = {b: await _scrape_vllm(b) for b in vbases}
     l2 = {b: await _scrape_llamacpp(b) for b in lbases}
     g2 = {b: await _scrape_sglang(b) for b in gbases}
+    o2 = {b: await _scrape_omlx(b) for b in obases}
     _dt_real = max(1e-3, time.monotonic() - _t0)
     _t_now = time.monotonic()           # 持续吞吐锚点时刻,整轮统一
     _tps_roll = _tps_rollup(s2, _t_now)  # 整轮一次性推进锚点(不可下放进循环)
+    # oMLX 的计数器【只在请求完成时跳一次】(实测 active=2 时连续几秒 Δ=0,完成瞬间
+    # 一次 +47/+168) → 走滑动窗口,整轮一次性推进(同 _tps_rollup 的理由)。
+    _omlx_rate = {b: _omlx_rates(b, o2.get(b) or {}, _t_now) for b in obases}
+    # llama.cpp 同理(生成 token 计数器只在请求完成时跳),整轮一次性推进
+    _lc_rate = {b: _lc_rates(b, l2.get(b) or {}, _t_now) for b in lbases}
     out = []
     for m in disco:
         vb = m.get("vllm_bases") or []
         lb = m.get("llamacpp_bases") or []
         gb = m.get("sglang_bases") or []
+        ob = m.get("omlx_bases") or []
         base_keys = ("id", "display", "vendor", "kind", "params", "quant",
                      "ctx", "framework", "nodes", "vram", "route", "tags",
                      "identityUnverified", "identityCandidates")
@@ -2355,7 +2726,7 @@ async def models_list():
             kv = b.get("vllm:kv_cache_usage_perc", 0) * 100 / max(1, len(vb))
             # 全部延迟量走【滑动窗口差分】。None = 刚起/引擎重启/窗口内无请求,
             # 此时整组延迟字段缺席 —— 不填 0(会被读成"延迟 0 毫秒")。
-            lat = _lat_window(m["id"], b, _t_now, extra=_LAT_EXTRA_VLLM)
+            lat = _lat_window(m["id"], b, _t_now)
             tps_sus, tps_win = _tps_sustained(vb, _tps_roll)
             running = _gauge(a, b, "vllm:num_requests_running")
             waiting = _gauge(a, b, "vllm:num_requests_waiting")
@@ -2370,81 +2741,40 @@ async def models_list():
                     "tpsWindowSec": round(dt, 2),
                     "tpsSustained": tps_sus, "tpsSustainedWindowSec": tps_win}
             if lat:
-                _lb, _lm = lat["b"], lat["mean"]
-                # 窗口长度与样本数必须暴露:读数的人要能判断这个 p99 是几条样本
-                # 撑起来的。样本数按【请求】计(e2e),ITL 是按 token 间隔计的,
-                # 量级不同,不拿它冒充请求数。
-                _ln = lat["n"]
-                live["latencyWindowSec"] = lat["windowSec"]
-                live["latencySampleN"] = lat["sampleN"]
-                # 样本偏少时仍给值,但标注可疑 —— 与 sloJointWide 同一套做法
-                # (给值+标注,而不是藏起来)。数学上无意义的那些分位数才真的缺席。
-                live["latencyLowSample"] = lat["sampleN"] < _LOW_SAMPLE_N
-                # e2e 这组历史字段沿用 p50/p95/p99 命名(不动),但语义已从
-                # 「开机以来」修正为「窗口内」。
-                for _q, _n in ((0.50, "p50"), (0.95, "p95"), (0.99, "p99")):
-                    _put_q(live, _n, _lb["__e2e_buckets"], _ln.get("e2e", 0), _q, 0)
-                # 均值同样是窗口差分(Δsum/Δcount),与分位数同源同窗 —— 一半窗口
-                # 一半生命周期比全错更难查。⛔ 均值缺失时也不能填 0
-                # (同「延迟 0 毫秒」那类误读),没有就整个不给。
-                # 逐族取各自的样本数:ITL 是按 token 间隔计的,比请求数大两个数量级,
-                # 用请求数去判定它会把本来足够可信的 ITL 分位数误藏掉。
-                # prefill 吞吐(tok/s)。业界不用【阶段耗时】衡量 prefill/decode 性能:
-                # 原始耗时随 prompt/输出长度线性变化，量的是负载不是引擎速度
-                # (实测 code 那条输出 1907 token 用约 19s、structured 那条 414 token
-                #  用约 5s，decode 耗时差 4 倍而速度几乎一样 99.8 vs 87.7 t/s)。
-                # prefill 看吞吐，decode 看 ms/token —— decode 一侧的对照就是同表下面
-                # 的 TPOT 与 ITL，不在 decode 行重复造一个吞吐。
-                #
-                # ⛔ 分子必须用 iteration_sum - generation(vLLM 的
-                # prompt_token_stats.computed，见 loggers.py:1205-1208)，这是【实算的】
-                # prefill token，天然排除 prefix cache 命中。
-                # ⛔ 不能用 prompt_tokens_total：本机实测 prefix cache 命中率 93.4%，
-                # 该口径 61.6M 对实算 4.09M，会把吞吐夸大约 15 倍。这不是"日后才会
-                # 分叉"，是当前就错。实算值恰好等于
-                # prompt_tokens_total - prompt_tokens_cached_total，两条路径互为佐证。
-                #
-                # ⚠️ 分母 request_prefill_time_seconds_sum 是【跨请求求和】的：并发时
-                # 各请求在墙钟上重叠，所以这是【每请求归一化】的速率，不是墙钟吞吐。
-                # 别拿它跟 tps 比 —— 界面上也标了这句。
-                _pf_sec = lat["sum"].get("prefill", 0.0)
-                _pf_tok = (lat["d"].get("vllm:iteration_tokens_total_sum", 0.0)
-                           - lat["d"].get("vllm:generation_tokens_total", 0.0))
-                if _pf_sec > 0 and _pf_tok > 0:      # 窗口内无 prefill → 字段缺席
-                    live["prefillTokPerS"] = round(_pf_tok / _pf_sec, 0)
-                for _k, _bk, _nd in (("ttft", "__ttft_buckets", 0),
-                                     ("tpot", "__tpot_buckets", 1),
-                                     ("queue", "__queue_buckets", 1),
-                                     ("prefill", "__prefill_buckets", 1),
-                                     ("decode", "__decode_buckets", 1),
-                                     ("itl", "__itl_buckets", 1)):
-                    if _k in _lm:
-                        live[_k] = round(_lm[_k], 1)
-                    for _q, _suf in ((0.50, "P50"), (0.90, "P90"), (0.99, "P99")):
-                        _put_q(live, _k + _suf, _lb[_bk], _ln.get(_k, 0), _q, _nd)
+                # 窗口元信息 / e2e / 各族均值与分位数，口径注释都在 _put_latency 里
+                _put_latency(live, lat, _LAT_FAMILIES_VLLM)
+            # prefill 吞吐(tok/s)。业界不用【阶段耗时】衡量 prefill/decode 性能:
+            # 原始耗时随 prompt/输出长度线性变化，量的是负载不是引擎速度
+            # (实测 code 那条输出 1907 token 用约 19s、structured 那条 414 token
+            #  用约 5s，decode 耗时差 4 倍而速度几乎一样 99.8 vs 87.7 t/s)。
+            # prefill 看吞吐，decode 看 ms/token —— decode 一侧的对照就是同表下面
+            # 的 TPOT 与 ITL，不在 decode 行重复造一个吞吐。
+            #
+            # ⛔ 分子必须用 iteration_sum - generation(vLLM 的
+            # prompt_token_stats.computed，见 loggers.py:1205-1208)，这是【实算的】
+            # prefill token，天然排除 prefix cache 命中。
+            # ⛔ 不能用 prompt_tokens_total：本机实测 prefix cache 命中率 93.4%，
+            # 该口径 61.6M 对实算 4.09M，会把吞吐夸大约 15 倍。这不是"日后才会
+            # 分叉"，是当前就错。实算值恰好等于
+            # prompt_tokens_total - prompt_tokens_cached_total，两条路径互为佐证。
+            #
+            # 为什么只给生命周期口径、为什么是每请求归一化 —— 见 _put_prefill_tps。
+            _put_prefill_tps(live,
+                             b.get("vllm:iteration_tokens_total_sum", 0.0)
+                             - b.get("vllm:generation_tokens_total", 0.0),
+                             b.get("vllm:request_prefill_time_seconds_sum", 0.0))
             spec = _spec_stats(a, b)
             if spec:                    # 未开投机解码 → 键整个缺席,前端 if (live.spec)
                 live["spec"] = spec
             # SLO 达标率。⛔ 必须用【同一份差分桶】—— 它建在 TTFT/TPOT 之上,
             # 若这里还吃生命周期桶,就成了"一半窗口一半生命周期",比全错更难查。
-            slo = _slo_rates(_lb["__ttft_buckets"], _lb["__tpot_buckets"]) if lat else None
+            slo = (_slo_rates(lat["b"]["__ttft_buckets"], lat["b"]["__tpot_buckets"])
+                   if lat else None)
             if slo:
                 live.update(slo)
-            # 饱和提示:排队时间占了 TTFT 的大头 + 两次采样都有请求在等 →
-            # 再加负载已经不划算(实测 QPS 1.0→2.0 吞吐只涨 25%,而 TTFT p90
-            # 涨了一个数量级,多出来的时间几乎全花在排队上)。
-            # "持续"在单次调用内只能取两次采样都 > 0 —— 这是本接口能拿到的
-            # 最强证据,不做跨调用状态。
             live["waitingCapacity"] = int(_gauge(a, b, "__waiting_capacity"))
-            # queueP90/ttftP90 现在可能因样本不足而缺席 → 派生量跟着缺席,
-            # 不用 0 顶替(那会让"排队占比 0%"看起来像系统很健康)。
-            if lat and live.get("queueP90") is not None and live.get("ttftP90"):
-                _qr = live["queueP90"] / live["ttftP90"]
-                live["queueShareP90"] = round(_qr * 100, 1)
-                live["saturated"] = bool(
-                    min(a.get("vllm:num_requests_waiting", 0),
-                        b.get("vllm:num_requests_waiting", 0)) > 0
-                    and _qr > float(_SLO.get("queue_share_warn", 0.5)))
+            _put_saturation(live, min(a.get("vllm:num_requests_waiting", 0),
+                                      b.get("vllm:num_requests_waiting", 0)))
             # KV 池绝对值。来自 cache_config_info 这个 info gauge,搭现有抓取的
             # 顺风车 —— 零额外往返。老版本 vLLM 无此指标 → 字段缺席。
             _kvi = b.get("__kv_info") or {}
@@ -2486,32 +2816,50 @@ async def models_list():
             a = _merge_scrape([l1.get(b) or {} for b in lb])
             b = _merge_scrape([l2.get(b) or {} for b in lb])
             dt = _dt_real
-            tps = _rate(a, b, "llamacpp:tokens_predicted_total", dt)
-            # tpot: 解码耗时差 / 解码 token 差 → ms/token(两采样齐备才算,缺则留 0)
-            d_tok = _rate(a, b, "llamacpp:tokens_predicted_total", 1.0)
-            d_sec = _rate(a, b, "llamacpp:tokens_predicted_seconds_total", 1.0)
-            tpot = (d_sec / d_tok * 1000) if d_tok > 0 else 0
+            # 吞吐与 TPOT 走滑动窗口(见 _lc_rates):1.2s 窗口在生成过程中恒为 0。
+            _r = [_lc_rate.get(x) or (None, None, None) for x in lb]
+            _ok = [x for x in _r if x[0] is not None]
+            _full = len(_ok) == len(lb) and bool(lb)   # 有副本没攒够窗口 → 整体不出数
+            _d_tok = sum(x[0] for x in _ok) if _full else 0.0
+            _d_sec = sum(x[1] for x in _ok) if _full else 0.0
+            _win = max((x[2] for x in _ok), default=None) if _full else None
+            tps = (_d_tok / _win) if _win else 0.0
             running = _gauge(a, b, "llamacpp:requests_processing")
             waiting = _gauge(a, b, "llamacpp:requests_deferred")
             state = "serving" if running > 0 or tps > 0 else "idle"
-            # llama.cpp /metrics 不暴露 TTFT/e2e 直方图/KV% → 留 0 诚实标"未测",
-            # 不伪造；rps 同理(无 request_success_total)。前端 metrics=llamacpp 可
-            # 据此显示"—"代替 0。
+            # llama.cpp /metrics 没有 TTFT/e2e 直方图/KV 占用 → 这些字段【整个缺席】。
+            # ⛔ 旧版填 0(ttft/p50/p95/p99),面板上会被读成"TTFT 0ms、p99 0ms"。
+            # rps 同理没有请求计数器,保持 0(前端 metrics=llamacpp 显示"—")。
             live = {"tps": round(tps, 1), "rps": 0,
-                    "ttft": 0, "tpot": round(tpot, 1),
                     "kv": 0, "running": int(running),
                     "waiting": int(waiting), "metrics": "llamacpp",
-                    "resident": True,
-                    "p50": 0, "p95": 0, "p99": 0}
+                    "resident": True, "tpsWindowSec": _win}
+            if _d_tok > 0:              # 窗口内有请求完成才有每 token 耗时
+                live["tpot"] = round(_d_sec / _d_tok * 1000, 1)
+            # 引擎步频:n_decode_total 每次 llama_decode 调用都涨(实测生成中连抓三次
+            # +1/+1),是这个后端唯一能在 1.2s 窗口上反映"此刻在不在动"的信号。
+            live["stepsPerSec"] = round(_rate(a, b, "llamacpp:n_decode_total", dt), 2)
+            # prefill 吞吐 / 提示词缓存命中:都是【生命周期】累计比值(口径同 oMLX 那条)。
+            # prompt_tokens_total 是实算的(命中的另记在 prompt_tokens_cached_total),
+            # 所以这个比值不会被缓存命中夸大 —— 与 vLLM 侧那条口径一致。
+            _put_prefill_tps(live, b.get("llamacpp:prompt_tokens_total", 0.0),
+                             b.get("llamacpp:prompt_seconds_total", 0.0))
+            _pc = b.get("llamacpp:prompt_tokens_cached_total", 0.0)
+            _pp = b.get("llamacpp:prompt_tokens_total", 0.0)
+            if _pc + _pp > 0:
+                live["cacheHitRate"] = round(_pc / (_pc + _pp) * 100, 1)
+            spec = _spec_stats(a, b, "llamacpp")
+            if spec:                    # 未开投机解码 → 键缺席,前端整块不渲染
+                live["spec"] = spec
         elif gb:                                # SGLang 真实指标(含 TTFT/e2e, 接近 vLLM)
             a = _merge_scrape([g1.get(b) or {} for b in gb])
             b = _merge_scrape([g2.get(b) or {} for b in gb])
             dt = _dt_real
-            tps = _rate(a, b, "sglang:generation_tokens_total", dt)
+            tps = _rate(a, b, "__sglang_decode_tokens_total", dt)
             kv = b.get("sglang:token_usage", 0) * 100 / max(1, len(gb))
             # 与 vLLM 同一修正：延迟量走滑动窗口差分，不再报"开机以来"
-            lat = _lat_window(m["id"], b, _t_now,
-                              means=_LAT_MEANS_SGLANG, e2e_prefix="sglang")
+            lat = _lat_window(m["id"], b, _t_now, means=_LAT_MEANS_SGLANG,
+                              e2e_prefix="sglang")
             running = _gauge(a, b, "sglang:num_running_reqs")
             waiting = _gauge(a, b, "sglang:num_queue_reqs")
             state = "serving" if running > 0 or tps > 0 else "idle"
@@ -2520,16 +2868,58 @@ async def models_list():
                     "waiting": int(waiting), "metrics": "sglang",
                     "resident": True}
             if lat:                     # None → 整组延迟字段缺席，不填 0
-                _lb, _lm = lat["b"], lat["mean"]
-                _ln = lat["n"]
-                live["latencyWindowSec"] = lat["windowSec"]
-                live["latencySampleN"] = lat["sampleN"]
-                live["latencyLowSample"] = lat["sampleN"] < _LOW_SAMPLE_N
-                for _k in ("ttft", "tpot"):
-                    if _k in _lm:
-                        live[_k] = round(_lm[_k], 1)
-                for _q, _n in ((0.50, "p50"), (0.95, "p95"), (0.99, "p99")):
-                    _put_q(live, _n, _lb["__e2e_buckets"], _ln.get("e2e", 0), _q, 0)
+                _put_latency(live, lat, _LAT_FAMILIES_SGLANG)
+            # prefill 吞吐：分子 realtime_tokens_total{mode=prefill_compute}(实算，已排除
+            # prefix cache 命中)，分母 prefill_forward 耗时总和。SGLang 在
+            # report_prefill_stats 里【每个 prefill 批次】累加分子，正是窗口差分会炸的
+            # 那种错位 —— 只给生命周期口径，理由见 _put_prefill_tps。
+            _put_prefill_tps(live, b.get("__sglang_prefill_compute_tokens_total", 0.0),
+                             b.get(_SGLANG_PREFILL + "_sum", 0.0))
+            # ⛔ SLO 达标率对 SGLang 【不给】：_slo_rates 的联合区间(Fréchet 边界)
+            # 要求 TTFT 与 TPOT 是同一批【请求】上的边缘分布，而 SGLang 的 TPOT 桶
+            # 按 token 加权(长请求权重大)，两个分量总体不同，区间不成立。
+            _put_saturation(live, min(a.get("sglang:num_queue_reqs", 0),
+                                      b.get("sglang:num_queue_reqs", 0)))
+        elif ob:                                # oMLX:只有累计计数器,没有直方图
+            a = _merge_scrape([o1.get(b) or {} for b in ob])
+            b = _merge_scrape([o2.get(b) or {} for b in ob])
+            dt = _dt_real
+            # 滑动窗口速率。窗口没攒够(刚重启 8 秒内)→ 全为 None,此时吞吐/请求率
+            # 字段整组给 0 而不是拿 1.2s 窗口顶 —— 跳变计数器在 1.2s 上不是 0 就是尖峰。
+            _rates = [_omlx_rate.get(x) or (None, None, None) for x in ob]
+            _ok = [r for r in _rates if r[0] is not None]
+            tps = sum(r[0] for r in _ok) if len(_ok) == len(ob) and ob else 0.0
+            rps = sum(r[1] for r in _ok) if len(_ok) == len(ob) and ob else 0.0
+            _tps_win = max((r[2] for r in _ok), default=None)
+            running = _gauge(a, b, "omlx:active_requests")
+            waiting = _gauge(a, b, "omlx:waiting_requests")
+            state = "serving" if running > 0 or tps > 0 else "idle"
+            # ⛔ kv 留 0:oMLX 只给 model_memory_used/max(权重+KV 对内存上限),那不是
+            #    KV 池占用率,填进 kv 会被读成"KV 用了 75%"。
+            # ⛔ 不拿 tps 反推 TPOT:并发 2 时 1000/tps 会把每 token 耗时算少一半。
+            #    ttft/tpot/p50/p95/p99 一律缺席(与 llama.cpp 同样的诚实降级)。
+            live = {"tps": round(tps, 1), "rps": round(rps, 3), "kv": 0,
+                    "running": int(running), "waiting": int(waiting),
+                    "metrics": "omlx",
+                    # 真实驻留探针:引擎自报已加载模型数 > 0
+                    "resident": b.get("omlx:models_loaded", 0) > 0,
+                    "tpsWindowSec": _tps_win}
+            # prefill 吞吐与缓存命中率只有 oMLX 自报的【生命周期】均值 —— 不做窗口差分:
+            # Δ(prompt-cached)/Δt 是墙钟吞吐,与面板上"每请求归一化"的 prefill 口径
+            # 不是一回事,同名不同义比缺失更糟。
+            _pf = b.get("omlx:avg_prefill_tps", 0.0)
+            if _pf > 0:
+                live["prefillTokPerS"] = round(_pf, 0)
+            _ce = b.get("omlx:cache_efficiency", 0.0)
+            if _ce > 0:
+                live["cacheHitRate"] = round(_ce, 1)
+            # 已加载权重的真身与常驻大小:路由名(mbp-none)看不出载的是什么模型
+            _lm = b.get("__omlx_model")
+            if _lm:
+                live["loadedModel"] = _lm
+            _mw = b.get("omlx:model_memory_used", 0.0)
+            if _mw > 0:
+                live["weightsGb"] = round(_mw / 2 ** 30, 2)
         elif m.get("up"):                       # 网关健康但无可识别 /metrics
             state = "online"                    # 在线·服务中，无详细指标（不伪造）
             live = {"metrics": "none", "resident": True}
@@ -2563,6 +2953,8 @@ async def _alerts(nodes=None, log=None):
     for n in nodes:
         L, nm, nid = n["live"], n["name"], n["id"]
         if not n.get("up"):
+            if n.get("alertOffline") is False:
+                continue        # 笔记本等:离线是常态,卡片已显示 OFFLINE,不发告警
             out.append({"key": f"{nid}:offline", "sev": "bad",
                         "msg": f"{nm} offline", "sub": f"{n['ip']} · no metrics", "when": "live"})
             continue

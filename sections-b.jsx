@@ -2,6 +2,11 @@
 
 const { NODES: _NODES, MODELS: _MODELS, live: _live, totals: _totals } = window.AIData;
 
+// 有真实指标源的后端。新增引擎只改这一处 —— 之前 vllm/llamacpp/sglang 在六处
+// 各写一遍长条件,oMLX 接进来时漏一处就是"有数据却不显示"。
+const LIVE_METRIC_SOURCES = ["vllm", "llamacpp", "sglang", "omlx"];
+const hasLiveMetrics = (m) => LIVE_METRIC_SOURCES.includes(m.metricsSource);
+
 // ── NODES ──────────────────────────────────────────────────────────────
 function NodesSection() {
   useLive();
@@ -31,7 +36,7 @@ function NodesSection() {
       <div className={"grid " + (_NODES.length <= 6 ? "g-" + _NODES.length : "g-auto")}>
         {_NODES.filter((n) => nfilter === "All" ? true
               : nfilter === "RTX" ? (n.kind || "discrete") === "discrete"
-              : nfilter === "DGX" ? (n.kind || "discrete") !== "discrete"
+              : nfilter === "DGX" ? n.kind === "unified-arm-soc"   // 只算 GB10;apple-silicon 不是 DGX
               : (_live.nodes[n.id] && _live.nodes[n.id].cpu.now > 0))
           .map((n) => <NodeCard key={n.id} node={n} onClick={() => setActive(n)} />)}
       </div>
@@ -93,8 +98,9 @@ function NodeCard({ node, onClick }) {
         <div className="k">CPU</div><div className="v">{node.cpu.cores}c / {node.cpu.threads}t</div>
         <div className="k">RAM</div><div className="v">{node.ram} GB</div>
         <div className="k">{t("Net")}</div><div className="v">{node.net}</div>
-        <div className="k">{t("Power")}</div><div className="v num">{node.gpuPending ? t("GPU pending · maintenance window") : ns.power.now.toFixed(0) + " W"}</div>
-        <div className="k">{t("GPU temp")}</div><div className="v num" style={{ color: !node.gpuPending && ns.tempGpu.now > 80 ? "var(--hot)" : "var(--ink)" }}>{node.gpuPending ? "—" : ns.tempGpu.now.toFixed(0) + " °C"}</div>
+        {/* 没有 GPU 遥测源(node.gpuTelemetry === false)时显示「—」:0 W / 0 °C 会被读成真实读数 */}
+        <div className="k">{t("Power")}</div><div className="v num">{node.gpuPending ? t("GPU pending · maintenance window") : node.gpuTelemetry === false ? "—" : ns.power.now.toFixed(0) + " W"}</div>
+        <div className="k">{t("GPU temp")}</div><div className="v num" style={{ color: !node.gpuPending && node.gpuTelemetry !== false && ns.tempGpu.now > 80 ? "var(--hot)" : "var(--ink)" }}>{node.gpuPending || node.gpuTelemetry === false ? "—" : ns.tempGpu.now.toFixed(0) + " °C"}</div>
       </div>
     </article>
   );
@@ -113,7 +119,9 @@ function NodeDetail({ node, onClose }) {
             <span className="num" style={{ color: "var(--ink-3)", fontSize: 12, fontWeight: 400, fontFamily: "var(--mono)" }}>$ ssh root@{node.ip}</span>
             <span>{node.name} · {t("forensic view")}</span>
           </div>
-          <div className="card-sub">{node.gpu.name} · {node.os} · kernel {node.kernel} · NVIDIA {node.driver.split(" ")[1]} · CUDA {node.cuda}</div>
+          <div className="card-sub">{node.kind === "apple-silicon"
+            ? <>{node.gpu.name} · macOS · Metal</>
+            : <>{node.gpu.name} · {node.os} · kernel {node.kernel} · NVIDIA {node.driver.split(" ")[1]} · CUDA {node.cuda}</>}</div>
         </div>
         <button onClick={onClose} style={{
           appearance: "none", border: 0, background: "rgba(255,255,255,.04)",
@@ -140,11 +148,15 @@ function NodeDetail({ node, onClose }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <DetailMetric label={t("GPU")}            value={ns.gpu.now.toFixed(0)} unit="%" bar={ns.gpu.now} />
           <DetailMetric label={t("VRAM")}           value={(node.gpu.mem * ns.vram.now / 100).toFixed(1)} unit={` / ${node.gpu.mem} GB`} bar={ns.vram.now} color="violet" />
-          <DetailMetric label={t("GPU temp")}       value={ns.tempGpu.now.toFixed(0)} unit=" °C" bar={ns.tempGpu.now} color={ns.tempGpu.now > 80 ? "hot" : "ok"} />
+          {node.gpuTelemetry !== false && (
+            <DetailMetric label={t("GPU temp")}     value={ns.tempGpu.now.toFixed(0)} unit=" °C" bar={ns.tempGpu.now} color={ns.tempGpu.now > 80 ? "hot" : "ok"} />
+          )}
           {nicTemp > 0 && (
             <DetailMetric label={t("NIC temp")}     value={nicTemp.toFixed(0)} unit=" °C" bar={Math.min(100, nicTemp)} color={nicTemp > 85 ? "hot" : nicTemp > 70 ? "warn" : "ok"} />
           )}
-          <DetailMetric label={t("Power draw")}     value={ns.power.now.toFixed(0)} unit=" W"  bar={Math.min(100, ns.power.now / (/gateway/i.test(node.role || "") ? 4.5 : 2.5))} color="hot" />
+          {node.gpuTelemetry !== false && (
+            <DetailMetric label={t("Power draw")}   value={ns.power.now.toFixed(0)} unit=" W"  bar={Math.min(100, ns.power.now / (/gateway/i.test(node.role || "") ? 4.5 : 2.5))} color="hot" />
+          )}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -185,8 +197,11 @@ function NodeDetail({ node, onClose }) {
             <span style={{ color: "var(--ink-3)" }}>CPU</span><span>{node.cpu.model}</span>
             <span style={{ color: "var(--ink-3)" }}>OS</span><span>{node.os}</span>
             <span style={{ color: "var(--ink-3)" }}>{t("Kernel")}</span><span>{node.kernel}</span>
-            <span style={{ color: "var(--ink-3)" }}>{t("Driver")}</span><span>{node.driver}</span>
-            <span style={{ color: "var(--ink-3)" }}>CUDA</span><span>{node.cuda}</span>
+            {/* apple-silicon 没有 NVIDIA 驱动 / CUDA:别显示「NVIDIA —」这种错类目 */}
+            <span style={{ color: "var(--ink-3)" }}>{t("Driver")}</span><span>{node.kind === "apple-silicon" ? "Metal" : node.driver}</span>
+            {node.kind !== "apple-silicon" && <>
+              <span style={{ color: "var(--ink-3)" }}>CUDA</span><span>{node.cuda}</span>
+            </>}
             <span style={{ color: "var(--ink-3)" }}>{t("Net")}</span><span>{node.net}</span>
           </div>
         </div>
@@ -300,24 +315,49 @@ function DetailMetric({ label, value, unit, bar, color = "accent" }) {
 // 一行「均值 + p50/p90/p99」。分位数是业界标准口径(vllm bench serve /
 // GenAI-Perf / LLMPerf)，均值同排列出来做对照：样本量小时分位数会偏高，
 // 两者背离大时以均值为准。
-// ⛔ 单位必须跟在【每个值】上，不能只写在表头：这张表会对 >=10000ms 的值自动
-//    换算成秒，表头写死 (ms) 会和那些单元格矛盾。之前四列全是裸数字、只有超过
-//    10s 的才带 "s"，读的人无从判断 150 是毫秒还是秒。
-function PctRow({ label, mean, p50, p90, p99, unit = "ms", warn }) {
-  const f = (v) => {
-    if (v === undefined || v === null) return "—";
-    const big = unit === "ms" && v >= 10000;
-    const txt = big ? (v / 1000).toFixed(1) : Math.round(v);
-    const u = big ? "s" : unit;
-    return <>{txt}<small style={{ color: "var(--ink-3)", marginLeft: 2 }}>{u}</small></>;
-  };
+// 单位只在表头左上角标一次(PctGrid 的 unit)，格子里只放带千分位的毫秒整数。
+// ⛔ 因此【不许】再对大值自动换算成秒：表头写 ms、某格却是秒，正是 de26f43 修掉的
+//    那种「读的人无从判断单位」。13.9s 就写 13,900。
+// ⛔ 也别把单位塞回每一格、别给四列不同亮度：2026-09-15 用户两次反馈「乱」，主因
+//    就是逐格 ms + mean 灰 / p50 白 / p99 灰。定稿是用户从三个预览里选的
+//    「单位进表头、统一颜色」。只有缺值「—」用最淡色，超过 warn 的 p99 标热色。
+function PctRow({ label, mean, p50, p90, p99, warn }) {
+  const f = (v) => (v === undefined || v === null)
+    ? <span style={{ color: "var(--ink-3)" }}>—</span>
+    : Math.round(v).toLocaleString("en-US");
+  const num = { textAlign: "right", color: "var(--ink-2)" };
   return (
     <div style={{ display: "contents" }}>
       <span style={{ color: "var(--ink-3)" }}>{label}</span>
-      <span style={{ color: "var(--ink-3)" }}>{f(mean)}</span>
-      <span style={{ color: "var(--ink)" }}>{f(p50)}</span>
-      <span>{f(p90)}</span>
-      <span style={{ color: warn && p99 > warn ? "var(--hot)" : "var(--ink-2)" }}>{f(p99)}</span>
+      <span style={num}>{f(mean)}</span>
+      <span style={num}>{f(p50)}</span>
+      <span style={num}>{f(p90)}</span>
+      <span style={{ ...num, color: warn && p99 > warn ? "var(--hot)" : num.color }}>{f(p99)}</span>
+    </div>
+  );
+}
+
+// PctRow 的表格外壳(含表头，左上角是单位)。列宽固定而不是 1fr：面板很宽时 1fr 会把
+// 四列拉开到一眼扫不过去，数字之间隔着大片空白，看起来像散落的点而不是一张表。
+// ⛔ 列宽必须逐列写出，不能写 repeat(4, …)：styles.css 手机断点(≤640px)里有
+//    [style*="repeat("] { grid-template-columns: 1fr !important }，本意是把卡片网格
+//    压成单列，会误伤这张数字表(2026-09-15 在 420px 宽实测整表错位)。
+// minmax(4.4em, max-content)：7 位以内(107,500)放得下，360px 宽手机上整表仍放得下；
+// 更长的值只撑宽本列，不会压到邻列上。
+function PctGrid({ children, unit = "ms" }) {
+  const { t } = useLang();
+  const h = { color: "var(--ink-3)", fontSize: 10, textAlign: "right" };
+  const col = "minmax(4.4em, max-content)";
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: `auto ${col} ${col} ${col} ${col}`,
+                  justifyContent: "start", gap: "5px 12px", fontFamily: "var(--mono)",
+                  fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+      <span style={{ color: "var(--ink-3)", fontSize: 10 }}>{unit}</span>
+      <span style={h}>{t("mean")}</span>
+      <span style={h}>p50</span>
+      <span style={h}>p90</span>
+      <span style={h}>p99</span>
+      {children}
     </div>
   );
 }
@@ -330,7 +370,11 @@ function SpecDecode({ spec }) {
   return (
     <div>
       <div className="metric-l" style={{ marginBottom: 8 }}>
+        {/* specLen 是每位置数组的长度 = 草稿长度【上限】(llama.cpp 固定 64),不是典型值。
+            并排给出实测平均(草稿 token / 草稿步数),否则会把 64 读成"每步草稿 64 个"。 */}
         {t("Speculative decoding")} · {t("draft len")} {spec.specLen}
+        {spec.drafts > 0 ? <span style={{ color: "var(--ink-3)", textTransform: "none" }}>
+          {" · "}{t("avg")} {(spec.draftTokens / spec.drafts).toFixed(1)}</span> : null}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr",
                     gap: "5px 12px", fontFamily: "var(--mono)", fontSize: 11.5 }}>
@@ -351,8 +395,10 @@ function SpecDecode({ spec }) {
       </div>
       {pos.length ? <>
         <div className="metric-l" style={{ margin: "12px 0 6px" }}>{t("Acceptance by draft position")}</div>
+        {/* 只画前 12 个位置:llama.cpp 的每位置数组固定 64 长(--draft-max),实测位置 0-2
+            占绝大多数、之后长尾极小,64 根柱子读不出信息。数据不裁剪,只裁显示。 */}
         <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          {pos.map((v, i) => (
+          {pos.slice(0, 12).map((v, i) => (
             <div key={i} style={{ display: "grid", gridTemplateColumns: "18px 1fr 42px",
                                   alignItems: "center", gap: 8,
                                   fontFamily: "var(--mono)", fontSize: 10.5 }}>
@@ -364,6 +410,11 @@ function SpecDecode({ spec }) {
               <span style={{ color: "var(--ink-2)", textAlign: "right" }}>{v}%</span>
             </div>
           ))}
+          {pos.length > 12 ? (
+            <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-3)", marginTop: 2 }}>
+              {t("+{n} more").replace("{n}", pos.length - 12)}
+            </div>
+          ) : null}
         </div>
       </> : null}
     </div>
@@ -503,21 +554,14 @@ function ResponseBlock({ model }) {
         <div className="metric-l" style={{ margin: "12px 0 6px" }}>
           {t("Time to first content")} · {t("gateway stream")} · {t("last")} {model.ttfcWindowH}h
         </div>
-        {model.ttfcP50 !== undefined ? <div style={{ display: "grid",
-              gridTemplateColumns: "auto repeat(4, 1fr)", gap: "4px 10px",
-              fontFamily: "var(--mono)", fontSize: 11 }}>
-          <span />
-          <span style={{ color: "var(--ink-3)", fontSize: 10 }}>{t("mean")}</span>
-          <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p50</span>
-          <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p90</span>
-          <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p99</span>
+        {model.ttfcP50 !== undefined ? <PctGrid>
           {/* TTFT 这一行是【网关口径】，与上面延迟分解里那个 vLLM 口径的 TTFT
               不是一回事：hook 只看走网关的流量，vLLM 看全部含直连。故分别标源，
               ⛔ 不要拿两者互相校验或二选一。 */}
           <PctRow label={t("TTFT (gw)")} p50={model.ttftGwP50} p90={model.ttftGwP90} />
           <PctRow label={t("TTFC")} mean={model.ttfcMean} p50={model.ttfcP50}
                   p90={model.ttfcP90} p99={model.ttfcP99} warn={10000} />
-        </div> : null}
+        </PctGrid> : null}
         <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px",
                       fontFamily: "var(--mono)", fontSize: 11.5, marginTop: 6 }}>
           {model.ttfcNullRate !== undefined ? <>
@@ -597,9 +641,9 @@ function ModelsSection() {
               litellm · {_live.gatewayHost || "127.0.0.1:4000"} · OpenAI-compatible /v1/*
             </div>
           </div>
-          <GatewayStat label={t("Catalog models")} value={_MODELS.length} sub={`${_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp"||m.metricsSource==="sglang").length} ${t("with live metrics")}`} />
-          <GatewayStat label={t("Live metric sources")} value={_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp"||m.metricsSource==="sglang").length} sub={t("vLLM + llama.cpp + SGLang /metrics")} />
-          <GatewayStat label={t("Live throughput")} value={Math.round(_MODELS.filter(m=>m.metricsSource==="vllm"||m.metricsSource==="llamacpp"||m.metricsSource==="sglang").reduce((a,m)=>a+(_live.models[m.id]?_live.models[m.id].tps.now:0),0))} sub={t("t/s · measured sum")} />
+          <GatewayStat label={t("Catalog models")} value={_MODELS.length} sub={`${_MODELS.filter(hasLiveMetrics).length} ${t("with live metrics")}`} />
+          <GatewayStat label={t("Live metric sources")} value={_MODELS.filter(hasLiveMetrics).length} sub={t("vLLM · llama.cpp · SGLang · oMLX")} />
+          <GatewayStat label={t("Live throughput")} value={Math.round(_MODELS.filter(hasLiveMetrics).reduce((a,m)=>a+(_live.models[m.id]?_live.models[m.id].tps.now:0),0))} sub={t("t/s · measured sum")} />
           <GatewayStat label={t("LiteLLM metrics")} value={t("enterprise")} sub={t("OSS not exposed · documented")} />
         </div>
       </div>
@@ -629,10 +673,15 @@ function ModelsSection() {
                     </span>
                   )}
                 </div>
-                <span>{m.vendor} · {m.params} · {m.quant} · ctx&nbsp;{m.ctx === 0 ? "—" : m.ctx >= 1e6 ? `${(m.ctx/1e6).toFixed(0)}M` : `${(m.ctx/1024).toFixed(0)}K`}</span>
+                {/* 后端自报了已加载权重时，副标题优先显示它:这套 oMLX 把 served-name
+                    设成了路由名(mbp-none),vendor/params/quant 全是「—」,光看行首认不出
+                    载的是什么模型 —— MBP 上 2026-09-18 一天换了三个。 */}
+                <span>{m.loadedModel
+                  ? m.loadedModel
+                  : `${m.vendor} · ${m.params} · ${m.quant}`} · ctx&nbsp;{m.ctx === 0 ? "—" : m.ctx >= 1e6 ? `${(m.ctx/1e6).toFixed(0)}M` : `${(m.ctx/1024).toFixed(0)}K`}</span>
               </div>
               <div>
-                {(m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang") ? (
+                {hasLiveMetrics(m) ? (
                   <>
                     <div className="model-bigmetric">{_live.models[m.id].tps.now.toFixed(0)}<small>t/s</small></div>
                     <div className="model-spark"><Sparkline data={_live.models[m.id].tps.hist} color="var(--accent)" height={20} /></div>
@@ -648,14 +697,17 @@ function ModelsSection() {
                 ) : <div style={{ fontFamily: "var(--mono)", color: "var(--ink-4)", fontSize: 11 }}>{t("no live metrics source")}<br />· {m.framework} ·</div>}
               </div>
               <div className="num" style={{ fontSize: 12, color: "var(--ink-2)" }}>
-                {/* TTFT: vLLM 暴露, llama.cpp 不暴露(诚实显—); TPOT: 两者都有 */}
+                {/* TTFT: vLLM/SGLang 暴露, llama.cpp/oMLX 不暴露(诚实显—); TPOT: 除 oMLX 外都有。
+                    ⛔ 取 m.ttft / m.tpot(后端窗口值,缺席时 data.js 会删掉)而不是 sparkline 的
+                    .now —— 后者在后端停发后会把上一次的值(或初始 0)继续显示成当前值,
+                    空闲的 llama.cpp 因此长期显示「0 ms/tok」(2026-09-18 实测)。 */}
                 {(m.metricsSource === "vllm" || m.metricsSource === "sglang") ? (
-                  <div><b style={{ color: "var(--ink)" }}>{_live.models[m.id].ttft.now.toFixed(0)}</b> <small style={{ color: "var(--ink-3)", fontFamily: "var(--mono)" }}>ms TTFT</small></div>
-                ) : m.metricsSource === "llamacpp" ? (
+                  <div><b style={{ color: "var(--ink)" }}>{m.ttft !== undefined ? m.ttft.toFixed(0) : "—"}</b> <small style={{ color: "var(--ink-3)", fontFamily: "var(--mono)" }}>ms TTFT</small></div>
+                ) : (m.metricsSource === "llamacpp" || m.metricsSource === "omlx") ? (
                   <div><span style={{ color: "var(--ink-4)" }}>—</span> <small style={{ color: "var(--ink-3)", fontFamily: "var(--mono)" }}>ms TTFT</small></div>
                 ) : null}
                 {(m.metricsSource === "vllm" || m.metricsSource === "llamacpp" || m.metricsSource === "sglang") ? (
-                  <div><b style={{ color: "var(--ink)" }}>{_live.models[m.id].tpot.now.toFixed(0)}</b> <small style={{ color: "var(--ink-3)", fontFamily: "var(--mono)" }}>ms/tok</small></div>
+                  <div><b style={{ color: "var(--ink)" }}>{m.tpot !== undefined ? m.tpot.toFixed(0) : "—"}</b> <small style={{ color: "var(--ink-3)", fontFamily: "var(--mono)" }}>ms/tok</small></div>
                 ) : <span style={{ color: "var(--ink-4)" }}>—</span>}
               </div>
               <div>
@@ -747,12 +799,41 @@ function MetricBars({ model, ms }) {
       </>
     );
   }
+  if (src === "omlx") {
+    return (
+      <>
+        {/* oMLX 只有累计计数器:并发/请求率是窗口实测,prefill 吞吐与缓存命中率是它
+            自报的【生命周期】均值(标出来,别当此刻值读);没有 TTFT/TPOT/KV 占用。 */}
+        <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 25)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
+        <DetailMetric label={t("Requests / sec")} value={ms.rps.now.toFixed(2)} unit="" bar={Math.min(100, ms.rps.now * 6)} color="accent" />
+        {model.prefillTokPerS !== undefined ? (
+          <DetailMetric label={t("Prefill throughput")} value={model.prefillTokPerS.toLocaleString("en-US")} unit={` tok/s · ${t("lifetime")}`} bar={Math.min(100, model.prefillTokPerS / 20)} color="violet" />
+        ) : null}
+        {model.cacheHitRate !== undefined ? (
+          <DetailMetric label={t("Prompt cache hit")} value={model.cacheHitRate.toFixed(0)} unit={`% · ${t("lifetime")}`} bar={model.cacheHitRate} color="teal" />
+        ) : null}
+      </>
+    );
+  }
   if (src === "llamacpp") {
     return (
       <>
-        {/* llama.cpp /metrics 暴露 TPOT/throughput/running, 不暴露 TTFT/KV/e2e */}
-        <DetailMetric label={t("TPOT (per token)")}   value={ms.tpot.now.toFixed(0)} unit=" ms" bar={Math.min(100, ms.tpot.now / 5)} color="teal" />
-        <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit="" bar={Math.min(100, ms.running.now * 10)} color="ok" />
+        {/* llama.cpp 暴露 TPOT/吞吐/并发/步频/投机解码/缓存命中,不暴露 TTFT/KV/e2e 直方图。
+            TPOT 是滑动窗口值(计数器只在请求完成时跳);窗口内没有完成的请求就显示「—」,
+            不拿 0 顶(0 会被读成"每 token 0 毫秒")。 */}
+        <DetailMetric label={t("TPOT (per token)")}   value={model.tpot !== undefined ? model.tpot.toFixed(0) : "—"} unit={model.tpot !== undefined ? " ms" : ""} bar={Math.min(100, (model.tpot || 0) / 5)} color="teal" />
+        <DetailMetric label={t("Concurrency · running")} value={ms.running.now.toFixed(0)} unit={ms.waiting.now > 0 ? ` (+${ms.waiting.now.toFixed(0)} ${t("queued")})` : ""} bar={Math.min(100, ms.running.now * 10)} color={ms.waiting.now > 0 ? "hot" : "ok"} />
+        {/* ⚠️ 步频是 1.2s 【瞬时】窗口,上面的吞吐/TPOT 是 45s 完成请求窗口 —— 两者
+            口径不同,别拿 步频 × 每步产出 去对吞吐(对不上是正常的)。 */}
+        {model.stepsPerSec !== undefined ? (
+          <DetailMetric label={t("Engine steps")} value={model.stepsPerSec.toFixed(1)} unit={` /s · ${t("instantaneous")}`} bar={Math.min(100, model.stepsPerSec * 10)} color="accent" />
+        ) : null}
+        {model.prefillTokPerS !== undefined ? (
+          <DetailMetric label={t("Prefill throughput")} value={model.prefillTokPerS.toLocaleString("en-US")} unit={` tok/s · ${t("lifetime")}`} bar={Math.min(100, model.prefillTokPerS / 20)} color="violet" />
+        ) : null}
+        {model.cacheHitRate !== undefined ? (
+          <DetailMetric label={t("Prompt cache hit")} value={model.cacheHitRate.toFixed(0)} unit={`% · ${t("lifetime")}`} bar={model.cacheHitRate} color="teal" />
+        ) : null}
       </>
     );
   }
@@ -769,11 +850,16 @@ function ModelDetail({ model }) {
           {t("Throughput · last 32 ticks")}
           {model.tpsWindowSec
             ? <span style={{ color: "var(--ink-3)", textTransform: "none" }}>
-                {" · "}{t("instantaneous")} {model.tpsWindowSec}s
+                {/* oMLX 的计数器只在请求完成时跳,吞吐本来就是滑动窗口值(不是瞬时),
+                    也没有"瞬时 vs 持续"这组对照 —— 标成 instantaneous 会读错。 */}
+                {/* llama.cpp 与 oMLX 的生成计数器都只在请求完成时跳 → 吞吐本来就是
+                    滑动窗口值,标 instantaneous 会读错。 */}
+                {" · "}{(model.metricsSource === "omlx" || model.metricsSource === "llamacpp") ? t("sliding window") : t("instantaneous")} {model.tpsWindowSec}s
                 {/* 瞬时窗口只有十几步，方差极大；vllm bench serve 同一次测量
                     Output vs Peak token throughput 就差 2.1 倍(61.13 / 129.00)。
                     并排给出长窗口持续值，避免把峰值读成持续吞吐。 */}
-                {model.tpsSustained !== null && model.tpsSustained !== undefined
+                {(model.metricsSource === "omlx" || model.metricsSource === "llamacpp") ? null
+                  : model.tpsSustained !== null && model.tpsSustained !== undefined
                   ? <> · {t("sustained")} <b style={{ color: "var(--ink-2)" }}>{model.tpsSustained}</b> t/s
                       {" "}({model.tpsSustainedWindowSec}s)</>
                   : <> · {t("sustained")} — <small>{t("(warming up)")}</small></>}
@@ -788,47 +874,34 @@ function ModelDetail({ model }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         {(model.metricsSource === "vllm" || model.metricsSource === "sglang") ? <>
           {model.latencyWindowSec !== undefined ? <div>
-            <div className="metric-l" style={{ marginBottom: 8 }}>
-              {t("Latency breakdown · mean vs percentiles")}
-              {/* 窗口长度与样本数必须显示：这些是滑动窗口值不是「开机以来」，
-                  而且读数的人要能判断这个 p99 是几条样本撑起来的。 */}
-              <span style={{ color: "var(--ink-3)", textTransform: "none" }}>
-                {" · "}{t("window")} {model.latencyWindowSec}s · n={model.latencySampleN}
-                {/* 样本偏少时给值+标注(同 sloJointWide 的做法)；数学上无意义的那些
-                    分位数则直接缺席、显示「—」。两者是互补不是二选一：
-                    藏掉的是「算不出」，标注的是「算得出但别当准数读」。 */}
-                {model.latencyLowSample
-                  ? <span style={{ color: "var(--hot)" }}> · {t("low sample")}</span>
-                  : null}
-              </span>
+            <div className="metric-l" style={{ marginBottom: 3 }}>
+              {t("Latency breakdown")}
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "auto repeat(4, 1fr)",
-                          gap: "5px 10px", fontFamily: "var(--mono)", fontSize: 11 }}>
-              <span />
-              <span style={{ color: "var(--ink-3)", fontSize: 10 }}>{t("mean")}</span>
-              <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p50</span>
-              <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p90</span>
-              <span style={{ color: "var(--ink-3)", fontSize: 10 }}>p99</span>
+            {/* 窗口长度与样本数必须显示：这些是滑动窗口值不是「开机以来」，
+                而且读数的人要能判断这个 p99 是几条样本撑起来的。
+                单独占一行：接在标题后面时，中等宽度下会从「low sample」中间折行。 */}
+            <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--ink-3)",
+                          marginBottom: 8 }}>
+              {t("window")} {model.latencyWindowSec}s · n={model.latencySampleN}
+              {/* 样本偏少时给值+标注(同 sloJointWide 的做法)；数学上无意义的那些
+                  分位数则直接缺席、显示「—」。两者是互补不是二选一：
+                  藏掉的是「算不出」，标注的是「算得出但别当准数读」。 */}
+              {model.latencyLowSample
+                ? <span style={{ color: "var(--hot)" }}> · {t("low sample")}</span>
+                : null}
+            </div>
+            <PctGrid>
               {/* 缺席的分位数由 PctRow 渲染成「—」：样本不足以支撑该分位数时，
                   宁可留白也不给一个看起来正常、实际是桶沿的数字。 */}
               {/* 排队 / prefill / decode 三段分开：prefill 算力受限、decode 内存
                   带宽受限、queue 是容量不够。混着报，"变慢了"看不出该查哪一侧。 */}
               <PctRow label={t("Queue")}   mean={model.queue}   p50={model.queueP50}   p90={model.queueP90}   p99={model.queueP99} />
               <PctRow label={t("Prefill")} mean={model.prefill} p50={model.prefillP50} p90={model.prefillP90} p99={model.prefillP99} />
-              {/* prefill 的性能对照是【吞吐】不是耗时：原始耗时随 prompt 长度线性
-                  变化，量的是负载不是引擎速度。紧贴 Prefill 行放，好把两者对上。
-                  decode 一侧不加吞吐 —— 它的对照是下面的 TPOT 与 ITL，加了是重复。 */}
-              {model.prefillTokPerS !== undefined ? (
-                <div style={{ display: "contents" }}>
-                  <span />
-                  <span style={{ gridColumn: "span 4", color: "var(--ink-3)", fontSize: 10.5,
-                                 marginTop: -2, marginBottom: 2 }}>
-                    <b style={{ color: "var(--ink-2)" }}>{model.prefillTokPerS.toLocaleString()}</b>
-                    {" "}tok/s · {t("per-request normalised, not wall-clock")}
-                  </span>
-                </div>
-              ) : null}
-              <PctRow label={t("Decode")}  mean={model.decode}  p50={model.decodeP50}  p90={model.decodeP90}  p99={model.decodeP99} />
+              {/* SGLang 不导出单请求 decode 耗时与原始到达间隔：这两行对它恒为「—」，
+                  直接不画，下方脚注说明原因。 */}
+              {model.metricsSource !== "sglang"
+                ? <PctRow label={t("Decode")} mean={model.decode} p50={model.decodeP50} p90={model.decodeP90} p99={model.decodeP99} />
+                : null}
               {/* 均值用 model.ttft/tpot（窗口 Δsum/Δcount），不用 sparkline 的 now：
                   分位数和均值必须同源同窗，一半窗口一半别的比全错更难查。 */}
               <PctRow label="TTFT"         mean={model.ttft}    p50={model.ttftP50}    p90={model.ttftP90}    p99={model.ttftP99} warn={20000} />
@@ -836,7 +909,31 @@ function ModelDetail({ model }) {
               {/* ITL ≠ TPOT：TPOT 按请求平均每 token，ITL 是相邻 token 的实际
                   到达间隔分布。投机解码下一次接受多个 token → 一批接近 0 的间隔
                   加少量长间隔，均值抹平，分位数才看得见。 */}
-              <PctRow label="ITL"          mean={model.itl}     p50={model.itlP50}     p90={model.itlP90}     p99={model.itlP99} />
+              {model.metricsSource !== "sglang"
+                ? <PctRow label="ITL" mean={model.itl} p50={model.itlP50} p90={model.itlP90} p99={model.itlP99} />
+                : null}
+            </PctGrid>
+            <div style={{ marginTop: 10, fontFamily: "var(--mono)", fontSize: 10.5,
+                          color: "var(--ink-3)", lineHeight: 1.7 }}>
+              {/* prefill 的性能对照是【吞吐】不是耗时：原始耗时随 prompt 长度线性
+                  变化，量的是负载不是引擎速度。decode 一侧不加吞吐 —— 它的对照是表里的
+                  TPOT 与 ITL，加了是重复。
+                  放表下方而不是插在 Prefill 行下面：单位不同(tok/s)、口径不同(生命周期，
+                  不是本窗口 —— 窗口差分会错位到虚高几十倍，见 main.py _put_prefill_tps)，
+                  插在表里不属于任何一列，是用户说「乱」的原因之一。必须带「累计」字样。
+                  「每请求归一化，非墙钟」放 title：用户选定的样式里这行只有数值与累计。 */}
+              {model.prefillTokPerS !== undefined ? (
+                <div title={t("per-request normalised, not wall-clock")}>
+                  {t("Prefill throughput")}{" "}
+                  <b style={{ color: "var(--ink-2)" }}>{model.prefillTokPerS.toLocaleString("en-US")}</b>
+                  {" "}tok/s · {t("lifetime")}
+                </div>
+              ) : null}
+              {/* SGLang 的 TPOT 桶按 token 加权(输出块内均摊)，Decode / ITL 引擎不导出
+                  —— 不写明，下一个看到少了两行的人会再查一遍。 */}
+              {model.metricsSource === "sglang"
+                ? <div>{t("SGLang: TPOT per-token · no Decode / ITL")}</div>
+                : null}
             </div>
             {model.sloTtftRate !== undefined ? <SloBlock model={model} /> : null}
             {model.saturated !== undefined ? <SatBlock model={model} /> : null}
@@ -844,6 +941,10 @@ function ModelDetail({ model }) {
           {/* 响应构成放第 2 栏：它讲的是延迟与输出构成，与上面的分解同话题；
               第 3 栏留给 路由 / 效率 / 投机解码，两栏高度才不至于一边空一半。 */}
           <ResponseBlock model={model} />
+        </> : model.metricsSource === "omlx" ? <>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)", lineHeight: 1.7 }}>
+            {t("oMLX exposes counters only (/api/status) · no TTFT / TPOT / KV% / latency histograms")}
+          </div>
         </> : model.metricsSource === "llamacpp" ? <>
           <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-3)", lineHeight: 1.7 }}>
             {t("llama.cpp /metrics does not expose TTFT / KV% / e2e histograms · shown as — honestly")}
@@ -856,6 +957,14 @@ function ModelDetail({ model }) {
         <div className="metric-l" style={{ marginBottom: 8 }}>{t("Route · ")}{model.route}</div>
         <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "5px 12px", fontFamily: "var(--mono)", fontSize: 11.5 }}>
           <span style={{ color: "var(--ink-3)" }}>{t("Framework")}</span><span>{model.framework}</span>
+          {/* 后端自报的已加载权重。oMLX 这套把 served-name 设成了路由名(mbp-none),
+              光看模型名不知道载的是什么 —— MBP 上 2026-09-18 一天换了三个模型。 */}
+          {model.loadedModel ? <>
+            <span style={{ color: "var(--ink-3)" }}>{t("Loaded model")}</span>
+            <span style={{ color: "var(--ink)" }}>{model.loadedModel}
+              {model.weightsGb !== undefined
+                ? <small style={{ color: "var(--ink-3)" }}> · {model.weightsGb} GB</small> : null}</span>
+          </> : null}
           <span style={{ color: "var(--ink-3)" }}>{t("Port")}</span><span>:{model.port}</span>
           <span style={{ color: "var(--ink-3)" }}>{t("Quant")}</span><span>{model.quant}</span>
           <span style={{ color: "var(--ink-3)" }}>{t("VRAM")}</span><span>{model.vram} GB</span>
