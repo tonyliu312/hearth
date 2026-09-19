@@ -263,11 +263,22 @@ function NodeCard({ node, onClick }) {
                 窗口内引擎没干活 → 字段缺席, 显示 "—" 而不是 0 ——
                 0 会被读成"引擎变慢了", 而事实是"没让它干活"。 */}
             <div className="num" style={{ marginTop: 3, fontSize: 11, color: inkSub }}
-                 title={node.engineTpsSource ? t("per busy second · source: ") + node.engineTpsSource
-                                             : t("no engine-speed source on this backend")}>
+                 title={node.engineTpsSource
+                        ? t("one request stream's decode speed; LOAD ÷ ENGINE ≈ concurrent streams")
+                          + " · " + node.engineTpsSource
+                        : t("no engine-speed source on this backend")}>
               <span style={{ letterSpacing: ".1em", textTransform: "uppercase" }}>{t("engine")}</span>
               {"  "}
               {node.engineTps == null ? "—" : node.engineTps.toLocaleString("en-US")}
+              {/* 口径提示: 并发时 LOAD 会明显高于 ENGINE(比值≈并发数), 不写清楚
+                  会被当成"哪个算错了" —— 与机主问"为什么取不到真实 tok/s"是同一类
+                  困惑, 只是方向相反。 */}
+              {node.engineTps != null && (
+                <span style={{ color: "var(--ink-4)", letterSpacing: ".08em",
+                               textTransform: "uppercase", marginLeft: 6, fontSize: 9.5 }}>
+                  {t("per req")}
+                </span>
+              )}
             </div>
           </div>
         );
@@ -1148,7 +1159,7 @@ function MetricBars({ model, ms }) {
         {model.engineTps !== undefined ? (
           <DetailMetric label={t("Engine speed")} value={model.engineTps.toLocaleString("en-US")}
                         unit=" tok/s" bar={Math.min(100, model.engineTps)} color="accent"
-                        note={t("per busy second") + (model.engineTpsSource ? " · " + model.engineTpsSource : "")} />
+                        note={t("per request · busy seconds") + (model.engineTpsSource ? " · " + model.engineTpsSource : "")} />
         ) : null}
         {/* prefill 两行分开: 上面是【此刻】(空闲即 0), 下面是【引擎速度】(空闲不掉)。
             2026-09-19 前只有下面那行, 空闲时显示 1699 被当成实时值读。 */}
@@ -1278,7 +1289,7 @@ function ModelDetail({ model }) {
                 <div title={t("per busy second · source: ") + (model.engineTpsSource || "")}>
                   {t("Engine speed")}{" "}
                   <b style={{ color: "var(--ink-2)" }}>{model.engineTps.toLocaleString("en-US")}</b>
-                  {" "}tok/s · {t("per busy second")}
+                  {" "}tok/s · {t("per request · busy seconds")}
                 </div>
               ) : null}
               {/* 前缀缓存命中率。⛔ 分母是 命中+实算, 不是 prompt_tokens_total
