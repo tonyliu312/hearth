@@ -2,20 +2,20 @@
 
 为什么是离线: 本集群 2026-09-19 没有这三种实例(只有 SGLang + oMLX), 接不上真实
 端点。样本取自 sparkDash 的单元测试固定值
-(/home/user/dev/sparkDash/server/collectors/__tests__/LlmProbe.q27.test.js 等),
+(sparkDash 的 __tests__/LlmProbe.q27.test.js 等),
 那边是对着真实引擎抓下来的。
 
 ⛔ 通过这些用例只证明【解析没写错】, 不证明【口径对】。真接上实例时必须重新核对
    字段语义(尤其 ds4 的两个 tok_s gauge 是不是 60s 窗口、q27 的 ttft 是否含排队)。
 
-跑法: /home/user/dev/hearth/.venv/bin/python3 server/api/tests/test_engine_probes.py
+跑法: python3 server/api/tests/test_engine_probes.py   # 在仓库根目录跑
 """
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-os.environ.setdefault("HEARTH_CONFIG", "/home/user/dev/hearth/config/hearth.yaml")
+os.environ.setdefault("HEARTH_CONFIG", os.environ.get("HEARTH_CONFIG", ""))
 
 import main  # noqa: E402
 

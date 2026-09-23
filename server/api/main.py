@@ -951,10 +951,10 @@ TRAIN_SOURCE = os.environ.get("TRAIN_SOURCE", "auto")          # auto|json|prom|
 # ⛔ 公开仓库里不写任何站点地址: 默认空 = 不做这项采集。要用就在部署侧给
 #    TRAIN_METRICS_HOST(systemd Environment= 或 .env), 值形如 user@host, "local"=本机。
 TRAIN_HOST   = os.environ.get("TRAIN_METRICS_HOST", "")
-TRAIN_JSON   = os.environ.get("TRAIN_METRICS_JSON", "/home/user/m3-spec-out/train_metrics.json")
-TRAIN_PROM   = os.environ.get("TRAIN_METRICS_PROM", "/home/user/m3-spec-out/train_metrics.prom")
+TRAIN_JSON   = os.environ.get("TRAIN_METRICS_JSON", "")   # 空 = 不读该文件
+TRAIN_PROM   = os.environ.get("TRAIN_METRICS_PROM", "")   # 空 = 不读该文件
 TRAIN_TFEVENTS_GLOB = os.environ.get("TRAIN_TFEVENTS_GLOB",
-                                     "/home/user/m3-train-out/runs/*.tfevents.*")
+                                     "")   # 空 = 不扫 tfevents
 # prom 指标前缀(剥离后映射到规范字段);多框架前缀都列上, 命中即剥
 TRAIN_PROM_PREFIXES = tuple(p for p in os.environ.get(
     "TRAIN_PROM_PREFIXES", "speculators_train_,train_,train/").split(",") if p)
@@ -2494,14 +2494,14 @@ _VLLM_HISTS = {
 
 
 # ── ds4 / EXL3 / q27 三种后端的识别与采集 ───────────────────────────
-# 口径抄自 sparkDash 已验证的实现(/home/user/dev/sparkDash/server/collectors/
+# 口径抄自 sparkDash 已验证的实现(sparkDash 的
 # LlmProbe.js:355-445, 那边有单元测试固定了样本):
 #   ds4  : /metrics 里有 ds4_tokens_decoded_total
 #   q27  : /metrics 里有 q27_decode_tokens_total(signalnine/q27)
 #   exl3 : /health 返回 {backend:"exl3"} 或 {ok:true, busy:<bool>}
 #          —— vLLM 的 /health 是空体 200, 不会误判。
 # ⚠️ 未经真实实例验证: 本集群 2026-09-19 只跑 SGLang 与 oMLX, 这三种一个都没有。
-#    下面的解析只用 sparkDash 的样本做过离线自测(/home/user/dev/hearth/server/api/tests/test_engine_probes.py),
+#    下面的解析只用 sparkDash 的样本做过离线自测(server/api/tests/test_engine_probes.py),
 #    真接上实例时必须重新核对字段名, 不要把"能跑通"当成"口径正确"。
 _DS4_SCALARS = {
     "ds4_tokens_decoded_total", "ds4_tokens_prefilled_total",
@@ -2606,7 +2606,7 @@ async def _scrape_ds4(base: str) -> dict:
     # ⛔ ds4 的实算 prefill 是【label】不是独立指标名:
     #    ds4_tokens_prefilled_total{kind="computed"} 才是实算,
     #    不带 label 的总量含缓存命中(对照实现:
-    #    /home/user/dev/sparkDash/server/collectors/LlmProbe.js:625-632)。
+    #    sparkDash LlmProbe.js:625-632)。
     #    按名字求和会把命中算进去 —— 与 SGLang 的 prompt_tokens_total 同形的坑。
     return _prom_parse(txt, _DS4_SCALARS, {},
                        {"ds4_tokens_prefilled_total":
