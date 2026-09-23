@@ -10,9 +10,16 @@
 #   display:     UI labels, locale, theme (no-op for now)
 #   gateway:     where to reach the LiteLLM gateway, if you run one
 #   nodes:       one entry per physical host you want to monitor
-#   model_meta:  optional overlay for nicer model display (auto-discovery
-#                still works without this; this just adds vendor/tags/kind
-#                for the routes you know about)
+#   model_meta:  OPTIONAL overlay for model display. Identity is auto-sensed
+#                from each backend's own served model name (/v1/models →
+#                data[0].id) — Hearth ships NO built-in list of models and
+#                needs none. Unknown names are shown verbatim; trailing
+#                quant/variant tokens (…-Instruct-AWQ-INT4, …-Q4_K_M,
+#                …-heretic-vision) are moved to a dim tail, never dropped.
+#                Add an entry here only to rename something for your own
+#                panel: keys may be a gateway route OR a served model name;
+#                fields display / variant / vendor / kind / tags are all
+#                optional. This file is yours; it never goes into the repo.
 # =====================================================================
 
 
@@ -193,6 +200,9 @@ efficiency:
   #    实际占用会明显高于该值 —— 不要把「100% - MBU」当成可用余量。
   mem_bw_gbps: 273               # GB10 理论内存带宽(非实测)
 
+# ⛔ 可选。不写这一段面板照样能认出模型 —— 身份来自后端自报名(/v1/models),
+#    仓库里【没有也不需要】任何模型清单。这里只是给自己的面板换个好看的写法。
+#    键可以是网关路由名, 也可以是后端自报名; 字段全部可选。
 model_meta:
   glm-5.3-flash:
     display: "GLM-5.3-Flash"

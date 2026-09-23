@@ -701,11 +701,13 @@ def _attach_node_throughput(nodes: list, models: list) -> None:
         #    哪份权重"。主名放 name, 变体放 variant, 完整自报名放 served,
         #    前端主行显示主名、次级灰显示变体、title 给自报名。
         # 元信息里没有条目 → name 就是自报名原样, 不猜不截断。
+        # 身份【自动感知】: 后端自报名优先; 本地 config 的 model_meta 只是可选覆盖。
+        # 没有配置条目时走通用拆分(结尾的量化/变体记号挪到次级位置), 不内置模型清单。
         served = lv.get("loadedModel") or m.get("servedName") or ""
         meta = _meta_for(served) if served else {}
-        info = {"name": (meta.get("display") if served else None)
-                        or served or m.get("display") or m.get("id"),
-                "variant": meta.get("variant") or "",
+        _auto_name, _auto_tail = _split_model_name(served)
+        info = {"name": meta.get("display") or _auto_name or m.get("display") or m.get("id"),
+                "variant": meta.get("variant") or ("" if meta.get("display") else _auto_tail),
                 "served": served}
         for nid in span:
             d = agg.setdefault(nid, {"role": None, "models": [], "tps": None, "pf": None,
@@ -946,7 +948,9 @@ _GB10_OBS = [n["obs_node"] for n in NODES
 # 字段映射在 _norm_snapshot/_signal_from_tfevents 内做(别名容错),新框架只需补别名或加一个 reader。
 # 规范 schema 见 docs/training-observability.md「Phase 2 多源」。
 TRAIN_SOURCE = os.environ.get("TRAIN_SOURCE", "auto")          # auto|json|prom|tfevents|off
-TRAIN_HOST   = os.environ.get("TRAIN_METRICS_HOST", "user@10.0.0.22")  # ""/"local"=本地
+# ⛔ 公开仓库里不写任何站点地址: 默认空 = 不做这项采集。要用就在部署侧给
+#    TRAIN_METRICS_HOST(systemd Environment= 或 .env), 值形如 user@host, "local"=本机。
+TRAIN_HOST   = os.environ.get("TRAIN_METRICS_HOST", "")
 TRAIN_JSON   = os.environ.get("TRAIN_METRICS_JSON", "/home/user/m3-spec-out/train_metrics.json")
 TRAIN_PROM   = os.environ.get("TRAIN_METRICS_PROM", "/home/user/m3-spec-out/train_metrics.prom")
 TRAIN_TFEVENTS_GLOB = os.environ.get("TRAIN_TFEVENTS_GLOB",
@@ -1605,46 +1609,14 @@ async def _ha_env() -> dict:
 # id 推导，绝不因此漏显或标错状态。
 _ALIAS_ROUTES = {"default", "code", "agent", "long", "vision", "fast",
                  "reason", "reasoning", "embed", "embedding", "rerank", "vl"}
-MODEL_META = {
-    "qwen3-coder-next": {"display": "Qwen3-Coder-Next", "vendor": "Alibaba",
-        "kind": "chat", "tags": ["coding"]},
-    "deepseek-v4-flash": {"display": "DeepSeek-V4-Flash", "vendor": "DeepSeek",
-        "kind": "chat", "tags": ["reasoning"]},
-    "deepseek-v4-flash-pp4": {"display": "DeepSeek-V4-Flash · PP4",
-        "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "test"]},
-    # 下面三条与 deepseek-v4-flash 是【同一个引擎实例】(head 节点, TP=4 会漂移,
-    # 2026-08-06 在 .188:8000) 的四个入口,
-    # 差别只在网关 hook 注入的 thinking/effort 档位, 不是四个部署。
-    # 不登记的话 _meta_for 会 .title() 推导成 "Deepseek V4 Flash Think Low",
-    # 面板上看起来像"当前部署的是 Think Low 档" —— 2026-08-04 已造成一次误判。
-    "deepseek-v4-flash-think-low": {"display": "DeepSeek-V4-Flash \u00b7 Think 低档(同一实例)",
-        "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "think"]},
-    "deepseek-v4-flash-think": {"display": "DeepSeek-V4-Flash \u00b7 Think 标准档(同一实例)",
-        "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "think"]},
-    "deepseek-v4-flash-think-max": {"display": "DeepSeek-V4-Flash \u00b7 Think 极限档(同一实例)",
-        "vendor": "DeepSeek", "kind": "chat", "tags": ["reasoning", "think"]},
-    # GLM: high/low/max 三个网关路由指向【同一个 vLLM 实例】
-    # (2026-09-08 实测 10.0.0.23:8000, 网关 alias 串同时挂
-    # agent/code/default/long), 差别只在 hook 注入的 think 档位。
-    # ⛔ 主名恒为 -think-high 是 _primary() "取最长路由" 的副产物, 不是"当前
-    # 部署了 High 档": 后端 served-name 是不带档位的 glm-5.3-flash, 精确匹配落
-    # 空后走前缀容错, 而 -high(24 字符) 比 -low/-max(23) 长一位。所以主名这条
-    # display 【不许写档位】, 否则就是 2026-08-04 DeepSeek 那次误判的复刻。
-    "glm-5.3-flash-think-high": {"display": "GLM-5.3-Flash",
-        "vendor": "Zhipu", "kind": "chat", "tags": ["reasoning", "think"]},
-    # 下面两条正常只作为 alias 出现; 一旦哪天被选成主名, 也不会被 .title()
-    # 推导成看起来像独立部署的 "Glm 5.3 Flash Think Low"。
-    "glm-5.3-flash-think-low": {"display": "GLM-5.3-Flash · Think 低档",
-        "vendor": "Zhipu", "kind": "chat", "tags": ["reasoning", "think"]},
-    "glm-5.3-flash-think-max": {"display": "GLM-5.3-Flash · Think 极限档",
-        "vendor": "Zhipu", "kind": "chat", "tags": ["reasoning", "think"]},
-    "minimax-m2.7": {"display": "MiniMax-M2.7", "vendor": "MiniMax",
-        "kind": "chat", "tags": ["reasoning"]},
-    "gemma-4-31b-abliterated": {"display": "Gemma-4-31B-abliterated",
-        "vendor": "Google", "kind": "vision", "tags": ["vision", "abliterated"]},
-    "qwen3-vl-abliterated": {"display": "Qwen3-VL-8B-abliterated",
-        "vendor": "Alibaba", "kind": "vision", "tags": ["vision", "abliterated"]},
-}
+# ⛔ 开源项目【不内置任何用户部署的模型清单】。模型身份一律来自后端自报的
+#    served model name(/v1/models 的 data[0].id), 自动感知, 不需要改代码。
+#    这里默认是空表 —— 只有运维想给某个名字换个显示写法时, 才在【本地】
+#    config/hearth.yaml 的 model_meta 里写(该文件 gitignore, 不进仓库),
+#    键可以是网关路由名或后端自报名, 可选字段: display / variant / vendor /
+#    kind / tags。认不出的名字【原样显示】, 不猜、不截断、不 title 化。
+#    (2026-09-23: 此前这里写死了本站点的模型名, 既是设计错误也是隐私泄漏。)
+MODEL_META: dict = {}
 
 # 配置覆盖/追加: hearth.yaml 的 model_meta 合并进来, 运维改配置就能改显示名,
 # 不必改代码(此前那份配置只被效率口径读, 显示名还在代码里, 两处容易走散)。
@@ -1680,10 +1652,47 @@ def _meta_for(route: str) -> dict:
               else "MiniMax" if "minimax" in low else "Google" if "gemma" in low
               else "Zhipu" if "glm" in low
               else "Meta" if "llama" in low else "—")
-    return {"display": route.replace("_", " ").replace("-", " ").title(),
-            "vendor": vendor,
+    # ⛔ 原样返回自报名: 以前这里 .title() 成 "Dgx Spark Auto" / "Deepseek V4 Flash",
+    #    那是【改写】而不是显示, 大小写和点号都被吃掉(V4.1 → V4 1)。
+    #    vendor/kind 只是按公开模型家族关键字做的【启发式猜测】, 猜不出就是 "—"。
+    return {"display": route, "vendor": vendor,
             "kind": "vision" if ("vl" in low or "vision" in low) else "chat",
             "tags": []}
+
+
+# 量化与变体记号的【通用】词表 —— 都是公开的量化方案/模型后缀写法, 与"谁部署了
+# 什么"无关。只用于把【结尾】的这类记号挪到次级位置显示, 主名本身一个字符不改。
+# 量化与变体记号的【通用】词表 —— 都是公开的量化方案/模型后缀写法, 与"谁部署了
+# 什么"无关。只用于把【结尾】的这类记号挪到次级位置显示, 主名本身一个字符不改。
+_TAIL_TOKEN = (r"fp4|fp8|fp16|bf16|int2|int3|int4|int8|nf4|awq|gptq|gguf|ggml|exl[23]"
+               r"|mxfp4|nvfp4|optiq|w4a16|w8a8|\d+bit|q\d+(?:[_-][0-9a-z]+)*"
+               r"|instruct|chat|base|it|vision|vl|thinking|think|reasoning|reason"
+               r"|distill(?:ed)?|abliterated|uncensored|heretic|preview|turbo|mini|lite"
+               r"|coder|math|embed(?:ding)?|rerank|moe")
+_TAIL_RE = re.compile(r"[-_](" + _TAIL_TOKEN + r")$", re.I)
+
+
+def _split_model_name(raw: str) -> tuple:
+    """(主名, 次级尾巴)。纯字符串处理, 不含任何模型知识。
+
+    ⛔ 只把【结尾连续】的量化/变体记号摘到尾巴上(heretic-vision、Instruct-OptiQ-4bit),
+       主名部分是【原串的前缀】, 一个字符不改 —— 大小写、点号、下划线都保留
+       (Q4_K_M 不会被写成 Q4-K-M)。认不出就整串当主名。
+    ⛔ 绝不猜写法: "deepseek-v41-flash" 不会被猜成 "DeepSeek V4.1 Flash";
+       想那样显示就在本地 config 的 model_meta 里写 display。
+    ⛔ 尾巴不是可丢信息: 它说明"实际加载的是哪份权重", 界面用次级灰显示, 不能省。"""
+    name = (raw or "").strip()
+    if not name:
+        return ("", "")
+    main = name.rsplit("/", 1)[-1]          # HuggingFace 风格 org/model
+    tail = []
+    while True:
+        m = _TAIL_RE.search(main)
+        if not m or m.start() == 0:         # 整串都是记号时不再拆
+            break
+        tail.insert(0, m.group(1))
+        main = main[:m.start()]
+    return (main, " · ".join(tail))
 
 
 async def _gw_get(path: str, timeout: float):
