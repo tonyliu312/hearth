@@ -1,13 +1,14 @@
 """Hearth screenshot capture — Playwright + Firefox.
 
 Loads the locally-running monitor (http://127.0.0.1/), injects DOM
-substitutions to replace private identifiers (real IPs, real host
-names, "Tony's" branding) with generic Hearth-flavored placeholders,
+substitutions to replace private identifiers (real IPs, host names,
+personal branding) with generic placeholders. The real mapping lives
+outside the repo (see load_substitutions below),
 then captures desktop + mobile screenshots for the README.
 
 This script is committed for reproducibility (anyone with Playwright
-installed can re-run it).  Edit the SUBSTITUTIONS dict if you want
-different generic names.
+installed can re-run it).  Put your own mapping in _local/redactions.json
+(or point HEARTH_REDACTIONS at one).
 
 Run:
     /tmp/hearth-shot-venv/bin/python docs/screenshots/_capture.py
@@ -20,54 +21,40 @@ URL = "http://127.0.0.1/"
 OUT = pathlib.Path(__file__).parent
 
 # Privacy redaction: real → generic (case-sensitive whole-substring match)
-SUBSTITUTIONS = {
-    "10.0.0.10":  "10.0.0.1",
-    "10.0.0.21": "10.0.0.2",
-    "10.0.0.22": "10.0.0.3",
-    "10.0.0.23": "10.0.0.4",
-    "10.0.0.24": "10.0.0.5",
-    "Atlas":         "Workstation",
-    "Spark-01":      "Inference-1",
-    "Spark-02":      "Inference-2",
-    "Spark-03":      "Inference-3",
-    "Spark-04":      "Inference-4",
-    "spark-01":      "inference-1",
-    "spark-02":      "inference-2",
-    "spark-03":      "inference-3",
-    "spark-04":      "inference-4",
-    "spark-a":    "infer-host-1",
-    "spark-b":    "infer-host-2",
-    "spark-c":    "infer-host-3",
-    "spark-d":    "infer-host-4",
-    "gpu-host":    "workstation-host",
-    "Hearth · Home AI Compute Monitor": "Hearth · Home AI Compute Monitor",
-    "Hearth · Home AI Compute Monitor": "Hearth · Home AI Compute Monitor",
-    "Hearth":          "Hearth",
-    "Hearth":             "Hearth",
-    "Home AI Compute Center · Monitor": "Home AI Compute Monitor",
-    "DeepSeek-V4-Flash":            "Llama-Inferno-70B",   # placeholder model names
-    "deepseek-v4-flash":            "llama-inferno-70b",
-    "Qwen3-Coder-Next":             "Qwen-Coder-32B",
-    "qwen3-coder-next":             "qwen-coder-32b",
-    "MiniMax-M2.7":                 "Yi-Reasoner-34B",
-    "Gemma-4-31B-abliterated":      "Gemma-3-27B",
-    "gemma-4-31b-abliterated":      "gemma-3-27b",
-    "Qwen3-VL-8B-abliterated":      "Qwen-VL-7B",
-    # Subnet / IP-range notation
-    "10.0.0.0/24":               "10.0.0.0/24",
-    "192.168.1.":                    "10.0.0.",                # safety net
-    # Hero descriptor phrase (private topology details)
-    "A unified telemetry surface for the home AI fabric — RTX 4090 edge + four DGX Spark inference nodes, served behind a single LiteLLM gateway. Every TFLOP, every token, every watt — in real time.":
-        "A unified telemetry surface for your home AI compute cluster — auto-discovers models, surfaces real metrics from vLLM / llama.cpp / LiteLLM, honestly labels what backends don't expose. Every token, every watt — in real time.",
-    "RTX 4090 edge + four DGX Spark inference nodes": "mixed GPU cluster, one gateway",
-    "served behind a single LiteLLM gateway":          "behind a LiteLLM gateway",
-    # Section headlines / descriptions that leak topology specifics
-    "Five machines. ":                                 "Your fleet. ",
-    "Atlas — the RTX 4090 host — runs the LiteLLM gateway and edge-class workloads. Four DGX Spark boxes carry the heavy inference. Click a node for the full forensic view.":
-        "Each host runs the LiteLLM gateway, an inference engine, or both. Click a node for the full forensic view.",
-    "DGX Spark":                                       "GPU Node",
-    "DGX SPARK":                                       "GPU NODE",
+# ── 隐私脱敏表 ────────────────────────────────────────────────────────
+# ⛔ 真值【不进仓库】: 这里只留一份格式示例。真实映射放本地文件, 默认
+#    <repo>/_local/redactions.json(该目录 gitignore), 也可用环境变量
+#    HEARTH_REDACTIONS=<path> 指定别的位置。
+#    没有该文件时按下面的示例跑 —— 截图里就不会被替换, 请自行补表再发布。
+# 格式: {"要替换的真值": "公开用的占位符"}, 大小写敏感的整子串匹配。
+EXAMPLE_SUBSTITUTIONS = {
+    "10.0.0.10":            "10.0.0.1",          # 真实 IP → 文档用网段
+    "my-gpu-host":          "workstation-host",  # 真实主机名 → 通用名
+    "My Home AI Center":    "Hearth",            # 个人化标题 → 项目名
+    "Some-Private-Model":   "Llama-Inferno-70B", # 未公开的模型名 → 占位模型名
 }
+
+
+def load_substitutions() -> dict:
+    """真实脱敏表: 环境变量 > _local/redactions.json > 内置示例。"""
+    import json as _json, os as _os
+    cand = _os.environ.get("HEARTH_REDACTIONS", "")
+    paths = [pathlib.Path(cand)] if cand else []
+    paths.append(pathlib.Path(__file__).resolve().parents[2] / "_local" / "redactions.json")
+    for f in paths:
+        try:
+            if f.is_file():
+                m = _json.loads(f.read_text())
+                if isinstance(m, dict) and m:
+                    print(f"[capture] 脱敏表: {f} ({len(m)} 条)")
+                    return m
+        except Exception as e:
+            print(f"[capture] 读不出脱敏表 {f}: {e}")
+    print("[capture] 未找到本地脱敏表, 使用内置示例 —— 截图可能仍含真实标识, 发布前请检查")
+    return dict(EXAMPLE_SUBSTITUTIONS)
+
+
+SUBSTITUTIONS = load_substitutions()
 
 # CSS that disables the scroll-reveal so full-page screenshots show all sections.
 DISABLE_REVEAL = """
