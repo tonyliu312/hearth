@@ -1739,6 +1739,29 @@ _DISCO_TASK = None
 _DIRECT_SKIPPED: dict[str, str] = {}
 
 
+def _is_local_base(base: str) -> bool:
+    """这个 base 是不是【本地可观测的自托管引擎】。
+
+    ⛔ 判据很重要, 不只是显示问题: 外部托管的 API(api.kimi.com 这类)既不会有
+       /metrics, 也不该被我们每个发现周期探 7 次 —— 那是往第三方发无谓跨公网请求
+       (2026-09-25 实测: 对 api.kimi.com 的 /metrics、/api/status、/health、
+        /v1/models 全是 404, 每个约 1 秒)。
+    本地 = 回环 / 私网(10/172.16-31/192.168/169.254) / .local mDNS / 无点主机名。
+    其余一律当外部托管。"""
+    h = _host_of(base)
+    if not h:
+        return False
+    if h in ("localhost", "::1") or h.startswith("127."):
+        return True
+    if h.endswith(".local") or "." not in h:      # mDNS 或裸主机名
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(h).is_private
+    except ValueError:
+        return False                              # 公网域名
+
+
 async def _classify_base(b: str) -> str:
     """探一个 base 是哪种引擎 → vllm/llamacpp/sglang/omlx/ds4/q27/exl3/none。
 
@@ -1788,7 +1811,9 @@ async def _discover() -> list[dict]:
         for b in bs:
             base_routes.setdefault(b, set()).add(rt)
     # 后端自报的 served-model-name 是"实际加载了什么"的真相,优先于网关别名
-    served = {b: await _served_name(b) for b in base_routes}
+    # ⛔ 外部托管的 base 不探: 它没有 /v1/models 给我们看(要对方的 key), 探了只是
+    #    白发跨公网请求。身份就用网关路由名。
+    served = {b: (await _served_name(b) if _is_local_base(b) else "") for b in base_routes}
 
     def _primary(routes: set, sv: str) -> tuple[str, bool, list]:
         # 返回 (主名, 身份是否已核实, 歧义候选)。
@@ -1832,7 +1857,7 @@ async def _discover() -> list[dict]:
             "tags": list(meta["tags"]), "params": "—", "quant": "—",
             "framework": "—", "vram": 0, "ctx": 0,
             "identityUnverified": False, "identityCandidates": [],
-            "servedName": "",
+            "servedName": "", "hosted": False, "hostedHost": "",
             "_nodes": set(), "_aliases": set(), "_bases": [], "_api_nodes": set(),
             "up": False, "vllm_bases": [], "llamacpp_bases": [], "sglang_bases": [],
             "omlx_bases": [], "ds4_bases": [], "q27_bases": [], "exl3_bases": []})
@@ -1849,7 +1874,8 @@ async def _discover() -> list[dict]:
             _h = _host_of(b)
             if _h in IP_TO_ID:
                 mm["_api_nodes"].add(IP_TO_ID[_h])
-        if not verified:
+        if not verified and _is_local_base(b):
+            # 外部托管本来就拿不到 served-name, 标"未核实"会被读成"可能显错了"
             mm["identityUnverified"] = True
             mm["identityCandidates"] = sorted(set(mm["identityCandidates"]) | set(cands))
         mm["_bases"].append(b)
@@ -1890,6 +1916,17 @@ async def _discover() -> list[dict]:
                    "ds4": "ds4_bases", "q27": "q27_bases", "exl3": "exl3_bases"}
     for mm in models.values():
         for b in mm["_bases"]:
+            if not _is_local_base(b):
+                # 第三方托管 API: 不做任何引擎探测, 如实标成 hosted。
+                # 引擎级指标(tps/KV/延迟分位数)【不可得】—— 不是坏了, 是这类后端
+                # 本来就不暴露; 网关侧的请求数/token/延迟仍然有(LiteLLM spend log)。
+                # 逃生门: 自托管引擎挂在公网域名后面(llm.example.com)时, 在配置的
+                # direct_engines 里显式声明那个地址 —— 那条路径不走这个判据, 照常探测。
+                mm["hosted"] = True
+                mm["hostedHost"] = _host_of(b)
+                if up_map.get(b):
+                    mm["up"] = True
+                continue
             kind = await _classify_base(b)
             if kind != "none":
                 mm[_KIND_BASES[kind]].append(b); mm["up"] = True
@@ -1923,6 +1960,8 @@ async def _discover() -> list[dict]:
         elif mm["exl3_bases"]:
             mm["framework"] = "EXL3"
             mm["ctx"] = await _ctx_of(mm["exl3_bases"][0])
+        elif mm.get("hosted"):
+            mm["framework"] = "Hosted API"
         if mm["_aliases"]:
             mm["tags"] = mm["tags"] + ["alias:" + ",".join(sorted(mm["_aliases"]))]
         mm["nodes"] = sorted(mm.pop("_nodes"))
@@ -3594,7 +3633,7 @@ async def models_list():
         base_keys = ("id", "display", "vendor", "kind", "params", "quant",
                      "ctx", "framework", "nodes", "vram", "route", "tags",
                      "identityUnverified", "identityCandidates", "source",
-                     "servedName", "apiNodes")
+                     "servedName", "apiNodes", "hosted", "hostedHost")
         card = {k: m.get(k) for k in base_keys}
         if vb:                                  # 真实 vLLM 指标（可能多副本汇总）
             a = _merge_scrape([s1.get(b) or {} for b in vb])
@@ -4022,6 +4061,13 @@ async def models_list():
                     "metrics": "exl3", "resident": True,
                     "tpsSource": "window", "tpsWindowSec": _w}
             _put_prefill_rt(live, m["id"], b.get("exl3:prompt_tokens_total"), _t_now)
+        elif m.get("hosted"):                   # 第三方托管 API(云端)
+            # ⛔ 引擎指标【不可得】而不是【没测到】: 这类后端不暴露 /metrics,
+            #    也不该被我们探。面板要写明是托管服务, 否则看起来像"本地模型坏了"。
+            #    网关侧的请求数/token/延迟仍在 Telemetry 的请求流里。
+            state = "online" if m.get("up") else "online"
+            live = {"metrics": "hosted", "resident": False,
+                    "hostedHost": m.get("hostedHost") or ""}
         elif m.get("up"):                       # 网关健康但无可识别 /metrics
             state = "online"                    # 在线·服务中，无详细指标（不伪造）
             live = {"metrics": "none", "resident": True}
@@ -4865,10 +4911,17 @@ async def selftest():
         mlabel = f"model:{m.get('servedName') or m.get('display') or m['id']}"
         kinds = [k for k in ("vllm_bases", "llamacpp_bases", "sglang_bases", "omlx_bases",
                              "ds4_bases", "q27_bases", "exl3_bases") if m.get(k)]
-        out.append(_chk(u, "engine_metrics", "pass" if kinds else ("fail" if m.get("up") else "skipped"),
-                        f"framework={m.get('framework')} · 识别到的端点组={kinds or '无'}",
-                        "" if kinds else ("在线但没有任何已知引擎指标口径: 确认引擎类型与 /metrics 路径"
-                                          if m.get("up") else "模型未拉起 → 指标缺席属预期")))
+        if m.get("hosted"):
+            out.append(_chk(u, "engine_metrics", "skipped",
+                            f"第三方托管 API({m.get('hostedHost')}) · 引擎指标不可得",
+                            "这类后端不暴露 /metrics, 也不该去探; 网关侧的请求数/token/延迟仍有",
+                            label=mlabel))
+        else:
+            out.append(_chk(u, "engine_metrics", "pass" if kinds else ("fail" if m.get("up") else "skipped"),
+                            f"framework={m.get('framework')} · 识别到的端点组={kinds or '无'}",
+                            "" if kinds else ("在线但没有任何已知引擎指标口径: 确认引擎类型与 /metrics 路径"
+                                              if m.get("up") else "模型未拉起 → 指标缺席属预期"),
+                            label=mlabel))
         if m.get("source") == "direct":
             out.append(_chk(u, "gateway_route", "skipped", "直探条目, 没挂网关 → 无路由",
                             "要走网关就在 LiteLLM 里加一条 model 配置"))

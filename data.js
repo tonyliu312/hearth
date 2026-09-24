@@ -504,6 +504,7 @@
         e.identityUnverified = !!m.identityUnverified;
         e.identityCandidates = Array.isArray(m.identityCandidates) ? m.identityCandidates : [];
         e.metricsSource = lv.metrics || "none";
+        e.hostedHost = lv.hostedHost || m.hostedHost || null;   // 第三方托管 API 的域名
         if (lv.p50 !== undefined) {
           e.p50 = Math.round(lv.p50);
           e.p95 = Math.round(lv.p95);

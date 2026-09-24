@@ -63,6 +63,18 @@
       "this backend exposes no realtime prefill counter": "该后端没有实时预填计数器, 无源",
       "Prefill · now": "预填 · 实时", "Prefill · lifetime avg": "预填 · 累计平均",
       "tok/s · decode · load": "tok/s · 解码 · 负载", "engine": "引擎",
+      "hosted API": "托管 API", "third-party hosted API": "第三方托管 API",
+      "third-party hosted API · engine metrics are not obtainable": "第三方托管 API · 引擎指标不可得",
+      "Engine-side metrics (tok/s, KV, TTFT/TPOT, prefix cache) are not obtainable: hosted endpoints expose no /metrics, and Hearth does not probe them.":
+        "引擎侧指标(tok/s、KV、TTFT/TPOT、前缀缓存)不可得: 这类托管端点不暴露 /metrics, Hearth 也不会去探它。",
+      "What is still measured: gateway-side requests, tokens and latency — see the request stream in Telemetry.":
+        "仍然量得到的是网关侧的请求数、token 与延迟 —— 见遥测页的请求流。",
+      "hosted API": "託管 API", "third-party hosted API": "第三方託管 API",
+      "third-party hosted API · engine metrics are not obtainable": "第三方託管 API · 引擎指標不可得",
+      "Engine-side metrics (tok/s, KV, TTFT/TPOT, prefix cache) are not obtainable: hosted endpoints expose no /metrics, and Hearth does not probe them.":
+        "引擎側指標(tok/s、KV、TTFT/TPOT、前綴快取)不可得: 這類託管端點不暴露 /metrics, Hearth 也不會去探它。",
+      "What is still measured: gateway-side requests, tokens and latency — see the request stream in Telemetry.":
+        "仍然量得到的是網關側的請求數、token 與延遲 —— 見遙測頁的請求流。",
       "Engine speed": "引擎速度", "per busy second": "每忙碌秒",
       "per req": "單請求", "per request · busy seconds": "單請求 · 按忙碌秒計",
       "one request stream's decode speed; the more concurrent streams, the higher LOAD sits above it":

@@ -1017,6 +1017,13 @@ function ModelsSection() {
                       )}
                     </div>
                   </>
+                ) : m.metricsSource === "hosted" ? (
+                  /* 第三方托管 API: 引擎指标【不可得】, 不是【没测到】。
+                     不显示 0 —— 0 会被读成"吞吐为零"。网关侧的请求与延迟仍在遥测页。 */
+                  <div style={{ fontFamily: "var(--mono)", color: "var(--ink-4)", fontSize: 11 }}
+                       title={t("third-party hosted API · engine metrics are not obtainable")}>
+                    {t("hosted API")}<br />· {m.hostedHost || m.framework} ·
+                  </div>
                 ) : <div style={{ fontFamily: "var(--mono)", color: "var(--ink-4)", fontSize: 11 }}>{t("no live metrics source")}<br />· {m.framework} ·</div>}
               </div>
               <div className="num" style={{ fontSize: 12, color: "var(--ink-2)" }}>
@@ -1106,6 +1113,18 @@ function GatewayStat({ label, value, sub }) {
 function MetricBars({ model, ms }) {
   const { t } = useLang();
   const src = model.metricsSource;
+  if (src === "hosted") {
+    // 托管 API 没有引擎侧指标: 明说为什么, 并指路还能看什么, 不摆一排 0。
+    return (
+      <div style={{ fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.7 }}>
+        <div style={{ color: "var(--ink-2)" }}>
+          {t("third-party hosted API")}{model.hostedHost ? " · " + model.hostedHost : ""}
+        </div>
+        <div>{t("Engine-side metrics (tok/s, KV, TTFT/TPOT, prefix cache) are not obtainable: hosted endpoints expose no /metrics, and Hearth does not probe them.")}</div>
+        <div>{t("What is still measured: gateway-side requests, tokens and latency — see the request stream in Telemetry.")}</div>
+      </div>
+    );
+  }
   if (src === "vllm" || src === "sglang") {
     return (
       <>
